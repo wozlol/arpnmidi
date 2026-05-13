@@ -108,14 +108,24 @@ constexpr uint8_t ENCODER_COUNTS_PER_DETENT = 4;
 
 constexpr uint8_t MAX_HELD_NOTES = 32;
 constexpr uint8_t MAX_ARP_OUTPUT_NOTES = 8;
-constexpr uint16_t MAX_LOOP_EVENTS = 256;
+constexpr uint16_t MAX_LOOP_EVENTS = 512;
 constexpr uint8_t PRESET_COUNT = 16;
 constexpr uint8_t DIV_NOTE_SLOT_COUNT = 9;
 constexpr uint8_t DIV_NOTE_PLUS_SLOT = DIV_NOTE_SLOT_COUNT;
 constexpr uint8_t DIV_NOTE_RESET_SLOT = DIV_NOTE_SLOT_COUNT + 1;
-constexpr uint8_t MAP_CC_CLEAR_SLOT = 16;
-constexpr uint8_t MAP_CC_CHMODE_SLOT = 17;
-constexpr uint8_t MAP_CC_SLOT_COUNT = 18;
+constexpr uint8_t DIV_NOTE_BACK_SLOT = DIV_NOTE_SLOT_COUNT + 2;
+constexpr uint8_t RND_RBN_CH10_TO_1_SLOT = 16;
+constexpr uint8_t RND_RBN_CH10_TO_2_SLOT = 17;
+constexpr uint8_t RND_RBN_CLEAR_SLOT = 18;
+constexpr uint8_t RND_RBN_BACK_SLOT = 19;
+constexpr uint8_t ROUTER_CLEAR_SLOT = 16;
+constexpr uint8_t ROUTER_BACK_SLOT = 17;
+constexpr int8_t ROUTER_TRANSPOSE_MIN = -24;
+constexpr int8_t ROUTER_TRANSPOSE_MAX = 24;
+constexpr uint8_t MAPCC_PARAM_COUNT_V5 = 16;
+constexpr uint8_t MAP_CC_CHANNEL_ALL_BIT = 0x01;
+constexpr uint8_t MAP_CC_RR_CH10_TO_1_BIT = 0x02;
+constexpr uint8_t MAP_CC_RR_CH10_TO_2_BIT = 0x04;
 constexpr uint32_t MAP_CC_UI_SETTLE_MS = 260UL;
 constexpr uint32_t MAP_CC_DEFER_COMMIT_MS = 500UL;
 constexpr uint8_t MAX_USB_MIDI_DEVICES = 8;
@@ -135,9 +145,13 @@ constexpr uint16_t EEPROM_MAGIC_V1 = 0x4D43;
 constexpr uint16_t EEPROM_MAGIC_V2 = 0x4D44;
 constexpr uint16_t EEPROM_MAGIC_V3 = 0x4D45;
 constexpr uint16_t EEPROM_MAGIC_V4 = 0x4D46;
-constexpr uint16_t EEPROM_MAGIC = 0x4D47;
-constexpr uint16_t LOOP_EEPROM_MAGIC = 0x4C31;
-constexpr size_t EEPROM_BYTES = 4096;
+constexpr uint16_t EEPROM_MAGIC_V5 = 0x4D47;
+constexpr uint16_t EEPROM_MAGIC_V6 = 0x4D48;
+constexpr uint16_t EEPROM_MAGIC_V7 = 0x4D49;
+constexpr uint16_t EEPROM_MAGIC_V8 = 0x4D4A;
+constexpr uint16_t EEPROM_MAGIC = 0x4D4D;
+constexpr uint16_t LOOP_EEPROM_MAGIC = 0x4C32;
+constexpr size_t EEPROM_BYTES = 8192;
 constexpr uint8_t ARP_CH_1_PLUS_10 = 17;
 constexpr uint8_t ARP_CH_1_PLUS_10_AFTERTOUCH = 18;
 constexpr uint8_t ARP_CH_1_TO_10_SPLIT_24 = 19;
@@ -170,7 +184,10 @@ void tickLooper();
 void clearSavedLoopStorage();
 void saveLoopStorageIfAny();
 void loadSavedLoopStorage();
+bool insertLoopEvent(uint32_t atMs, uint8_t channel1, uint8_t note, uint8_t velocity, bool on);
+bool insertLoopEventLimited(uint32_t atMs, uint8_t channel1, uint8_t note, uint8_t velocity, bool on, uint32_t limitMs);
 void noteThrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on);
+void noteArpOffPassthrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on);
 void thruOutputRefOn(uint8_t sourcePort, uint8_t outNote, uint8_t velocity);
 void thruOutputRefOff(uint8_t sourcePort, uint8_t outNote);
 void updateBassVoice();
@@ -178,6 +195,12 @@ void updateBassVoice();
 enum MenuMode : uint8_t {
   MENU_SELECT = 0,
   MENU_EDIT = 1
+};
+
+enum RouterEditStage : uint8_t {
+  ROUTER_STAGE_LIST = 0,
+  ROUTER_STAGE_DEST,
+  ROUTER_STAGE_TRANSPOSE
 };
 
 enum SettingId : uint8_t {
@@ -192,6 +215,7 @@ enum SettingId : uint8_t {
   SET_BASS_CH,
   SET_THRU_OUT_CH,
   SET_RND_RBN,
+  SET_ROUTER,
   SET_DIV_NOTES,
   SET_MAP_CC,
   SET_CC_OUT_CH,
@@ -230,9 +254,14 @@ enum MapCcParamId : uint8_t {
   MAPCC_PSMD,
   MAPCC_KEY,
   MAPCC_SCL,
+  MAPCC_LOOP,
   MAPCC_LOAD,
   MAPCC_PARAM_COUNT
 };
+
+constexpr uint8_t MAP_CC_CLEAR_SLOT = MAPCC_PARAM_COUNT;
+constexpr uint8_t MAP_CC_CHMODE_SLOT = MAPCC_PARAM_COUNT + 1;
+constexpr uint8_t MAP_CC_SLOT_COUNT = MAPCC_PARAM_COUNT + 2;
 
 enum UsbHostModeId : uint8_t {
   USB_HOST_OFF = 0,
@@ -397,6 +426,121 @@ struct Settings {
   uint8_t arpOutChannel;
   uint8_t bassMode;
   uint8_t thruOutChannel;
+  uint16_t roundRobinMask;
+  uint16_t routerActiveMask;
+  uint8_t routerOutChannels[16];
+  int8_t routerTranspose[16];
+  uint8_t ccOutChannel;
+  uint8_t remoteChannel;
+  uint8_t sensorChannel;
+  uint8_t sensorMode;
+  uint8_t forceKey;
+  uint8_t forceScale;
+  uint8_t instrumentView;
+  uint8_t remote1Action;
+  uint8_t remote2Action;
+  uint8_t loadPreset;
+  uint8_t savePreset;
+  uint8_t usbHostMode;
+  uint8_t screenSaver;
+  uint8_t divNoteChannels[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNoteNotes[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNotePlusNote;
+  uint8_t pushMode;
+  uint8_t loopBars;
+  uint8_t loopAutoOverdub;
+  uint8_t legatoChannel;
+  uint8_t mapCcChannels[MAPCC_PARAM_COUNT];
+  uint8_t mapCcNumbers[MAPCC_PARAM_COUNT];
+  uint8_t mapCcChannelMode;
+};
+
+struct SettingsV8 {
+  uint16_t manualBpm;
+  uint8_t arpMode;
+  uint8_t division;
+  uint8_t arpVelocity;
+  uint8_t arpLengthPct;
+  uint8_t pattern;
+  uint8_t inputChannel;
+  uint8_t arpOutChannel;
+  uint8_t bassMode;
+  uint8_t thruOutChannel;
+  uint16_t roundRobinMask;
+  uint8_t roundRobinCh10To1;
+  uint8_t ccOutChannel;
+  uint8_t remoteChannel;
+  uint8_t sensorChannel;
+  uint8_t sensorMode;
+  uint8_t forceKey;
+  uint8_t forceScale;
+  uint8_t instrumentView;
+  uint8_t remote1Action;
+  uint8_t remote2Action;
+  uint8_t loadPreset;
+  uint8_t savePreset;
+  uint8_t usbHostMode;
+  uint8_t screenSaver;
+  uint8_t divNoteChannels[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNoteNotes[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNotePlusNote;
+  uint8_t pushMode;
+  uint8_t loopBars;
+  uint8_t loopAutoOverdub;
+  uint8_t legatoChannel;
+  uint8_t mapCcChannels[MAPCC_PARAM_COUNT];
+  uint8_t mapCcNumbers[MAPCC_PARAM_COUNT];
+  uint8_t mapCcChannelMode;
+};
+
+struct SettingsV7 {
+  uint16_t manualBpm;
+  uint8_t arpMode;
+  uint8_t division;
+  uint8_t arpVelocity;
+  uint8_t arpLengthPct;
+  uint8_t pattern;
+  uint8_t inputChannel;
+  uint8_t arpOutChannel;
+  uint8_t bassMode;
+  uint8_t thruOutChannel;
+  uint16_t roundRobinMask;
+  uint8_t ccOutChannel;
+  uint8_t remoteChannel;
+  uint8_t sensorChannel;
+  uint8_t sensorMode;
+  uint8_t forceKey;
+  uint8_t forceScale;
+  uint8_t instrumentView;
+  uint8_t remote1Action;
+  uint8_t remote2Action;
+  uint8_t loadPreset;
+  uint8_t savePreset;
+  uint8_t usbHostMode;
+  uint8_t screenSaver;
+  uint8_t divNoteChannels[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNoteNotes[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNotePlusNote;
+  uint8_t pushMode;
+  uint8_t loopBars;
+  uint8_t loopAutoOverdub;
+  uint8_t legatoChannel;
+  uint8_t mapCcChannels[MAPCC_PARAM_COUNT];
+  uint8_t mapCcNumbers[MAPCC_PARAM_COUNT];
+  uint8_t mapCcChannelMode;
+};
+
+struct SettingsV5 {
+  uint16_t manualBpm;
+  uint8_t arpMode;
+  uint8_t division;
+  uint8_t arpVelocity;
+  uint8_t arpLengthPct;
+  uint8_t pattern;
+  uint8_t inputChannel;
+  uint8_t arpOutChannel;
+  uint8_t bassMode;
+  uint8_t thruOutChannel;
   uint8_t roundRobinRange;
   uint8_t ccOutChannel;
   uint8_t remoteChannel;
@@ -417,8 +561,45 @@ struct Settings {
   uint8_t pushMode;
   uint8_t loopBars;
   uint8_t legatoChannel;
-  uint8_t mapCcChannels[MAPCC_PARAM_COUNT];
-  uint8_t mapCcNumbers[MAPCC_PARAM_COUNT];
+  uint8_t mapCcChannels[MAPCC_PARAM_COUNT_V5];
+  uint8_t mapCcNumbers[MAPCC_PARAM_COUNT_V5];
+  uint8_t mapCcChannelMode;
+};
+
+struct SettingsV6 {
+  uint16_t manualBpm;
+  uint8_t arpMode;
+  uint8_t division;
+  uint8_t arpVelocity;
+  uint8_t arpLengthPct;
+  uint8_t pattern;
+  uint8_t inputChannel;
+  uint8_t arpOutChannel;
+  uint8_t bassMode;
+  uint8_t thruOutChannel;
+  uint16_t roundRobinMask;
+  uint8_t ccOutChannel;
+  uint8_t remoteChannel;
+  uint8_t sensorChannel;
+  uint8_t sensorMode;
+  uint8_t forceKey;
+  uint8_t forceScale;
+  uint8_t instrumentView;
+  uint8_t remote1Action;
+  uint8_t remote2Action;
+  uint8_t loadPreset;
+  uint8_t savePreset;
+  uint8_t usbHostMode;
+  uint8_t screenSaver;
+  uint8_t divNoteChannels[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNoteNotes[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNotePlusNote;
+  uint8_t pushMode;
+  uint8_t loopBars;
+  uint8_t loopAutoOverdub;
+  uint8_t legatoChannel;
+  uint8_t mapCcChannels[MAPCC_PARAM_COUNT_V5];
+  uint8_t mapCcNumbers[MAPCC_PARAM_COUNT_V5];
   uint8_t mapCcChannelMode;
 };
 
@@ -451,8 +632,8 @@ struct SettingsV4 {
   uint8_t divNotePlusNote;
   uint8_t pushMode;
   uint8_t legatoChannel;
-  uint8_t mapCcChannels[MAPCC_PARAM_COUNT];
-  uint8_t mapCcNumbers[MAPCC_PARAM_COUNT];
+  uint8_t mapCcChannels[MAPCC_PARAM_COUNT_V5];
+  uint8_t mapCcNumbers[MAPCC_PARAM_COUNT_V5];
   uint8_t mapCcChannelMode;
 };
 
@@ -523,6 +704,18 @@ struct StorageImage {
   Settings presets[PRESET_COUNT];
 };
 
+struct StorageImageV8 {
+  uint16_t magic;
+  uint8_t currentPreset;
+  SettingsV8 presets[PRESET_COUNT];
+};
+
+struct StorageImageV7 {
+  uint16_t magic;
+  uint8_t currentPreset;
+  SettingsV7 presets[PRESET_COUNT];
+};
+
 struct StorageImageV1 {
   uint16_t magic;
   uint8_t currentPreset;
@@ -541,6 +734,18 @@ struct StorageImageV4 {
   SettingsV4 presets[PRESET_COUNT];
 };
 
+struct StorageImageV5 {
+  uint16_t magic;
+  uint8_t currentPreset;
+  SettingsV5 presets[PRESET_COUNT];
+};
+
+struct StorageImageV6 {
+  uint16_t magic;
+  uint8_t currentPreset;
+  SettingsV6 presets[PRESET_COUNT];
+};
+
 struct PackedLoopEvent {
   uint16_t at10ms;
   uint8_t channel;
@@ -553,12 +758,14 @@ struct LoopStorageImage {
   uint16_t magic;
   uint16_t count;
   uint32_t lengthMs;
+  uint32_t activeLengthMs;
   uint8_t bars;
   uint8_t reserved[3];
   PackedLoopEvent events[MAX_LOOP_EVENTS];
 };
 
-constexpr size_t LOOP_STORAGE_OFFSET = sizeof(StorageImage);
+constexpr size_t LOOP_STORAGE_OFFSET = 4096;
+static_assert(sizeof(StorageImage) <= LOOP_STORAGE_OFFSET, "Preset storage overlaps saved loop area");
 static_assert(LOOP_STORAGE_OFFSET + sizeof(LoopStorageImage) <= EEPROM_BYTES,
               "EEPROM_BYTES too small for presets plus saved loop");
 
@@ -728,6 +935,10 @@ int8_t activeArpNotes[MAX_ARP_OUTPUT_NOTES];
 uint8_t activeArpChannels[MAX_ARP_OUTPUT_NOTES];
 uint8_t activeArpCount = 0;
 uint8_t roundRobinCursor = 0;
+uint8_t roundRobinMenuCursor = 0;
+uint8_t routerMenuCursor = 0;
+uint8_t routerEditChannel = 0;
+uint8_t routerEditStage = ROUTER_STAGE_LIST;
 int8_t activeDrumArpNotes[MAX_HELD_NOTES];
 uint8_t activeDrumArpCount = 0;
 uint32_t arpNextStepMs = 0;
@@ -781,6 +992,7 @@ uint16_t loopEventCount = 0;
 uint16_t loopPlayIndex = 0;
 uint32_t loopStartMs = 0;
 uint32_t loopLengthMs = 0;
+uint32_t loopStoredLengthMs = 0;
 bool loopHasData = false;
 bool loopRecordingArmed = false;
 bool loopRecording = false;
@@ -790,6 +1002,8 @@ bool loopSdCloseState = false;
 bool loopDeleteArmed = false;
 uint32_t loopSdLastTriggerMs = 0;
 bool loopOverdubHeld[16][128];
+uint32_t loopRecPlaySensorHoldStartMs = 0;
+uint32_t loopRecPlayPushHoldStartMs = 0;
 UsbMidiDevice usbMidiDevices[MAX_USB_MIDI_DEVICES];
 const int8_t kEncoderTransitionTable[16] = {
   0,  1, -1,  0,
@@ -800,10 +1014,10 @@ const int8_t kEncoderTransitionTable[16] = {
 
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 ARP MODE", "3 DIVISION", "4 VELOCITY", "5 LENGTH", "",
-  "6 INPUT CH", "7 ARP CH", "8 BASS CH", "9 THRU OUT", "10 RNDRBN", "11 DIV NOTE",
-  "12 MAP CC", "13 IN CC >", "14 LEGATO", "15 REMOTE", "16 REMOTE 1", "17 REMOTE 2",
-  "18 USB HOST", "19 SCRNSVR", "20 EYE/PUSH", "21 EYE MODE", "22 PUSH", "23 LOOP",
-  "24 KEY", "25 SCALE", "26 GIT/KEYS", "27 LOAD", "28 SAVE", "29 PANIC"
+  "6 INPUT CH", "7 ARP CH", "8 BASS CH", "9 THRU OUT", "10 RNDRBN", "11 ROUTER",
+  "12 DIV NOTE", "13 MAP CC", "14 IN CC >", "15 LEGATO", "16 REMOTE", "17 REMOTE 1",
+  "18 REMOTE 2", "19 USB HOST", "20 SCRNSVR", "21 EYE/PUSH", "22 EYE MODE", "23 PUSH",
+  "24 LOOP", "25 KEY", "26 SCALE", "27 GIT/KEYS", "28 LOAD", "29 SAVE", "30 PANIC"
 };
 
 const char *const kArpModeNames[ARP_MODE_COUNT] = {
@@ -856,13 +1070,13 @@ const char *const kLoopBarsNames[LOOP_BARS_COUNT] = {
 
 const char *const kMapCcParamNames[MAPCC_PARAM_COUNT] = {
   "1 BPM", "2 ARP", "3 DIV", "4 VEL", "5 LEN", "6 IN", "7 ACH", "8 BCH",
-  "9 TCH", "10 INCC", "11 EYCH", "12 EYMD", "13 PSMD", "14 KEY", "15 SCL", "16 LOAD"
+  "9 TCH", "10 INCC", "11 EYCH", "12 EYMD", "13 PSMD", "14 KEY", "15 SCL", "16 LOOP", "17 LOAD"
 };
 
 const uint8_t kMapCcTargets[MAPCC_PARAM_COUNT] = {
   SET_BPM, SET_ARP_MODE, SET_DIVISION, SET_VELOCITY, SET_LENGTH, SET_INPUT_CH, SET_ARP_OUT_CH, SET_BASS_CH,
   SET_THRU_OUT_CH, SET_CC_OUT_CH, SET_SENSOR_CH, SET_SENSOR_MODE, SET_PUSH_MODE, SET_FORCE_KEY, SET_FORCE_SCALE,
-  SET_LOAD_PRESET
+  SET_LOOP_BARS, SET_LOAD_PRESET
 };
 
 const uint8_t kMapCcSensorAllowedModes[] = {
@@ -951,6 +1165,78 @@ bool wakeFromSaverIfNeeded() {
 
 bool channelEnabled(uint8_t chSetting) {
   return chSetting >= 1 && chSetting <= 16;
+}
+
+uint16_t channelBit(uint8_t ch1) {
+  return channelEnabled(ch1) ? static_cast<uint16_t>(1U << (ch1 - 1)) : 0;
+}
+
+bool roundRobinCh10To1Enabled(const Settings &s) {
+  return (s.mapCcChannelMode & MAP_CC_RR_CH10_TO_1_BIT) != 0;
+}
+
+bool roundRobinCh10To1Enabled() {
+  return roundRobinCh10To1Enabled(settings);
+}
+
+bool roundRobinCh10To2Enabled(const Settings &s) {
+  return (s.mapCcChannelMode & MAP_CC_RR_CH10_TO_2_BIT) != 0;
+}
+
+bool roundRobinCh10To2Enabled() {
+  return roundRobinCh10To2Enabled(settings);
+}
+
+void setRoundRobinCh10To1(Settings &s, bool enabled) {
+  if (enabled) {
+    s.mapCcChannelMode |= MAP_CC_RR_CH10_TO_1_BIT;
+    s.mapCcChannelMode &= static_cast<uint8_t>(~MAP_CC_RR_CH10_TO_2_BIT);
+  } else {
+    s.mapCcChannelMode &= static_cast<uint8_t>(~MAP_CC_RR_CH10_TO_1_BIT);
+  }
+}
+
+void setRoundRobinCh10To2(Settings &s, bool enabled) {
+  if (enabled) {
+    s.mapCcChannelMode |= MAP_CC_RR_CH10_TO_2_BIT;
+    s.mapCcChannelMode &= static_cast<uint8_t>(~MAP_CC_RR_CH10_TO_1_BIT);
+  } else {
+    s.mapCcChannelMode &= static_cast<uint8_t>(~MAP_CC_RR_CH10_TO_2_BIT);
+  }
+}
+
+void updateRouterActiveBit(Settings &s, uint8_t idx) {
+  if (idx >= 16) return;
+  const bool active = (s.routerOutChannels[idx] != idx + 1) || (s.routerTranspose[idx] != 0);
+  if (active) s.routerActiveMask |= static_cast<uint16_t>(1U << idx);
+  else s.routerActiveMask &= static_cast<uint16_t>(~static_cast<uint16_t>(1U << idx));
+}
+
+void clearRouterMappings(Settings &s) {
+  s.routerActiveMask = 0;
+  for (uint8_t i = 0; i < 16; ++i) {
+    s.routerOutChannels[i] = i + 1;
+    s.routerTranspose[i] = 0;
+  }
+}
+
+bool applyRouterToChannelMessage(uint8_t &status, uint8_t &data1) {
+  if (settings.routerActiveMask == 0 || status >= 0xF0) return true;
+  const uint8_t ch1 = (status & 0x0F) + 1;
+  const uint16_t bit = channelBit(ch1);
+  if ((settings.routerActiveMask & bit) == 0) return true;
+
+  const uint8_t idx = ch1 - 1;
+  uint8_t outCh = settings.routerOutChannels[idx];
+  if (!channelEnabled(outCh)) outCh = ch1;
+  const uint8_t type = status & 0xF0;
+  if (type == 0x80 || type == 0x90 || type == 0xA0) {
+    const int outNote = static_cast<int>(data1) + settings.routerTranspose[idx];
+    if (outNote < 0 || outNote > 127) return false;
+    data1 = static_cast<uint8_t>(outNote);
+  }
+  status = type | ((outCh - 1) & 0x0F);
+  return true;
 }
 
 bool arpChannelSpecialMode() {
@@ -1103,6 +1389,7 @@ int16_t mapCcSettingFieldValue(const Settings &s, uint8_t settingId) {
     case SET_SENSOR_CH: return s.sensorChannel;
     case SET_SENSOR_MODE: return s.sensorMode;
     case SET_PUSH_MODE: return s.pushMode;
+    case SET_LOOP_BARS: return s.loopBars;
     case SET_FORCE_KEY: return s.forceKey;
     case SET_FORCE_SCALE: return s.forceScale;
     case SET_LOAD_PRESET: return s.loadPreset;
@@ -1125,6 +1412,7 @@ void mapCcApplyPersistBaseline(Settings &s, uint8_t settingId, int16_t value) {
     case SET_SENSOR_CH: s.sensorChannel = clampU8(value, 1, 16); break;
     case SET_SENSOR_MODE: s.sensorMode = clampU8(value, 0, SENSOR_MODE_COUNT - 1); break;
     case SET_PUSH_MODE: s.pushMode = clampU8(value, 0, SENSOR_MODE_COUNT - 1); break;
+    case SET_LOOP_BARS: s.loopBars = clampU8(value, 0, LOOP_BARS_COUNT - 1); break;
     case SET_FORCE_KEY: s.forceKey = clampU8(value, 0, 24); break;
     case SET_FORCE_SCALE: s.forceScale = clampU8(value, 0, FORCE_SCALE_COUNT - 1); break;
     case SET_LOAD_PRESET: s.loadPreset = clampU8(value, 0, PRESET_COUNT - 1); break;
@@ -1146,7 +1434,7 @@ void syncMapCcRuntimeFromSettings() {
     mapCcSlots[i].channel = settings.mapCcChannels[i];
     mapCcSlots[i].cc = settings.mapCcNumbers[i];
   }
-  mapCcChannelAll = settings.mapCcChannelMode > 0;
+  mapCcChannelAll = (settings.mapCcChannelMode & MAP_CC_CHANNEL_ALL_BIT) != 0;
 }
 
 void syncMapCcRuntimeToSettings() {
@@ -1154,7 +1442,8 @@ void syncMapCcRuntimeToSettings() {
     settings.mapCcChannels[i] = mapCcSlots[i].channel;
     settings.mapCcNumbers[i] = mapCcSlots[i].cc;
   }
-  settings.mapCcChannelMode = mapCcChannelAll ? 1 : 0;
+  settings.mapCcChannelMode = (settings.mapCcChannelMode & (MAP_CC_RR_CH10_TO_1_BIT | MAP_CC_RR_CH10_TO_2_BIT)) |
+                              (mapCcChannelAll ? MAP_CC_CHANNEL_ALL_BIT : 0);
 }
 
 void clearMapCcMappings() {
@@ -1199,6 +1488,7 @@ int16_t mapCcTargetValue(uint8_t paramId, uint8_t ccValue) {
     case MAPCC_PSMD: return mapCcSensorModeValue(ccValue);
     case MAPCC_KEY: return mapCcLinearValue(ccValue, 0, 24);
     case MAPCC_SCL: return mapCcLinearValue(ccValue, 0, FORCE_SCALE_COUNT - 1);
+    case MAPCC_LOOP: return mapCcLinearValue(ccValue, LOOP_BARS_1, LOOP_BARS_8);
     case MAPCC_LOAD: return mapCcLinearValue(ccValue, 0, PRESET_COUNT - 1);
     default: return 0;
   }
@@ -1410,12 +1700,16 @@ uint8_t effectiveScaleForKeyMode(uint8_t keyValue, uint8_t scaleValue) {
 }
 
 void clearFreezeState() {
-  memset(arpFrozenNotes, 0, sizeof(arpFrozenNotes));
   for (uint8_t note = 0; note < 128; ++note) {
+    if (arpFrozenNotes[note]) {
+      noteArpOffPassthrough(255, note, 0, false);
+      noteThrough(255, note, 0, false);
+    }
     if (!thruFrozenNotes[note]) continue;
     const uint8_t out = thruFrozenMappedNotes[note];
     if (out <= 127) thruOutputRefOff(255, out);
   }
+  memset(arpFrozenNotes, 0, sizeof(arpFrozenNotes));
   memset(thruFrozenNotes, 0, sizeof(thruFrozenNotes));
   memset(thruFrozenMappedNotes, 0xFF, sizeof(thruFrozenMappedNotes));
   arpFreezeActive = false;
@@ -1429,6 +1723,10 @@ void clearArpLatchNotes() {
     if (thruLatchedNotes[note]) {
       noteThrough(255, note, 0, false);
       thruLatchedNotes[note] = false;
+    }
+    if (arpLatchedNotes[note]) {
+      noteArpOffPassthrough(255, note, 0, false);
+      noteThrough(255, note, 0, false);
     }
   }
   memset(arpLatchedNotes, 0, sizeof(arpLatchedNotes));
@@ -1619,8 +1917,28 @@ void sendMidiToUsbHosts(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8
 }
 
 void sendFanout(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
-  const uint8_t type = status & 0xF0;
-  const uint8_t ch1 = (status & 0x0F) + 1;
+  uint8_t type = status & 0xF0;
+  uint8_t ch1 = (status & 0x0F) + 1;
+  if (roundRobinCh10To1Enabled() && ch1 == 10 && data1 >= 36 && data1 <= 51 &&
+      (type == 0x90 || type == 0x80)) {
+    const bool isOn = (type == 0x90 && data2 > 0);
+    const uint8_t mappedCh = data1 - 35;
+    sendFanout(sourcePort, (isOn ? 0x90 : 0x80) | ((mappedCh - 1) & 0x0F), 60, isOn ? 127 : 0);
+    return;
+  }
+  if (roundRobinCh10To2Enabled() && ch1 == 10 && data1 >= 36 && data1 <= 49 &&
+      (type == 0x90 || type == 0x80)) {
+    const bool isOn = (type == 0x90 && data2 > 0);
+    const uint8_t mappedCh = data1 - 34; // 36 -> 2, 49 -> 15
+    uint8_t outNote = 60;
+    if (mappedCh == 2) outNote = 12;
+    else if (mappedCh == 3) outNote = 48;
+    sendFanout(sourcePort, (isOn ? 0x90 : 0x80) | ((mappedCh - 1) & 0x0F), outNote, isOn ? 127 : 0);
+    return;
+  }
+  if (!applyRouterToChannelMessage(status, data1)) return;
+  type = status & 0xF0;
+  ch1 = (status & 0x0F) + 1;
   if (type == 0x90) {
     if (data2 == 0) sendDinNoteOff(ch1, data1, 0);
     else sendDinNoteOn(ch1, data1, data2);
@@ -1681,6 +1999,7 @@ void addUniqueChannel(uint8_t *list, uint8_t &count, uint8_t ch1) {
   for (uint8_t i = 0; i < count; ++i) {
     if (list[i] == ch1) return;
   }
+  if (count >= 16) return;
   list[count++] = ch1;
 }
 
@@ -1688,8 +2007,27 @@ uint8_t mainArpOutChannelForSettings(const Settings &s) {
   return (s.arpOutChannel >= ARP_CH_1_PLUS_10) ? 1 : s.arpOutChannel;
 }
 
+uint16_t roundRobinMaskFromLegacyRange(uint8_t arpOutChannel, uint8_t range) {
+  if (range == 0) return 0;
+  const uint8_t baseCh = (arpOutChannel >= ARP_CH_1_PLUS_10) ? 1 : arpOutChannel;
+  if (!channelEnabled(baseCh)) return 0;
+  uint16_t mask = 0;
+  const uint8_t span = min<uint8_t>(16, static_cast<uint8_t>(range + 1));
+  for (uint8_t i = 0; i < span; ++i) {
+    const uint8_t ch = ((baseCh - 1 + i) % 16) + 1;
+    mask |= channelBit(ch);
+  }
+  return mask;
+}
+
 void collectRelevantPanicChannels(const Settings &s, uint8_t *channels, uint8_t &count) {
   addUniqueChannel(channels, count, mainArpOutChannelForSettings(s));
+  for (uint8_t ch = 1; ch <= 16; ++ch) {
+    if (s.roundRobinMask & channelBit(ch)) addUniqueChannel(channels, count, ch);
+  }
+  if (roundRobinCh10To1Enabled(s) || roundRobinCh10To2Enabled(s)) {
+    for (uint8_t ch = 1; ch <= 16; ++ch) addUniqueChannel(channels, count, ch);
+  }
   addUniqueChannel(channels, count, s.thruOutChannel);
   addUniqueChannel(channels, count, s.legatoChannel);
   addUniqueChannel(channels, count, s.sensorChannel);
@@ -1707,7 +2045,7 @@ void panicMappedRelevantOnly(uint8_t settingId, int16_t nextValue) {
   Settings after = settings;
   mapCcApplyPersistBaseline(after, settingId, nextValue);
 
-  uint8_t channels[10];
+  uint8_t channels[16];
   uint8_t count = 0;
   collectRelevantPanicChannels(settings, channels, count);
   collectRelevantPanicChannels(after, channels, count);
@@ -1733,11 +2071,11 @@ void panicMidiOnly() {
   if (loopPlaying) loopAllOff();
   const uint8_t panicArpCh = mainArpOutChannel();
   if (channelEnabled(panicArpCh)) sendAllNoteOffChannel(panicArpCh);
-  if (channelEnabled(panicArpCh) && settings.roundRobinRange > 0) {
-    for (uint8_t i = 1; i <= settings.roundRobinRange; ++i) {
-      const uint8_t ch = ((panicArpCh - 1 + i) % 16) + 1;
-      sendAllNoteOffChannel(ch);
-    }
+  for (uint8_t ch = 1; ch <= 16; ++ch) {
+    if (settings.roundRobinMask & channelBit(ch)) sendAllNoteOffChannel(ch);
+  }
+  if (roundRobinCh10To1Enabled() || roundRobinCh10To2Enabled()) {
+    for (uint8_t ch = 1; ch <= 16; ++ch) sendAllNoteOffChannel(ch);
   }
   if (arpChannelSpecialMode()) sendAllNoteOffChannel(10);
   if (channelEnabled(settings.thruOutChannel)) sendAllNoteOffChannel(settings.thruOutChannel);
@@ -2217,9 +2555,22 @@ uint8_t loopBarCount() {
   }
 }
 
-uint32_t fixedLoopLengthMs() {
+uint8_t loopBarsToCount(uint8_t barsSetting) {
+  switch (barsSetting) {
+    case LOOP_BARS_2: return 2;
+    case LOOP_BARS_4: return 4;
+    case LOOP_BARS_8: return 8;
+    default: return 1;
+  }
+}
+
+uint32_t fixedLoopLengthMsForBars(uint8_t barsSetting) {
   const uint32_t beatMs = 60000UL / max<uint16_t>(1, currentBpm());
-  return beatMs * 4UL * loopBarCount();
+  return beatMs * 4UL * loopBarsToCount(barsSetting);
+}
+
+uint32_t fixedLoopLengthMs() {
+  return fixedLoopLengthMsForBars(settings.loopBars);
 }
 
 void loopAllOff() {
@@ -2235,6 +2586,7 @@ void clearLoopData() {
   loopEventCount = 0;
   loopPlayIndex = 0;
   loopLengthMs = 0;
+  loopStoredLengthMs = 0;
   loopHasData = false;
   loopRecordingArmed = false;
   loopRecording = false;
@@ -2243,6 +2595,7 @@ void clearLoopData() {
   loopDeleteArmed = false;
   memset(loopOverdubHeld, 0, sizeof(loopOverdubHeld));
   clearSavedLoopStorage();
+  ui.dirty = true;
 }
 
 void startLoopPlayback() {
@@ -2255,6 +2608,61 @@ void startLoopPlayback() {
   loopRecordingArmed = false;
   loopOverdubbing = false;
   memset(loopOverdubHeld, 0, sizeof(loopOverdubHeld));
+  ui.dirty = true;
+}
+
+uint16_t firstLoopEventAfter(uint32_t atMs) {
+  uint16_t idx = 0;
+  while (idx < loopEventCount && loopEvents[idx].atMs <= atMs) idx++;
+  return idx;
+}
+
+void resyncLoopPlaybackWindow(uint32_t oldLengthMs) {
+  if (!loopPlaying || loopLengthMs == 0) return;
+  const uint32_t now = millis();
+  uint32_t pos = 0;
+  if (oldLengthMs > 0) pos = (now - loopStartMs) % oldLengthMs;
+  if (pos >= loopLengthMs) pos %= loopLengthMs;
+  loopAllOff();
+  loopStartMs = now - pos;
+  loopPlayIndex = firstLoopEventAfter(pos);
+}
+
+void duplicateLoopToLength(uint32_t targetLengthMs) {
+  if (!loopHasData || loopEventCount == 0 || loopStoredLengthMs == 0) {
+    loopStoredLengthMs = targetLengthMs;
+    return;
+  }
+  while (loopStoredLengthMs < targetLengthMs && loopEventCount < MAX_LOOP_EVENTS) {
+    const uint32_t baseLen = loopStoredLengthMs;
+    const uint16_t baseCount = loopEventCount;
+    bool copiedAny = false;
+    for (uint16_t i = 0; i < baseCount && loopEventCount < MAX_LOOP_EVENTS; ++i) {
+      const uint32_t at = loopEvents[i].atMs + baseLen;
+      if (at >= targetLengthMs) continue;
+      LoopEvent event = loopEvents[i];
+      event.atMs = at;
+      if (insertLoopEventLimited(event.atMs, event.channel, event.note, event.velocity, event.on, targetLengthMs)) {
+        copiedAny = true;
+      }
+    }
+    loopStoredLengthMs = min<uint32_t>(targetLengthMs, loopStoredLengthMs + baseLen);
+    if (!copiedAny) break;
+  }
+  if (loopStoredLengthMs < targetLengthMs) loopStoredLengthMs = targetLengthMs;
+}
+
+void applyLoopBarsLengthChange(bool preservePlayback = true) {
+  if (!loopHasData) return;
+  const uint32_t oldLength = loopLengthMs;
+  uint32_t targetLength = loopStoredLengthMs;
+  if (settings.loopBars != LOOP_BARS_FREE) {
+    targetLength = fixedLoopLengthMs();
+    if (targetLength > loopStoredLengthMs) duplicateLoopToLength(targetLength);
+  }
+  loopLengthMs = max<uint32_t>(1, targetLength);
+  if (preservePlayback) resyncLoopPlaybackWindow(oldLength);
+  saveLoopStorageIfAny();
   ui.dirty = true;
 }
 
@@ -2273,14 +2681,20 @@ void finishLoopRecording(bool playNow) {
   }
   loopRecording = false;
   loopRecordingArmed = false;
+  loopStoredLengthMs = max(loopStoredLengthMs, loopLengthMs);
   loopHasData = (loopEventCount > 0 && loopLengthMs > 0);
-  if (loopHasData && playNow) startLoopPlayback();
-  else ui.dirty = true;
+  if (loopHasData && playNow) {
+    startLoopPlayback();
+    if (settings.loopAutoOverdub) {
+      loopOverdubbing = true;
+      memset(loopOverdubHeld, 0, sizeof(loopOverdubHeld));
+    }
+  } else ui.dirty = true;
 }
 
-bool insertLoopEvent(uint32_t atMs, uint8_t channel1, uint8_t note, uint8_t velocity, bool on) {
+bool insertLoopEventLimited(uint32_t atMs, uint8_t channel1, uint8_t note, uint8_t velocity, bool on, uint32_t limitMs) {
   if (loopEventCount >= MAX_LOOP_EVENTS || channel1 < 1 || channel1 > 16 || note > 127) return false;
-  if (loopLengthMs > 0 && atMs >= loopLengthMs) atMs = loopLengthMs - 1;
+  if (limitMs > 0 && atMs >= limitMs) atMs = limitMs - 1;
 
   uint16_t pos = 0;
   while (pos < loopEventCount && loopEvents[pos].atMs <= atMs) pos++;
@@ -2293,6 +2707,11 @@ bool insertLoopEvent(uint32_t atMs, uint8_t channel1, uint8_t note, uint8_t velo
   loopEventCount++;
   if (loopPlaying && pos <= loopPlayIndex) loopPlayIndex++;
   return true;
+}
+
+bool insertLoopEvent(uint32_t atMs, uint8_t channel1, uint8_t note, uint8_t velocity, bool on) {
+  const uint32_t limitMs = loopStoredLengthMs ? loopStoredLengthMs : loopLengthMs;
+  return insertLoopEventLimited(atMs, channel1, note, velocity, on, limitMs);
 }
 
 uint32_t currentLoopPlaybackMs() {
@@ -2332,7 +2751,15 @@ void toggleLoopOverdub() {
 }
 
 void handleLoopRecPlayTrigger() {
-  if (loopRecording || loopRecordingArmed) return;
+  if (loopRecordingArmed) {
+    clearLoopData();
+    return;
+  }
+  if (loopRecording) {
+    if (settings.loopBars == LOOP_BARS_FREE) finishLoopRecording(true);
+    else clearLoopData();
+    return;
+  }
   if (loopPlaying) {
     toggleLoopOverdub();
     return;
@@ -2376,6 +2803,7 @@ void recordLoopNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t 
     loopEventCount = 0;
     loopStartMs = millis();
     loopLengthMs = (settings.loopBars == LOOP_BARS_FREE) ? 0 : fixedLoopLengthMs();
+    loopStoredLengthMs = loopLengthMs;
   }
   if (loopOverdubbing && loopPlaying && loopHasData && loopLengthMs > 0) {
     const uint32_t atMs = currentLoopPlaybackMs();
@@ -2429,7 +2857,8 @@ void saveLoopStorageIfAny() {
   LoopStorageImage image{};
   image.magic = LOOP_EEPROM_MAGIC;
   image.count = min<uint16_t>(loopEventCount, MAX_LOOP_EVENTS);
-  image.lengthMs = loopLengthMs;
+  image.lengthMs = loopStoredLengthMs ? loopStoredLengthMs : loopLengthMs;
+  image.activeLengthMs = loopLengthMs;
   image.bars = settings.loopBars;
   for (uint16_t i = 0; i < image.count; ++i) {
     image.events[i].at10ms = min<uint32_t>(65535UL, (loopEvents[i].atMs + 5UL) / 10UL);
@@ -2454,7 +2883,8 @@ void loadSavedLoopStorage() {
 
   loopEventCount = image.count;
   loopPlayIndex = 0;
-  loopLengthMs = image.lengthMs;
+  loopStoredLengthMs = image.lengthMs;
+  loopLengthMs = image.activeLengthMs ? image.activeLengthMs : image.lengthMs;
   loopHasData = true;
   loopRecordingArmed = false;
   loopRecording = false;
@@ -2464,12 +2894,13 @@ void loadSavedLoopStorage() {
   memset(loopOverdubHeld, 0, sizeof(loopOverdubHeld));
   for (uint16_t i = 0; i < loopEventCount; ++i) {
     loopEvents[i].atMs = static_cast<uint32_t>(image.events[i].at10ms) * 10UL;
-    if (loopEvents[i].atMs >= loopLengthMs) loopEvents[i].atMs = loopLengthMs - 1;
+    if (loopEvents[i].atMs >= loopStoredLengthMs) loopEvents[i].atMs = loopStoredLengthMs - 1;
     loopEvents[i].channel = clampU8(image.events[i].channel, 1, 16);
     loopEvents[i].note = clampU8(image.events[i].note, 0, 127);
     loopEvents[i].velocity = clampU8(image.events[i].velocity, 0, 127);
     loopEvents[i].on = (image.events[i].flags & 1) != 0;
   }
+  applyLoopBarsLengthChange(false);
 }
 
 void thruOutputRefOn(uint8_t sourcePort, uint8_t outNote, uint8_t velocity) {
@@ -2629,10 +3060,12 @@ void clearSplitNoteFromMainPaths(uint8_t sourcePort, uint8_t note) {
 }
 
 uint8_t nextRoundRobinChannel(uint8_t baseCh) {
-  if (!channelEnabled(baseCh) || settings.roundRobinRange == 0) return baseCh;
-  const uint8_t span = min<uint8_t>(16, static_cast<uint8_t>(settings.roundRobinRange + 1));
-  const uint8_t offset = roundRobinCursor++ % span;
-  return ((baseCh - 1 + offset) % 16) + 1;
+  if (!channelEnabled(baseCh) || settings.roundRobinMask == 0) return baseCh;
+  for (uint8_t attempts = 0; attempts < 16; ++attempts) {
+    const uint8_t idx = roundRobinCursor++ & 0x0F;
+    if (settings.roundRobinMask & static_cast<uint16_t>(1U << idx)) return idx + 1;
+  }
+  return baseCh;
 }
 
 void handleClockByte(bool fromDin) {
@@ -2655,8 +3088,12 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_ARP_OUT_CH: return ARP_CH_MAX;
     case SET_BASS_CH: return 48;
     case SET_THRU_OUT_CH: return 16;
-    case SET_RND_RBN: return 15;
-    case SET_DIV_NOTES: return DIV_NOTE_RESET_SLOT;
+    case SET_RND_RBN: return RND_RBN_BACK_SLOT;
+    case SET_ROUTER:
+      if (routerEditStage == ROUTER_STAGE_DEST) return 16;
+      if (routerEditStage == ROUTER_STAGE_TRANSPOSE) return ROUTER_TRANSPOSE_MAX - ROUTER_TRANSPOSE_MIN;
+      return ROUTER_BACK_SLOT;
+    case SET_DIV_NOTES: return DIV_NOTE_BACK_SLOT;
     case SET_MAP_CC: return MAP_CC_CHMODE_SLOT;
     case SET_LEGATO_CH: return 16;
     case SET_CC_OUT_CH: return 17;
@@ -2690,7 +3127,11 @@ int16_t getSettingValueRaw(uint8_t settingId) {
     case SET_ARP_OUT_CH: return settings.arpOutChannel;
     case SET_BASS_CH: return settings.bassMode;
     case SET_THRU_OUT_CH: return settings.thruOutChannel;
-    case SET_RND_RBN: return settings.roundRobinRange;
+    case SET_RND_RBN: return roundRobinMenuCursor;
+    case SET_ROUTER:
+      if (routerEditStage == ROUTER_STAGE_DEST) return settings.routerOutChannels[routerEditChannel];
+      if (routerEditStage == ROUTER_STAGE_TRANSPOSE) return settings.routerTranspose[routerEditChannel] - ROUTER_TRANSPOSE_MIN;
+      return routerMenuCursor;
     case SET_DIV_NOTES: return divNotesCursor;
     case SET_MAP_CC: return mapCcCursor;
     case SET_LEGATO_CH: return settings.legatoChannel;
@@ -2732,8 +3173,20 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       break;
     case SET_BASS_CH: settings.bassMode = clampU8(value, 0, 48); break;
     case SET_THRU_OUT_CH: settings.thruOutChannel = clampU8(value, 0, 16); break;
-    case SET_RND_RBN: settings.roundRobinRange = clampU8(value, 0, 15); break;
-    case SET_DIV_NOTES: divNotesCursor = clampU8(value, 0, DIV_NOTE_RESET_SLOT); break;
+    case SET_RND_RBN: roundRobinMenuCursor = clampU8(value, 0, RND_RBN_BACK_SLOT); break;
+    case SET_ROUTER:
+      if (routerEditStage == ROUTER_STAGE_DEST) {
+        settings.routerOutChannels[routerEditChannel] = clampU8(value, 1, 16);
+        updateRouterActiveBit(settings, routerEditChannel);
+      } else if (routerEditStage == ROUTER_STAGE_TRANSPOSE) {
+        settings.routerTranspose[routerEditChannel] =
+          static_cast<int8_t>(constrain(value + ROUTER_TRANSPOSE_MIN, ROUTER_TRANSPOSE_MIN, ROUTER_TRANSPOSE_MAX));
+        updateRouterActiveBit(settings, routerEditChannel);
+      } else {
+        routerMenuCursor = clampU8(value, 0, ROUTER_BACK_SLOT);
+      }
+      break;
+    case SET_DIV_NOTES: divNotesCursor = clampU8(value, 0, DIV_NOTE_BACK_SLOT); break;
     case SET_MAP_CC: mapCcCursor = clampU8(value, 0, MAP_CC_CHMODE_SLOT); break;
     case SET_LEGATO_CH: {
       const uint8_t previous = settings.legatoChannel;
@@ -2778,7 +3231,10 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       rebuildArpHeldSorted();
       updateBassVoice();
       break;
-    case SET_LOOP_BARS: settings.loopBars = clampU8(value, 0, LOOP_BARS_COUNT - 1); break;
+    case SET_LOOP_BARS:
+      settings.loopBars = clampU8(value, 0, LOOP_BARS_COUNT - 1);
+      applyLoopBarsLengthChange(true);
+      break;
     case SET_FORCE_KEY:
       settings.forceKey = clampU8(value, 0, 24);
       if (ckeyEnabled() && scaleIsCombo(settings.forceScale)) settings.forceScale = SCALE_MAJOR;
@@ -2854,7 +3310,13 @@ void sanitizeSettings(Settings &s) {
   s.arpOutChannel = clampU8(s.arpOutChannel, 0, ARP_CH_MAX);
   s.bassMode = clampU8(s.bassMode, 0, 48);
   s.thruOutChannel = clampU8(s.thruOutChannel, 0, 16);
-  s.roundRobinRange = clampU8(s.roundRobinRange, 0, 15);
+  s.roundRobinMask &= 0xFFFF;
+  s.routerActiveMask = 0;
+  for (uint8_t i = 0; i < 16; ++i) {
+    if (!channelEnabled(s.routerOutChannels[i])) s.routerOutChannels[i] = i + 1;
+    s.routerTranspose[i] = constrain(static_cast<int>(s.routerTranspose[i]), ROUTER_TRANSPOSE_MIN, ROUTER_TRANSPOSE_MAX);
+    updateRouterActiveBit(s, i);
+  }
   s.legatoChannel = clampU8(s.legatoChannel, 0, 16);
   s.ccOutChannel = clampU8(s.ccOutChannel, 1, 17);
   s.remoteChannel = clampU8(s.remoteChannel, 1, 16);
@@ -2862,6 +3324,7 @@ void sanitizeSettings(Settings &s) {
   s.sensorMode = clampU8(s.sensorMode, 0, SENSOR_MODE_COUNT - 1);
   s.pushMode = clampU8(s.pushMode, 0, SENSOR_MODE_COUNT - 1);
   s.loopBars = clampU8(s.loopBars, 0, LOOP_BARS_COUNT - 1);
+  s.loopAutoOverdub = (s.loopAutoOverdub > 0) ? 1 : 0;
   s.forceKey = clampU8(s.forceKey, 0, 24);
   s.forceScale = clampU8(s.forceScale, 0, FORCE_SCALE_COUNT - 1);
   if (ckeyEnabledForValue(s.forceKey) && scaleIsCombo(s.forceScale)) s.forceScale = SCALE_MAJOR;
@@ -2881,7 +3344,7 @@ void sanitizeSettings(Settings &s) {
     if (s.mapCcChannels[i] > 16) s.mapCcChannels[i] = 0;
     if (s.mapCcNumbers[i] > 127) s.mapCcNumbers[i] = 0xFF;
   }
-  s.mapCcChannelMode = (s.mapCcChannelMode > 0) ? 1 : 0;
+  s.mapCcChannelMode &= (MAP_CC_CHANNEL_ALL_BIT | MAP_CC_RR_CH10_TO_1_BIT | MAP_CC_RR_CH10_TO_2_BIT);
 }
 
 void loadCurrentPreset() {
@@ -2923,7 +3386,8 @@ Settings defaultSettings() {
   s.arpOutChannel = ARP_CH_1_PLUS_10;
   s.bassMode = 0;
   s.thruOutChannel = 2;
-  s.roundRobinRange = 0;
+  s.roundRobinMask = 0;
+  clearRouterMappings(s);
   s.legatoChannel = 0;
   s.ccOutChannel = 17;
   s.remoteChannel = 16;
@@ -2945,6 +3409,7 @@ Settings defaultSettings() {
   }
   s.divNotePlusNote = 0xFF;
   s.loopBars = LOOP_BARS_1;
+  s.loopAutoOverdub = 0;
   for (uint8_t i = 0; i < MAPCC_PARAM_COUNT; ++i) {
     s.mapCcChannels[i] = 0;
     s.mapCcNumbers[i] = 0xFF;
@@ -3017,6 +3482,125 @@ Settings migrateSettingsV4(const SettingsV4 &oldSettings) {
   upgraded.divNotePlusNote = oldSettings.divNotePlusNote;
   upgraded.pushMode = oldSettings.pushMode;
   upgraded.legatoChannel = oldSettings.legatoChannel;
+  memcpy(upgraded.mapCcChannels, oldSettings.mapCcChannels, sizeof(oldSettings.mapCcChannels));
+  memcpy(upgraded.mapCcNumbers, oldSettings.mapCcNumbers, sizeof(oldSettings.mapCcNumbers));
+  upgraded.mapCcChannelMode = oldSettings.mapCcChannelMode;
+  sanitizeSettings(upgraded);
+  return upgraded;
+}
+
+Settings migrateSettingsV5(const SettingsV5 &oldSettings) {
+  Settings upgraded = defaultSettings();
+  upgraded.manualBpm = oldSettings.manualBpm;
+  upgraded.arpMode = oldSettings.arpMode;
+  upgraded.division = oldSettings.division;
+  upgraded.arpVelocity = oldSettings.arpVelocity;
+  upgraded.arpLengthPct = oldSettings.arpLengthPct;
+  upgraded.pattern = oldSettings.pattern;
+  upgraded.inputChannel = oldSettings.inputChannel;
+  upgraded.arpOutChannel = oldSettings.arpOutChannel;
+  upgraded.bassMode = oldSettings.bassMode;
+  upgraded.thruOutChannel = oldSettings.thruOutChannel;
+  upgraded.roundRobinMask = roundRobinMaskFromLegacyRange(oldSettings.arpOutChannel, oldSettings.roundRobinRange);
+  upgraded.ccOutChannel = oldSettings.ccOutChannel;
+  upgraded.remoteChannel = oldSettings.remoteChannel;
+  upgraded.sensorChannel = oldSettings.sensorChannel;
+  upgraded.sensorMode = oldSettings.sensorMode;
+  upgraded.forceKey = oldSettings.forceKey;
+  upgraded.forceScale = oldSettings.forceScale;
+  upgraded.instrumentView = oldSettings.instrumentView;
+  upgraded.remote1Action = oldSettings.remote1Action;
+  upgraded.remote2Action = oldSettings.remote2Action;
+  upgraded.loadPreset = oldSettings.loadPreset;
+  upgraded.savePreset = oldSettings.savePreset;
+  upgraded.usbHostMode = oldSettings.usbHostMode;
+  upgraded.screenSaver = oldSettings.screenSaver;
+  memcpy(upgraded.divNoteChannels, oldSettings.divNoteChannels, sizeof(upgraded.divNoteChannels));
+  memcpy(upgraded.divNoteNotes, oldSettings.divNoteNotes, sizeof(upgraded.divNoteNotes));
+  upgraded.divNotePlusNote = oldSettings.divNotePlusNote;
+  upgraded.pushMode = oldSettings.pushMode;
+  upgraded.loopBars = oldSettings.loopBars;
+  upgraded.legatoChannel = oldSettings.legatoChannel;
+  memcpy(upgraded.mapCcChannels, oldSettings.mapCcChannels, sizeof(oldSettings.mapCcChannels));
+  memcpy(upgraded.mapCcNumbers, oldSettings.mapCcNumbers, sizeof(oldSettings.mapCcNumbers));
+  upgraded.mapCcChannelMode = oldSettings.mapCcChannelMode;
+  sanitizeSettings(upgraded);
+  return upgraded;
+}
+
+Settings migrateSettingsV6(const SettingsV6 &oldSettings) {
+  Settings upgraded = defaultSettings();
+  upgraded.manualBpm = oldSettings.manualBpm;
+  upgraded.arpMode = oldSettings.arpMode;
+  upgraded.division = oldSettings.division;
+  upgraded.arpVelocity = oldSettings.arpVelocity;
+  upgraded.arpLengthPct = oldSettings.arpLengthPct;
+  upgraded.pattern = oldSettings.pattern;
+  upgraded.inputChannel = oldSettings.inputChannel;
+  upgraded.arpOutChannel = oldSettings.arpOutChannel;
+  upgraded.bassMode = oldSettings.bassMode;
+  upgraded.thruOutChannel = oldSettings.thruOutChannel;
+  upgraded.roundRobinMask = oldSettings.roundRobinMask;
+  upgraded.ccOutChannel = oldSettings.ccOutChannel;
+  upgraded.remoteChannel = oldSettings.remoteChannel;
+  upgraded.sensorChannel = oldSettings.sensorChannel;
+  upgraded.sensorMode = oldSettings.sensorMode;
+  upgraded.forceKey = oldSettings.forceKey;
+  upgraded.forceScale = oldSettings.forceScale;
+  upgraded.instrumentView = oldSettings.instrumentView;
+  upgraded.remote1Action = oldSettings.remote1Action;
+  upgraded.remote2Action = oldSettings.remote2Action;
+  upgraded.loadPreset = oldSettings.loadPreset;
+  upgraded.savePreset = oldSettings.savePreset;
+  upgraded.usbHostMode = oldSettings.usbHostMode;
+  upgraded.screenSaver = oldSettings.screenSaver;
+  memcpy(upgraded.divNoteChannels, oldSettings.divNoteChannels, sizeof(upgraded.divNoteChannels));
+  memcpy(upgraded.divNoteNotes, oldSettings.divNoteNotes, sizeof(upgraded.divNoteNotes));
+  upgraded.divNotePlusNote = oldSettings.divNotePlusNote;
+  upgraded.pushMode = oldSettings.pushMode;
+  upgraded.loopBars = oldSettings.loopBars;
+  upgraded.loopAutoOverdub = oldSettings.loopAutoOverdub;
+  upgraded.legatoChannel = oldSettings.legatoChannel;
+  memcpy(upgraded.mapCcChannels, oldSettings.mapCcChannels, sizeof(oldSettings.mapCcChannels));
+  memcpy(upgraded.mapCcNumbers, oldSettings.mapCcNumbers, sizeof(oldSettings.mapCcNumbers));
+  upgraded.mapCcChannelMode = oldSettings.mapCcChannelMode;
+  sanitizeSettings(upgraded);
+  return upgraded;
+}
+
+Settings migrateSettingsV7(const SettingsV7 &oldSettings) {
+  Settings upgraded = defaultSettings();
+  upgraded.manualBpm = oldSettings.manualBpm;
+  upgraded.arpMode = oldSettings.arpMode;
+  upgraded.division = oldSettings.division;
+  upgraded.arpVelocity = oldSettings.arpVelocity;
+  upgraded.arpLengthPct = oldSettings.arpLengthPct;
+  upgraded.pattern = oldSettings.pattern;
+  upgraded.inputChannel = oldSettings.inputChannel;
+  upgraded.arpOutChannel = oldSettings.arpOutChannel;
+  upgraded.bassMode = oldSettings.bassMode;
+  upgraded.thruOutChannel = oldSettings.thruOutChannel;
+  upgraded.roundRobinMask = oldSettings.roundRobinMask;
+  upgraded.ccOutChannel = oldSettings.ccOutChannel;
+  upgraded.remoteChannel = oldSettings.remoteChannel;
+  upgraded.sensorChannel = oldSettings.sensorChannel;
+  upgraded.sensorMode = oldSettings.sensorMode;
+  upgraded.forceKey = oldSettings.forceKey;
+  upgraded.forceScale = oldSettings.forceScale;
+  upgraded.instrumentView = oldSettings.instrumentView;
+  upgraded.remote1Action = oldSettings.remote1Action;
+  upgraded.remote2Action = oldSettings.remote2Action;
+  upgraded.loadPreset = oldSettings.loadPreset;
+  upgraded.savePreset = oldSettings.savePreset;
+  upgraded.usbHostMode = oldSettings.usbHostMode;
+  upgraded.screenSaver = oldSettings.screenSaver;
+  memcpy(upgraded.divNoteChannels, oldSettings.divNoteChannels, sizeof(upgraded.divNoteChannels));
+  memcpy(upgraded.divNoteNotes, oldSettings.divNoteNotes, sizeof(upgraded.divNoteNotes));
+  upgraded.divNotePlusNote = oldSettings.divNotePlusNote;
+  upgraded.pushMode = oldSettings.pushMode;
+  upgraded.loopBars = oldSettings.loopBars;
+  upgraded.loopAutoOverdub = oldSettings.loopAutoOverdub;
+  upgraded.legatoChannel = oldSettings.legatoChannel;
   memcpy(upgraded.mapCcChannels, oldSettings.mapCcChannels, sizeof(upgraded.mapCcChannels));
   memcpy(upgraded.mapCcNumbers, oldSettings.mapCcNumbers, sizeof(upgraded.mapCcNumbers));
   upgraded.mapCcChannelMode = oldSettings.mapCcChannelMode;
@@ -3030,6 +3614,47 @@ Settings migrateSettingsV3(const SettingsV4 &oldSettings) {
       upgraded.arpOutChannel <= ARP_CH_1_TO_10_SPLIT_36) {
     upgraded.arpOutChannel = static_cast<uint8_t>(upgraded.arpOutChannel + 1);
   }
+  sanitizeSettings(upgraded);
+  return upgraded;
+}
+
+Settings migrateSettingsV8(const SettingsV8 &oldSettings) {
+  Settings upgraded = defaultSettings();
+  upgraded.manualBpm = oldSettings.manualBpm;
+  upgraded.arpMode = oldSettings.arpMode;
+  upgraded.division = oldSettings.division;
+  upgraded.arpVelocity = oldSettings.arpVelocity;
+  upgraded.arpLengthPct = oldSettings.arpLengthPct;
+  upgraded.pattern = oldSettings.pattern;
+  upgraded.inputChannel = oldSettings.inputChannel;
+  upgraded.arpOutChannel = oldSettings.arpOutChannel;
+  upgraded.bassMode = oldSettings.bassMode;
+  upgraded.thruOutChannel = oldSettings.thruOutChannel;
+  upgraded.roundRobinMask = oldSettings.roundRobinMask;
+  upgraded.ccOutChannel = oldSettings.ccOutChannel;
+  upgraded.remoteChannel = oldSettings.remoteChannel;
+  upgraded.sensorChannel = oldSettings.sensorChannel;
+  upgraded.sensorMode = oldSettings.sensorMode;
+  upgraded.forceKey = oldSettings.forceKey;
+  upgraded.forceScale = oldSettings.forceScale;
+  upgraded.instrumentView = oldSettings.instrumentView;
+  upgraded.remote1Action = oldSettings.remote1Action;
+  upgraded.remote2Action = oldSettings.remote2Action;
+  upgraded.loadPreset = oldSettings.loadPreset;
+  upgraded.savePreset = oldSettings.savePreset;
+  upgraded.usbHostMode = oldSettings.usbHostMode;
+  upgraded.screenSaver = oldSettings.screenSaver;
+  memcpy(upgraded.divNoteChannels, oldSettings.divNoteChannels, sizeof(upgraded.divNoteChannels));
+  memcpy(upgraded.divNoteNotes, oldSettings.divNoteNotes, sizeof(upgraded.divNoteNotes));
+  upgraded.divNotePlusNote = oldSettings.divNotePlusNote;
+  upgraded.pushMode = oldSettings.pushMode;
+  upgraded.loopBars = oldSettings.loopBars;
+  upgraded.loopAutoOverdub = oldSettings.loopAutoOverdub;
+  upgraded.legatoChannel = oldSettings.legatoChannel;
+  memcpy(upgraded.mapCcChannels, oldSettings.mapCcChannels, sizeof(upgraded.mapCcChannels));
+  memcpy(upgraded.mapCcNumbers, oldSettings.mapCcNumbers, sizeof(upgraded.mapCcNumbers));
+  upgraded.mapCcChannelMode = oldSettings.mapCcChannelMode;
+  setRoundRobinCh10To1(upgraded, oldSettings.roundRobinCh10To1 > 0);
   sanitizeSettings(upgraded);
   return upgraded;
 }
@@ -3071,9 +3696,58 @@ void initStorageIfNeeded() {
   EEPROM.begin(EEPROM_BYTES);
   uint16_t storedMagic = 0;
   EEPROM.get(0, storedMagic);
+  if (storedMagic != EEPROM_MAGIC) storedMagic = 0;
 
   if (storedMagic == EEPROM_MAGIC) {
     EEPROM.get(0, storage);
+  } else if (storedMagic == EEPROM_MAGIC_V8) {
+    StorageImageV8 legacy{};
+    EEPROM.get(0, legacy);
+    storage.magic = EEPROM_MAGIC;
+    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
+    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
+      storage.presets[i] = migrateSettingsV8(legacy.presets[i]);
+      storage.presets[i].loadPreset = i;
+      storage.presets[i].savePreset = i;
+    }
+    EEPROM.put(0, storage);
+    EEPROM.commit();
+  } else if (storedMagic == EEPROM_MAGIC_V7) {
+    StorageImageV7 legacy{};
+    EEPROM.get(0, legacy);
+    storage.magic = EEPROM_MAGIC;
+    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
+    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
+      storage.presets[i] = migrateSettingsV7(legacy.presets[i]);
+      storage.presets[i].loadPreset = i;
+      storage.presets[i].savePreset = i;
+    }
+    EEPROM.put(0, storage);
+    EEPROM.commit();
+  } else if (storedMagic == EEPROM_MAGIC_V6) {
+    StorageImageV6 legacy{};
+    EEPROM.get(0, legacy);
+    storage.magic = EEPROM_MAGIC;
+    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
+    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
+      storage.presets[i] = migrateSettingsV6(legacy.presets[i]);
+      storage.presets[i].loadPreset = i;
+      storage.presets[i].savePreset = i;
+    }
+    EEPROM.put(0, storage);
+    EEPROM.commit();
+  } else if (storedMagic == EEPROM_MAGIC_V5) {
+    StorageImageV5 legacy{};
+    EEPROM.get(0, legacy);
+    storage.magic = EEPROM_MAGIC;
+    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
+    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
+      storage.presets[i] = migrateSettingsV5(legacy.presets[i]);
+      storage.presets[i].loadPreset = i;
+      storage.presets[i].savePreset = i;
+    }
+    EEPROM.put(0, storage);
+    EEPROM.commit();
   } else if (storedMagic == EEPROM_MAGIC_V4) {
     StorageImageV4 legacy{};
     EEPROM.get(0, legacy);
@@ -3149,6 +3823,10 @@ void applySettingDelta(int delta, bool fastStep) {
   if (id == SET_BPM) next = constrain(next, 20, 300);
   else if (id == SET_INPUT_CH || id == SET_REMOTE_CH || id == SET_SENSOR_CH) next = constrain(next, 1, 16);
   else if (id == SET_CC_OUT_CH) next = wrapIndex(next - 1, 17) + 1;
+  else if (id == SET_ROUTER && routerEditStage == ROUTER_STAGE_DEST) next = wrapIndex(next - 1, 16) + 1;
+  else if (id == SET_ROUTER && routerEditStage == ROUTER_STAGE_TRANSPOSE) {
+    next = constrain(next, 0, ROUTER_TRANSPOSE_MAX - ROUTER_TRANSPOSE_MIN);
+  }
   else if (id == SET_VELOCITY) next = constrain(next, 1, 127);
   else if (id == SET_LENGTH) next = constrain(next, 1, 100);
   else if (id == SET_FORCE_SCALE) {
@@ -3206,6 +3884,73 @@ void activateClickAction() {
   if (ui.menuMode == MENU_EDIT) {
     if (ui.selectedSetting == SET_MAP_CC && mapCcCursor == MAP_CC_CHMODE_SLOT) {
       mapCcChannelAll = !mapCcChannelAll;
+    } else if (ui.selectedSetting == SET_RND_RBN) {
+      if (roundRobinMenuCursor < 16) {
+        settings.roundRobinMask ^= channelBit(roundRobinMenuCursor + 1);
+        saveStorage();
+        ui.dirty = true;
+        markActivity();
+        encoder.switchIgnoreUntilMs = millis() + 120;
+        return;
+      }
+      if (roundRobinMenuCursor == RND_RBN_CH10_TO_1_SLOT) {
+        setRoundRobinCh10To1(settings, !roundRobinCh10To1Enabled());
+        saveStorage();
+        ui.dirty = true;
+        markActivity();
+        encoder.switchIgnoreUntilMs = millis() + 120;
+        return;
+      }
+      if (roundRobinMenuCursor == RND_RBN_CH10_TO_2_SLOT) {
+        setRoundRobinCh10To2(settings, !roundRobinCh10To2Enabled());
+        saveStorage();
+        ui.dirty = true;
+        markActivity();
+        encoder.switchIgnoreUntilMs = millis() + 120;
+        return;
+      }
+      if (roundRobinMenuCursor == RND_RBN_CLEAR_SLOT) {
+        settings.roundRobinMask = 0;
+        setRoundRobinCh10To1(settings, false);
+        setRoundRobinCh10To2(settings, false);
+        saveStorage();
+        ui.dirty = true;
+        markActivity();
+        encoder.switchIgnoreUntilMs = millis() + 120;
+        return;
+      }
+    } else if (ui.selectedSetting == SET_ROUTER) {
+      if (routerEditStage == ROUTER_STAGE_LIST) {
+        if (routerMenuCursor < 16) {
+          routerEditChannel = routerMenuCursor;
+          routerEditStage = ROUTER_STAGE_DEST;
+          ui.dirty = true;
+          markActivity();
+          encoder.switchIgnoreUntilMs = millis() + 120;
+          return;
+        }
+        if (routerMenuCursor == ROUTER_CLEAR_SLOT) {
+          panicMidiOnly();
+          clearRouterMappings(settings);
+          saveStorage();
+          ui.dirty = true;
+          markActivity();
+          encoder.switchIgnoreUntilMs = millis() + 120;
+          return;
+        }
+      } else if (routerEditStage == ROUTER_STAGE_DEST) {
+        routerEditStage = ROUTER_STAGE_TRANSPOSE;
+        ui.dirty = true;
+        markActivity();
+        encoder.switchIgnoreUntilMs = millis() + 120;
+        return;
+      } else {
+        routerEditStage = ROUTER_STAGE_LIST;
+        ui.dirty = true;
+        markActivity();
+        encoder.switchIgnoreUntilMs = millis() + 120;
+        return;
+      }
     }
     ui.menuMode = MENU_SELECT;
     ui.deferredLoadPreset = (ui.selectedSetting == SET_LOAD_PRESET);
@@ -3217,6 +3962,7 @@ void activateClickAction() {
     ui.pendingValue = getSettingValueRaw(ui.selectedSetting);
     ui.menuMode = MENU_EDIT;
   } else {
+    if (ui.selectedSetting == SET_ROUTER) routerEditStage = ROUTER_STAGE_LIST;
     ui.menuMode = MENU_EDIT;
   }
   encoder.switchIgnoreUntilMs = millis() + 120;
@@ -3298,15 +4044,6 @@ void pollEncoder() {
 void handleDrumInputNote(uint8_t sourcePort, uint8_t note, uint8_t velocity, bool on) {
   markActivity(false);
   if (liveNoteViewActive() || ui.selectedSetting == SET_PANIC) ui.dirty = true;
-
-  if (currentArpSelection() == ARPSEL_OFF) {
-    if (on && velocity > 0) sendFanout(sourcePort, 0x90 | (10 - 1), note, 127);
-    else sendFanout(sourcePort, 0x80 | (10 - 1), note, 0);
-    heldDrumNotes[note] = false;
-    heldDrumVelocities[note] = 0;
-    rebuildHeldDrumCount();
-    return;
-  }
 
   const bool playbackAlreadyActive = arpAnyPlaybackActive();
   const bool hadNoDrumKeys = (heldDrumCount == 0);
@@ -3419,14 +4156,19 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
       restartArpTiming(false);
     }
     arpHadKeys = true;
-    if (!arpLatchPlusEnabled()) noteThrough(sourcePort, note, velocity, true);
+    if (!arpLatchPlusEnabled()) {
+      noteThrough(sourcePort, note, velocity, true);
+      if (arpLatchEnabled()) thruLatchedNotes[note] = true;
+    }
     noteArpOffPassthrough(sourcePort, note, velocity, true);
   } else {
     heldInputNotes[note] = false;
     heldVelocities[note] = 0;
     if (arpLatchEnabled() && !anyPhysicalInputNotesHeld()) arpLatchAwaitingNewPhrase = true;
-    if (!arpLatchPlusEnabled()) noteThrough(sourcePort, note, 0, false);
-    noteArpOffPassthrough(sourcePort, note, 0, false);
+    const bool sustainHeld = (arpLatchEnabled() && arpLatchedNotes[note]) ||
+                             (arpFreezeActive && arpFrozenNotes[note]);
+    if (!arpLatchPlusEnabled() && !sustainHeld) noteThrough(sourcePort, note, 0, false);
+    if (!sustainHeld) noteArpOffPassthrough(sourcePort, note, 0, false);
   }
 
   rebuildHeldSorted();
@@ -4242,6 +4984,10 @@ void updateControllerOutput(uint8_t sourcePort, uint8_t mode, bool inRange, uint
   if (!inRange) {
     if (latchMode || loopRpMode) latchCloseState = false;
     if (freezeMode || loopSdMode) freezeCloseState = false;
+    if (loopRpMode) {
+      uint32_t &holdStart = (sourcePort == 253) ? loopRecPlaySensorHoldStartMs : loopRecPlayPushHoldStartMs;
+      holdStart = 0;
+    }
 
     if (activeNote >= 0) {
       sendFanout(sourcePort, 0x80 | ((ch - 1) & 0x0F), activeNote, 0);
@@ -4290,11 +5036,17 @@ void updateControllerOutput(uint8_t sourcePort, uint8_t mode, bool inRange, uint
 
   if (loopRpMode) {
     const bool closeHalf = pct >= 50;
+    uint32_t &holdStart = (sourcePort == 253) ? loopRecPlaySensorHoldStartMs : loopRecPlayPushHoldStartMs;
     if (closeHalf && !latchCloseState) {
+      holdStart = millis();
       handleLoopRecPlayTrigger();
       latchCloseState = true;
+    } else if (closeHalf && holdStart && (millis() - holdStart) > 2000UL) {
+      clearLoopData();
+      holdStart = 0;
     } else if (!closeHalf) {
       latchCloseState = false;
+      holdStart = 0;
     }
     return;
   }
@@ -4467,6 +5219,11 @@ void pollPush() {
     pushRt.pct = static_cast<uint8_t>(constrain(shaped, 0, 100));
     markActivity(false);
     if (sensorParamEligible(ui.selectedSetting)) ui.dirty = true;
+    if (!wasInRange && ui.selectedSetting == SET_LOOP_BARS && ui.menuMode == MENU_EDIT) {
+      settings.loopAutoOverdub = settings.loopAutoOverdub ? 0 : 1;
+      ui.dirty = true;
+      return;
+    }
   } else {
     pushRt.pct = 0;
   }
@@ -4494,11 +5251,19 @@ String settingValueString(uint8_t id) {
     case SET_BASS_CH: return bassLabel(v);
     case SET_THRU_OUT_CH: return midiChannelLabel(v, true);
     case SET_RND_RBN:
-      if (v == 0) return "OFF";
-      return String("+") + String(v);
+      if (v == RND_RBN_CH10_TO_1_SLOT) return roundRobinCh10To1Enabled() ? "[x]CH10-1+" : "[ ]CH10-1+";
+      if (v == RND_RBN_CH10_TO_2_SLOT) return roundRobinCh10To2Enabled() ? "[x]CH10-2+" : "[ ]CH10-2+";
+      if (v == RND_RBN_CLEAR_SLOT) return "CLEAR";
+      if (v == RND_RBN_BACK_SLOT) return "BACK";
+      return String((settings.roundRobinMask & channelBit(v + 1)) ? "[x] CH " : "[ ] CH ") + String(v + 1);
+    case SET_ROUTER:
+      if (routerEditStage == ROUTER_STAGE_LIST && v == ROUTER_CLEAR_SLOT) return "CLEAR";
+      if (routerEditStage == ROUTER_STAGE_LIST && v == ROUTER_BACK_SLOT) return "BACK";
+      return "";
     case SET_DIV_NOTES:
       if (v == DIV_NOTE_PLUS_SLOT) return "+NOTE";
-      if (v >= DIV_NOTE_RESET_SLOT) return "RESET";
+      if (v == DIV_NOTE_RESET_SLOT) return "RESET";
+      if (v == DIV_NOTE_BACK_SLOT) return "BACK";
       return kDivisionNames[divNoteSlotToDivision(v)];
     case SET_MAP_CC:
       if (v == MAP_CC_CLEAR_SLOT) return "CLEAR";
@@ -4853,6 +5618,129 @@ void drawCcChannelScreen(uint8_t channel) {
   display.print(channel);
 }
 
+String roundRobinChannelList() {
+  if (settings.roundRobinMask == 0 && !roundRobinCh10To1Enabled() && !roundRobinCh10To2Enabled()) return "OFF";
+  String out;
+  for (uint8_t ch = 1; ch <= 16; ++ch) {
+    if (!(settings.roundRobinMask & channelBit(ch))) continue;
+    if (out.length()) out += ",";
+    out += String(ch);
+  }
+  if (roundRobinCh10To1Enabled()) {
+    if (out.length()) out += ",";
+    out += F("CH10-1+");
+  }
+  if (roundRobinCh10To2Enabled()) {
+    if (out.length()) out += ",";
+    out += F("CH10-2+");
+  }
+  return out;
+}
+
+void drawRoundRobinScreen(uint8_t cursor) {
+  display.setTextColor(SSD1306_WHITE);
+  if (ui.menuMode == MENU_SELECT) {
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print(F("ROUND ROBIN"));
+    display.setCursor(0, 14);
+    display.print(roundRobinChannelList());
+    return;
+  }
+
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(F("RNDRBN"));
+  display.setCursor(0, 22);
+  if (cursor < 16) {
+    display.print((settings.roundRobinMask & channelBit(cursor + 1)) ? F("[x] ") : F("[ ] "));
+    display.print(F("CH "));
+    display.print(cursor + 1);
+  } else if (cursor == RND_RBN_CH10_TO_1_SLOT) {
+    display.print(roundRobinCh10To1Enabled() ? F("[x]CH10-1+") : F("[ ]CH10-1+"));
+  } else if (cursor == RND_RBN_CH10_TO_2_SLOT) {
+    display.print(roundRobinCh10To2Enabled() ? F("[x]CH10-2+") : F("[ ]CH10-2+"));
+  } else if (cursor == RND_RBN_CLEAR_SLOT) {
+    display.print(F("CLEAR"));
+  } else {
+    display.print(F("BACK"));
+  }
+}
+
+String twoDigit(uint8_t value) {
+  String out;
+  if (value < 10) out += '0';
+  out += String(value);
+  return out;
+}
+
+String routerEntryString(uint8_t idx) {
+  if (idx >= 16) return "";
+  String out = twoDigit(idx + 1);
+  out += '>';
+  out += twoDigit(settings.routerOutChannels[idx]);
+  const int8_t transpose = settings.routerTranspose[idx];
+  if (transpose > 0) out += '+';
+  else if (transpose < 0) out += '-';
+  else out += '=';
+  const uint8_t amount = abs(transpose);
+  if (amount < 10) out += '0';
+  out += String(amount);
+  return out;
+}
+
+String routerActiveList() {
+  if (settings.routerActiveMask == 0) return "OFF";
+  String out;
+  for (uint8_t i = 0; i < 16; ++i) {
+    if (!(settings.routerActiveMask & static_cast<uint16_t>(1U << i))) continue;
+    if (out.length()) out += " ";
+    out += routerEntryString(i);
+  }
+  return out;
+}
+
+void drawRouterScreen(uint8_t cursor) {
+  display.setTextColor(SSD1306_WHITE);
+  if (ui.menuMode == MENU_SELECT) {
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print(F("ROUTER"));
+    display.setCursor(0, 14);
+    display.print(routerActiveList());
+    return;
+  }
+
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(F("ROUTER"));
+  display.setCursor(0, 22);
+  if (routerEditStage == ROUTER_STAGE_LIST) {
+    if (cursor < 16) display.print(routerEntryString(cursor));
+    else if (cursor == ROUTER_CLEAR_SLOT) display.print(F("CLEAR"));
+    else display.print(F("BACK"));
+  } else {
+    display.print(routerEntryString(routerEditChannel));
+    display.setTextSize(1);
+    display.setCursor(0, 39);
+    display.print(routerEditStage == ROUTER_STAGE_DEST ? F("OUT CH") : F("TRANSPOSE"));
+  }
+}
+
+void drawLoopBarsScreen(uint8_t value) {
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(kLoopBarsNames[value]);
+  display.setTextSize(1);
+  display.setCursor(0, 18);
+  display.print(F("Auto Overdub"));
+  display.setCursor(0, 30);
+  display.print(settings.loopAutoOverdub ? F("On") : F("Off"));
+  display.setCursor(0, 40);
+  display.print(F("(Push)"));
+}
+
 void drawDivNotesScreen(uint8_t cursor) {
   display.setTextSize(2);
   display.setCursor(0, 0);
@@ -4873,10 +5761,16 @@ void drawDivNotesScreen(uint8_t cursor) {
     }
     return;
   }
-  if (cursor >= DIV_NOTE_RESET_SLOT) {
+  if (cursor == DIV_NOTE_RESET_SLOT) {
     display.setTextSize(3);
     display.setCursor(0, 18);
     display.print(F("RESET"));
+    return;
+  }
+  if (cursor == DIV_NOTE_BACK_SLOT) {
+    display.setTextSize(3);
+    display.setCursor(0, 18);
+    display.print(F("BACK"));
     return;
   }
   const uint8_t divId = divNoteSlotToDivision(cursor);
@@ -5101,6 +5995,12 @@ void renderMainTop() {
     case SET_THRU_OUT_CH:
       drawChannelScreen(F("THRU"), v, true);
       break;
+    case SET_RND_RBN:
+      drawRoundRobinScreen(v);
+      break;
+    case SET_ROUTER:
+      drawRouterScreen(v);
+      break;
     case SET_DIV_NOTES:
       drawDivNotesScreen(v);
       break;
@@ -5118,6 +6018,9 @@ void renderMainTop() {
       break;
     case SET_SENSOR_CH:
       drawChannelScreen(F("SENSORS"), v);
+      break;
+    case SET_LOOP_BARS:
+      drawLoopBarsScreen(v);
       break;
     case SET_FORCE_KEY:
     case SET_FORCE_SCALE:
@@ -5196,8 +6099,16 @@ void renderDisplayIfNeeded() {
   ui.lastRenderMs = now;
 }
 
+void showBusyHourglass() {
+  display.fillRect(116, 23, 12, 18, SSD1306_BLACK);
+  display.drawTriangle(118, 24, 126, 24, 122, 31, SSD1306_WHITE);
+  display.drawTriangle(118, 39, 126, 39, 122, 32, SSD1306_WHITE);
+  display.display();
+}
+
 void processDeferredUiActions() {
   if (!ui.deferredExitWork) return;
+  showBusyHourglass();
   bool rebootForHostMode = false;
 
   if (ui.deferredSaveOnly) {
@@ -5218,7 +6129,7 @@ void processDeferredUiActions() {
       setSettingValueRaw(ui.pendingSetting, ui.pendingValue);
       ui.hasPendingEdit = false;
     }
-    if (ui.selectedSetting == SET_DIV_NOTES && divNotesCursor >= DIV_NOTE_RESET_SLOT) {
+    if (ui.selectedSetting == SET_DIV_NOTES && divNotesCursor == DIV_NOTE_RESET_SLOT) {
       for (uint8_t i = 0; i < DIV_NOTE_SLOT_COUNT; ++i) {
         settings.divNoteChannels[i] = 0;
         settings.divNoteNotes[i] = 0xFF;
@@ -5233,6 +6144,10 @@ void processDeferredUiActions() {
       clearMapCcMappings();
       ui.dirty = true;
     }
+    if (ui.selectedSetting == SET_ROUTER) {
+      panicMidiOnly();
+      ui.dirty = true;
+    }
     saveStorage();
   }
 
@@ -5240,6 +6155,8 @@ void processDeferredUiActions() {
   ui.deferredLoadPreset = false;
   ui.deferredSaveOnly = false;
 
+  ui.dirty = true;
+  if (!rebootForHostMode) renderDisplayIfNeeded();
   if (rebootForHostMode) rebootBoard(F("USB mode"));
 }
 
