@@ -5,6 +5,52 @@ By Joseph Wozniak - https://woz.lol
 
 ****Connect multiple usb midi devices with a hub. Output din/trs or usb midi.****
 
+with SSD1306 OLED display (2-color recommended, yellow on the bottom)
+
+Control live parameters and the appegiator with:
+
+Optical distance sensor (VL53L0X)
+Push force pressure sensor (FSR402 sensor with LM393 module)
+Assignable CC controls
+4 foot pedal inputs (optionally connected to a QIACHIP RX480E wireless module)
+You can also add an additional RP2040 board as a usb midi device, for full usb-to-usb rounting to another usb host. Use this file for the secondary RP2040: rp2040_usb_din_midi_bridge.txt
+
+Current Hardware Pin Map (RP2040 Zero board labels)
+Use the pin numbers exactly as printed on the RP2040 Zero board:
+
+0 DIN MIDI OUT (TX to DIN/TRS out + Pro Micro RX pin)
+1 DIN MIDI IN (RX from DIN/TRS with optocoupler or Pro Micro TX pin WITH RESISTORS. 10k from tx to rx pins, 20k from tx to gnd)
+2 I2C SDA (SSD1306 + VL53L0X on same bus)
+3 I2C SCL (SSD1306 + VL53L0X on same bus)
+6 Rotary encoder A
+7 Rotary encoder B
+8 Rotary encoder push switch
+9, 10, 12, 13 Foot pedal 1-4 inputs (active high, internal pull-down)
+14 USB host D+
+15 USB host D-
+26 Push/pressure analog sensor input (FSR402 sensor with LM393 module)
+Pin 11 is intentionally unused, so we can put a screw there.
+
+RP2040 / Arduino-Pico pin settings:
+- USB MIDI host D+ to 22ohm resistor to GPIO pin 14                 
+- USB MIDI host D- to 22ohm resistor to GPIO pin 15                 
+- The 22ohm resistors go near the RP2040.                            
+- USB MIDI host port requires 5V VBUS power, and two 15k resistors  
+one from D+ to ground, and another from D- to ground.                
+                                                                    
+-IMPORTANT set CPU Speed: "240 MHz (Overclock)"                     
+-NOTE use a ground wire to the usb host thicker than 30awg.         
+-Twist D+ and D-, try to keep them short.                           
+
+BOARD SETUP
+Board: Waveshare RP2040 Zero
+USB stack: Adafruit TinyUSB
+CPU: 240 MHz ONLY
+midi USB host uses PIO-USB on pins 14/15.
+Adafruit_NeoPixel must stay disabled in this sketch while USB host is enabled (ARPNMIDI_ENABLE_RGB_LED 0), because it conflicts with PIO-USB state machines.
+Pico-PIO-USB is vendored in vendor/Pico-PIO-USB (tag 0.7.1) and must be available to Arduino.
+TinyUSB host MIDI support in the installed Arduino-Pico core must define: #define CFG_TUH_MIDI (CFG_TUH_DEVICE_MAX)
+
 Runtime Controls
 ----------------
 
