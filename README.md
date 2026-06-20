@@ -226,7 +226,7 @@ Comprehensive Menu Reference (All Screens)
 - Output channel used by both foot pedal remote actions (`REMOTE 1` and `REMOTE 2`).
 
 17. `REMOTE 1`
-- Action sent when pedal 1 goes low.
+- Action sent when pedal 1 goes high.
 - Value mapping:
   - `0..127` => note number pulse
   - `128..254` => CC `1..127` pulse

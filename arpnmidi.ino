@@ -1,5 +1,5 @@
 /*
-  arpnmidi.txt
+  arpnmidi.ino
   RP2040 Zero MIDI router / arpeggiator / processor / multitool
 
   Pin plan using the board labels you can see on this RP2040 Zero:
@@ -4882,8 +4882,8 @@ void triggerRemoteAction(uint8_t action, PedalPulse &pulse) {
 
 PedalPulse pedal1Pulse;
 PedalPulse pedal2Pulse;
-bool pedal1State = true;
-bool pedal2State = true;
+bool pedal1State = false;
+bool pedal2State = false;
 uint32_t pedal1ChangeMs = 0;
 uint32_t pedal2ChangeMs = 0;
 
@@ -4903,7 +4903,7 @@ void pollPedals() {
   if (p1 != pedal1State && (now - pedal1ChangeMs) > PEDAL_DEBOUNCE_MS) {
     pedal1ChangeMs = now;
     pedal1State = p1;
-    if (!p1) {
+    if (p1) {
       markActivity(false);
       triggerRemoteAction(settings.remote1Action, pedal1Pulse);
     }
@@ -4911,7 +4911,7 @@ void pollPedals() {
   if (p2 != pedal2State && (now - pedal2ChangeMs) > PEDAL_DEBOUNCE_MS) {
     pedal2ChangeMs = now;
     pedal2State = p2;
-    if (!p2) {
+    if (p2) {
       markActivity(false);
       triggerRemoteAction(settings.remote2Action, pedal2Pulse);
     }
@@ -6216,8 +6216,8 @@ void setupPins() {
   pinMode(PIN_ENC_A, INPUT_PULLUP);
   pinMode(PIN_ENC_B, INPUT_PULLUP);
   pinMode(PIN_ENC_SW, INPUT_PULLUP);
-  pinMode(PIN_FOOT_1, INPUT_PULLUP);
-  pinMode(PIN_FOOT_2, INPUT_PULLUP);
+  pinMode(PIN_FOOT_1, INPUT_PULLDOWN);
+  pinMode(PIN_FOOT_2, INPUT_PULLDOWN);
   pinMode(PIN_PUSH, INPUT);
   encoder.lastAB = (digitalRead(PIN_ENC_A) << 1) | digitalRead(PIN_ENC_B);
   encoder.lastSwitch = digitalRead(PIN_ENC_SW);
