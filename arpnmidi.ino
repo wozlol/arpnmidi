@@ -57,6 +57,18 @@
 #define ARPNMIDI_ENABLE_RGB_LED 0
 #endif
 
+/*
+  Front-panel hardware mode:
+  - 0 = DIP encoder/display build: original encoder direction, two physical clicks
+        per UI increment, display rotated 180 with the mode band at the bottom.
+  - 1 = SMD encoder/display build: encoder direction reversed, one physical click
+        per UI increment, display in normal orientation with the yellow mode band
+        at the top and the blue per-mode settings area below it.
+*/
+#ifndef ARPNMIDI_SMD_PANEL_MODE
+#define ARPNMIDI_SMD_PANEL_MODE 1
+#endif
+
 #if ARPNMIDI_ENABLE_USB_HOST
 #include <Adafruit_TinyUSB.h>
 #include "pio_usb_configuration.h"
@@ -81,9 +93,21 @@ constexpr uint8_t PIN_RGB_LED = 16;
 constexpr uint8_t OLED_ADDR = 0x3C;
 constexpr uint8_t SCREEN_W = 128;
 constexpr uint8_t SCREEN_H = 64;
-constexpr uint8_t TOP_H = 48;
-constexpr uint8_t BOTTOM_Y = 48;
-constexpr uint8_t BOTTOM_H = 16;
+constexpr uint8_t MODE_INFO_H = 16;
+constexpr uint8_t SETTING_AREA_H = 48;
+#if ARPNMIDI_SMD_PANEL_MODE
+constexpr uint8_t DISPLAY_ROTATION = 0;
+constexpr uint8_t MODE_INFO_Y = 0;
+constexpr uint8_t SETTING_AREA_Y = MODE_INFO_H;
+constexpr int8_t ENCODER_DIRECTION = -1;
+constexpr uint8_t ENCODER_COUNTS_PER_INCREMENT = 2;
+#else
+constexpr uint8_t DISPLAY_ROTATION = 2;
+constexpr uint8_t MODE_INFO_Y = SETTING_AREA_H;
+constexpr uint8_t SETTING_AREA_Y = 0;
+constexpr int8_t ENCODER_DIRECTION = 1;
+constexpr uint8_t ENCODER_COUNTS_PER_INCREMENT = 4;
+#endif
 
 constexpr uint8_t VL53_VALID_MIN_MM = 60;
 constexpr uint16_t VL53_VALID_MAX_MM = 600;
@@ -104,7 +128,6 @@ constexpr uint32_t SCREEN_SAVER_REFRESH_MS = 4000UL;
 constexpr uint32_t LONG_HOLD_PANIC_MS = 2000UL;
 constexpr uint32_t PEDAL_DEBOUNCE_MS = 25UL;
 constexpr uint32_t PEDAL_PULSE_MS = 35UL;
-constexpr uint8_t ENCODER_COUNTS_PER_DETENT = 4;
 
 constexpr uint8_t MAX_HELD_NOTES = 32;
 constexpr uint8_t MAX_ARP_OUTPUT_NOTES = 8;
@@ -880,7 +903,10 @@ UsbQueuedMessage usbMsgQueue[USB_MSG_QUEUE_SIZE];
 volatile uint8_t usbTxHead = 0;
 volatile uint8_t usbTxTail = 0;
 UsbQueuedMessage usbTxQueue[USB_TX_QUEUE_SIZE];
+UsbQueuedMessage usbTxRetryMessage;
 UsbQueuedMessage pendingUsbContinuousMessage;
+bool usbTxRetryPending = false;
+uint8_t usbTxRetryDeliveredMask = 0;
 bool pendingUsbContinuous = false;
 volatile uint16_t usbSoftDropCount = 0;
 volatile uint16_t usbCriticalDropCount = 0;
@@ -900,6 +926,16 @@ volatile uint8_t drumLastOutNote = 0xFF;
 volatile uint16_t usbHostNoteHitCount = 0;
 volatile uint8_t usbHostLastInputCh = 0xFF;
 volatile uint8_t usbHostLastInputNote = 0xFF;
+volatile uint8_t usbHostLastMountIdx = 0xFF;
+volatile uint8_t usbHostLastMountDaddr = 0xFF;
+volatile uint8_t usbHostLastMountRxCables = 0;
+volatile uint8_t usbHostLastMountTxCables = 0;
+volatile uint16_t usbHostTxAttemptCount = 0;
+volatile uint16_t usbHostTxAcceptedCount = 0;
+volatile uint16_t usbHostTxFailCount = 0;
+volatile uint8_t usbHostLastTxIdx = 0xFF;
+volatile uint8_t usbHostLastTxAcceptedBytes = 0;
+volatile uint32_t usbHostLastTxMs = 0;
 uint8_t drumAftertouchPressure = 127;
 
 bool heldInputNotes[128];
@@ -2099,6 +2135,46 @@ void panicMidiOnly() {
   pushRt.lastCcValue = -1;
 }
 
+void sendDinAllNoteOffChannelOnly(uint8_t ch1) {
+  if (!channelEnabled(ch1)) return;
+  for (uint8_t note = 0; note < 128; ++note) sendDinNoteOff(ch1, note, 0);
+  sendDinCc(ch1, 123, 0);
+  sendDinCc(ch1, 120, 0);
+}
+
+void panicDinOnly() {
+  // loopAllOff() routes through normal fanout, including USB host output.
+  // This DIN-only path is used while changing USB host mode to avoid a stuck hub write during save/reboot.
+  const uint8_t panicArpCh = mainArpOutChannel();
+  if (channelEnabled(panicArpCh)) sendDinAllNoteOffChannelOnly(panicArpCh);
+  for (uint8_t ch = 1; ch <= 16; ++ch) {
+    if (settings.roundRobinMask & channelBit(ch)) sendDinAllNoteOffChannelOnly(ch);
+  }
+  if (roundRobinCh10To1Enabled() || roundRobinCh10To2Enabled()) {
+    for (uint8_t ch = 1; ch <= 16; ++ch) sendDinAllNoteOffChannelOnly(ch);
+  }
+  if (arpChannelSpecialMode()) sendDinAllNoteOffChannelOnly(10);
+  if (channelEnabled(settings.thruOutChannel)) sendDinAllNoteOffChannelOnly(settings.thruOutChannel);
+  if (channelEnabled(settings.legatoChannel)) sendDinAllNoteOffChannelOnly(settings.legatoChannel);
+  if (settings.bassMode > 0) sendDinAllNoteOffChannelOnly(bassModeChannel(settings.bassMode));
+  if (channelEnabled(settings.remoteChannel)) sendDinAllNoteOffChannelOnly(settings.remoteChannel);
+  if (channelEnabled(settings.sensorChannel)) sendDinAllNoteOffChannelOnly(settings.sensorChannel);
+  activeArpCount = 0;
+  activeDrumArpCount = 0;
+  loopPlaying = false;
+  loopRecording = false;
+  loopRecordingArmed = false;
+  loopOverdubbing = false;
+  loopDeleteArmed = false;
+  currentBassOutNote = -1;
+  sensorRt.activeNote = -1;
+  pushRt.activeNote = -1;
+  sensorRt.lastPitch = 0;
+  pushRt.lastPitch = 0;
+  sensorRt.lastCcValue = -1;
+  pushRt.lastCcValue = -1;
+}
+
 void resetUsbDebugCounters() {
   usbLastRxIdx = 0xFF;
   usbLastRxMs = 0;
@@ -2122,6 +2198,16 @@ void resetUsbDebugCounters() {
   usbHostNoteHitCount = 0;
   usbHostLastInputCh = 0xFF;
   usbHostLastInputNote = 0xFF;
+  usbHostLastMountIdx = 0xFF;
+  usbHostLastMountDaddr = 0xFF;
+  usbHostLastMountRxCables = 0;
+  usbHostLastMountTxCables = 0;
+  usbHostTxAttemptCount = 0;
+  usbHostTxAcceptedCount = 0;
+  usbHostTxFailCount = 0;
+  usbHostLastTxIdx = 0xFF;
+  usbHostLastTxAcceptedBytes = 0;
+  usbHostLastTxMs = 0;
 }
 
 void panicAll() {
@@ -2132,6 +2218,8 @@ void panicAll() {
   usbMsgTail = 0;
   usbTxHead = 0;
   usbTxTail = 0;
+  usbTxRetryPending = false;
+  usbTxRetryDeliveredMask = 0;
   usbParserResetRequested = true;
   ui.menuMode = MENU_SELECT;
   ui.dirty = true;
@@ -3997,12 +4085,12 @@ void pollEncoder() {
       encoder.turnWhilePressed |= encoder.switchDown;
       encoder.lastTurnMs = millis();
       encoder.switchIgnoreUntilMs = encoder.lastTurnMs + 120;
-      encoder.stepAccum += delta;
-      if (encoder.stepAccum >= ENCODER_COUNTS_PER_DETENT) {
-        encoder.stepAccum -= ENCODER_COUNTS_PER_DETENT;
+      encoder.stepAccum += delta * ENCODER_DIRECTION;
+      if (encoder.stepAccum >= ENCODER_COUNTS_PER_INCREMENT) {
+        encoder.stepAccum -= ENCODER_COUNTS_PER_INCREMENT;
         encoderTurn(1, encoder.switchDown);
-      } else if (encoder.stepAccum <= -ENCODER_COUNTS_PER_DETENT) {
-        encoder.stepAccum += ENCODER_COUNTS_PER_DETENT;
+      } else if (encoder.stepAccum <= -ENCODER_COUNTS_PER_INCREMENT) {
+        encoder.stepAccum += ENCODER_COUNTS_PER_INCREMENT;
         encoderTurn(-1, encoder.switchDown);
       }
     }
@@ -4526,16 +4614,50 @@ void flushUsbMidiOutput() {
 }
 
 void drainUsbTxQueue() {
-  while (usbTxTail != usbTxHead) {
-    const UsbQueuedMessage msg = usbTxQueue[usbTxTail];
-    usbTxTail = static_cast<uint8_t>((usbTxTail + 1) % USB_TX_QUEUE_SIZE);
+  while (usbTxRetryPending || usbTxTail != usbTxHead) {
+    const UsbQueuedMessage msg = usbTxRetryPending ? usbTxRetryMessage : usbTxQueue[usbTxTail];
+    uint8_t deliveredMask = usbTxRetryPending ? usbTxRetryDeliveredMask : 0;
     const uint8_t len = 1 + midiMessageDataLength(msg.status);
     uint8_t packet[3] = {msg.status, msg.data1, msg.data2};
+    bool blocked = false;
+
     for (uint8_t i = 0; i < MAX_USB_MIDI_DEVICES; ++i) {
       UsbMidiDevice &dev = usbMidiDevices[i];
       if (!dev.mounted || dev.txCableCount == 0) continue;
       if (msg.sourcePort != 255 && msg.sourcePort == usbPortFromIdx(dev.idx)) continue;
-      tuh_midi_stream_write(dev.idx, 0, packet, len);
+      const uint8_t deliveredBit = static_cast<uint8_t>(1U << i);
+      if (deliveredMask & deliveredBit) continue;
+
+      usbHostTxAttemptCount++;
+      usbHostLastTxIdx = dev.idx;
+      usbHostLastTxMs = millis();
+      const uint32_t written = tuh_midi_stream_write(dev.idx, 0, packet, len);
+      usbHostLastTxAcceptedBytes = static_cast<uint8_t>(min<uint32_t>(written, 255));
+      if (written == len) {
+        usbHostTxAcceptedCount++;
+        deliveredMask |= deliveredBit;
+      } else {
+        usbHostTxFailCount++;
+        blocked = true;
+        break;
+      }
+    }
+
+    if (blocked) {
+      usbTxRetryMessage = msg;
+      usbTxRetryDeliveredMask = deliveredMask;
+      if (!usbTxRetryPending) {
+        usbTxRetryPending = true;
+        usbTxTail = static_cast<uint8_t>((usbTxTail + 1) % USB_TX_QUEUE_SIZE);
+      }
+      return;
+    }
+
+    if (usbTxRetryPending) {
+      usbTxRetryPending = false;
+      usbTxRetryDeliveredMask = 0;
+    } else {
+      usbTxTail = static_cast<uint8_t>((usbTxTail + 1) % USB_TX_QUEUE_SIZE);
     }
   }
 }
@@ -4566,6 +4688,8 @@ bool recoverUsbHostStack() {
   usbMsgTail = 0;
   usbTxHead = 0;
   usbTxTail = 0;
+  usbTxRetryPending = false;
+  usbTxRetryDeliveredMask = 0;
   usbLastRxIdx = 0xFF;
   usbLastRxMs = 0;
   usbUiDirty = true;
@@ -4627,6 +4751,10 @@ void tuh_midi_mount_cb(uint8_t idx, const tuh_midi_mount_cb_t *mount_cb_data) {
       usbMidiDevices[i].daddr = mount_cb_data->daddr;
       usbMidiDevices[i].rxCableCount = mount_cb_data->rx_cable_count;
       usbMidiDevices[i].txCableCount = mount_cb_data->tx_cable_count;
+      usbHostLastMountIdx = idx;
+      usbHostLastMountDaddr = mount_cb_data->daddr;
+      usbHostLastMountRxCables = mount_cb_data->rx_cable_count;
+      usbHostLastMountTxCables = mount_cb_data->tx_cable_count;
       usbMidiMountedCount++;
       usbUiDirty = true;
       break;
@@ -5296,12 +5424,12 @@ String settingValueString(uint8_t id) {
   }
 }
 
-void drawBottomLabel() {
-  display.fillRect(0, BOTTOM_Y, SCREEN_W, BOTTOM_H, SSD1306_BLACK);
+void drawModeLabel() {
+  display.fillRect(0, MODE_INFO_Y, SCREEN_W, MODE_INFO_H, SSD1306_BLACK);
   display.setTextColor(SSD1306_WHITE);
   display.setFont(&FreeSans9pt7b);
   display.setTextSize(1);
-  display.setCursor(0, 62);
+  display.setCursor(0, MODE_INFO_Y + 14);
   if (ui.selectedSetting == SET_FORCE_KEY) {
     const int16_t key = effectiveSettingValue(SET_FORCE_KEY);
     if (key == 0) {
@@ -5516,10 +5644,10 @@ void drawPresetGrid(uint8_t slot) {
 
 void drawModeIndicator() {
   const int x = 122;
-  const int topY = 44;
-  const int bottomY = 56;
-  if (ui.menuMode == MENU_EDIT) display.fillCircle(x, topY, 3, SSD1306_WHITE);
-  else display.fillCircle(x, bottomY, 3, SSD1306_WHITE);
+  const int editY = SETTING_AREA_Y + SETTING_AREA_H - 4;
+  const int selectY = MODE_INFO_Y + (MODE_INFO_H / 2);
+  if (ui.menuMode == MENU_EDIT) display.fillCircle(x, editY, 3, SSD1306_WHITE);
+  else display.fillCircle(x, selectY, 3, SSD1306_WHITE);
 }
 
 void drawLoopStatusIcon() {
@@ -5853,29 +5981,24 @@ void drawUsbDebugScreen() {
   }
 
   display.setCursor(0, 8);
-  display.print(F("Q "));
-  display.print(queueDepth);
-  display.print(F(" DROP "));
-  display.print(static_cast<uint16_t>(usbSoftDropCount));
-  display.print(F("/"));
-  display.print(static_cast<uint16_t>(usbCriticalDropCount));
+  display.print(F("M"));
+  if (usbHostLastMountIdx == 0xFF) display.print(F("--"));
+  else display.print(static_cast<uint8_t>(usbHostLastMountIdx));
+  display.print(F(" A"));
+  if (usbHostLastMountDaddr == 0xFF) display.print(F("--"));
+  else display.print(static_cast<uint8_t>(usbHostLastMountDaddr));
+  display.print(F(" R"));
+  display.print(static_cast<uint8_t>(usbHostLastMountRxCables));
+  display.print(F(" T"));
+  display.print(static_cast<uint8_t>(usbHostLastMountTxCables));
 
   display.setCursor(0, 16);
-  if (debugLastCtrlType == 1 && debugLastCtrlCh != 0xFF) {
-    display.print(F("CC "));
-    display.print(static_cast<uint8_t>(debugLastCtrlCh));
-    display.print(F(" "));
-    display.print(static_cast<uint8_t>(debugLastCcNum));
-    display.print(F("="));
-    display.print(static_cast<uint8_t>(debugLastCcVal));
-  } else if (debugLastCtrlType == 2 && debugLastCtrlCh != 0xFF) {
-    display.print(F("PB "));
-    display.print(static_cast<uint8_t>(debugLastCtrlCh));
-    display.print(F(" "));
-    display.print(static_cast<int16_t>(debugLastPb));
-  } else {
-    display.print(F("CC/PB --"));
-  }
+  display.print(F("TX "));
+  display.print(static_cast<uint16_t>(usbHostTxAttemptCount));
+  display.print(F("/"));
+  display.print(static_cast<uint16_t>(usbHostTxAcceptedCount));
+  display.print(F(" F"));
+  display.print(static_cast<uint16_t>(usbHostTxFailCount));
 
   display.setCursor(0, 24);
   if (debugLastInputCh == 0xFF) {
@@ -5897,12 +6020,16 @@ void drawUsbDebugScreen() {
   }
 
   display.setCursor(0, 40);
-  display.print(F("RX AGE "));
+  display.print(F("RX "));
   const uint32_t age = (usbLastRxIdx == 0xFF) ? 0 : (millis() - usbLastRxMs);
   if (usbLastRxIdx != 0xFF && age > 9999) display.print(F("OLD"));
   else {
     display.print(age);
   }
+  display.print(F(" Q"));
+  display.print(queueDepth);
+  display.print(F(" B"));
+  display.print(static_cast<uint8_t>(usbHostLastTxAcceptedBytes));
 }
 
 bool arpPlaybackActive() {
@@ -5914,6 +6041,35 @@ bool arpPlaybackActive() {
 bool freezeOrLatchArpPlaybackActive() {
   const bool modeActive = arpFreezeActive || arpFreezePlusActive || arpLatchEnabled();
   return modeActive && arpPlaybackActive();
+}
+
+bool displayBufferPixel(const uint8_t *buffer, uint8_t x, uint8_t y) {
+  return buffer[x + (static_cast<uint16_t>(y / 8) * SCREEN_W)] & (1U << (y & 7));
+}
+
+void setDisplayBufferPixel(uint8_t *buffer, uint8_t x, uint8_t y, bool on) {
+  uint8_t &cell = buffer[x + (static_cast<uint16_t>(y / 8) * SCREEN_W)];
+  const uint8_t mask = 1U << (y & 7);
+  if (on) cell |= mask;
+  else cell &= ~mask;
+}
+
+void moveRenderedSettingArea() {
+  if (SETTING_AREA_Y == 0) return;
+
+  uint8_t *buffer = display.getBuffer();
+  for (int y = SETTING_AREA_H - 1; y >= 0; --y) {
+    for (uint8_t x = 0; x < SCREEN_W; ++x) {
+      const bool on = displayBufferPixel(buffer, x, static_cast<uint8_t>(y));
+      setDisplayBufferPixel(buffer, x, static_cast<uint8_t>(y + SETTING_AREA_Y), on);
+    }
+  }
+
+  for (uint8_t y = 0; y < SETTING_AREA_Y; ++y) {
+    for (uint8_t x = 0; x < SCREEN_W; ++x) {
+      setDisplayBufferPixel(buffer, x, y, false);
+    }
+  }
 }
 
 void monitorUsbHostStall() {
@@ -6092,7 +6248,8 @@ void renderDisplayIfNeeded() {
   display.clearDisplay();
   renderMainTop();
   drawLoopStatusIcon();
-  drawBottomLabel();
+  moveRenderedSettingArea();
+  drawModeLabel();
   drawModeIndicator();
   display.display();
   ui.dirty = false;
@@ -6100,9 +6257,10 @@ void renderDisplayIfNeeded() {
 }
 
 void showBusyHourglass() {
-  display.fillRect(116, 23, 12, 18, SSD1306_BLACK);
-  display.drawTriangle(118, 24, 126, 24, 122, 31, SSD1306_WHITE);
-  display.drawTriangle(118, 39, 126, 39, 122, 32, SSD1306_WHITE);
+  const int y = SETTING_AREA_Y + 23;
+  display.fillRect(116, y, 12, 18, SSD1306_BLACK);
+  display.drawTriangle(118, y + 1, 126, y + 1, 122, y + 8, SSD1306_WHITE);
+  display.drawTriangle(118, y + 16, 126, y + 16, 122, y + 9, SSD1306_WHITE);
   display.display();
 }
 
@@ -6125,7 +6283,8 @@ void processDeferredUiActions() {
     if (ui.hasPendingEdit && ui.pendingSetting == ui.selectedSetting) {
       rebootForHostMode = (ui.pendingSetting == SET_USB_HOST_MODE &&
                            ui.pendingValue != getSettingValueRaw(SET_USB_HOST_MODE));
-      panicMidiOnly();
+      if (rebootForHostMode) panicDinOnly();
+      else panicMidiOnly();
       setSettingValueRaw(ui.pendingSetting, ui.pendingValue);
       ui.hasPendingEdit = false;
     }
@@ -6180,7 +6339,7 @@ void setupDisplay() {
   Wire1.begin();
   Wire1.setClock(400000);
   display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
-  display.setRotation(2);
+  display.setRotation(DISPLAY_ROTATION);
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   showBootStage(F("Display OK"), F("Starting..."));
