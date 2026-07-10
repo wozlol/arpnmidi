@@ -1,0 +1,37 @@
+USB Host Shield 2.0 — bound the two unguarded completion-wait spins in OutTransfer
+Library path: ~/Documents/Arduino/libraries/USB_Host_Shield_Library_2.0/usb.cpp
+Function: USB::OutTransfer()
+
+WHY: OutTransfer() (the SendData / host->device path) has two loops that wait for
+the MAX3421E transfer-done IRQ with NO timeout:
+
+    while(!(regRd(rHIRQ) & bmHXFRDNIRQ)){ ... } //wait for the completion IRQ
+
+Under bus stress (e.g. forwarding a held pad's continuous aftertouch flood to a
+hosted device), a transfer can fail to complete — bmHXFRDNIRQ never asserts — and
+the RP2040 spins here FOREVER. Total lockup: no serial, and our sketch-level
+recovery watchdog never runs because loop() never returns. Symptom: MIDI host dies
+in all directions with no serial output; the Arturia (heavy aftertouch) triggered
+it fast, plain keys lasted much longer. (InTransfer uses dispatchPkt(), which is
+already timed — only OutTransfer had the unguarded spins.)
+
+FIX: give each spin a 50 ms ceiling so it bails on a hung transfer, lets
+OutTransfer return an error, and returns control to loop() so the watchdog can
+re-init the host. A healthy packet completes in microseconds, so 50 ms is safe.
+
+Both edits, in USB::OutTransfer(), change:
+    while(!(regRd(rHIRQ) & bmHXFRDNIRQ)){
+        ...
+    } //wait for the completion IRQ
+to:
+    { uint32_t hxfrTO = (uint32_t)millis() + 50; // ARPnMIDI: bound completion wait
+    while(!(regRd(rHIRQ) & bmHXFRDNIRQ)){
+        if((int32_t)((uint32_t)millis() - hxfrTO) >= 0L) break;
+        ...
+    } } //wait for the completion IRQ
+
+TO REVERT: remove the added `{ uint32_t hxfrTO ... }` wrapper and the
+`if(... ) break;` line from both loops.
+TO RE-APPLY after a library update: find the two
+`while(!(regRd(rHIRQ) & bmHXFRDNIRQ))` loops in USB::OutTransfer() and add the
+deadline + break to each.

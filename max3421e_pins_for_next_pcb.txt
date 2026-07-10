@@ -1,0 +1,42 @@
+MAX3421E Pin Requirements for Next PCB
+=======================================
+
+The USB Host Shield 2.0 library has been patched (see patches/USB_Host_Shield_2.0_RP2040_pins.patch)
+to declare the RP2040 pin assignments instead of the Arduino Uno defaults.
+
+ARPnMIDI PCB — actual pinout (confirmed working):
+  GP0   MAX3421E MISO  (SPI0 RX — GP0 is a valid SPI0 RX pin, selected via SPI.setRX(0))
+  GP1   MAX3421E CS    (library patch: UsbCore.h MAX3421e<P1, P26>)
+  GP2   MAX3421E SCK   (SPI0 SCK)
+  GP3   MAX3421E MOSI  (SPI0 TX)
+  GP4   main-brain MIDI serial TX (UART1 / Serial2)
+  GP5   main-brain MIDI serial RX (UART1 / Serial2)
+  GP25  TRS serial MIDI IN from opto (external MIDI in)
+  GP26  MAX3421E INT   (library patch: UsbCore.h MAX3421e<P1, P26>)
+  GP24  USB2514B RESET_N (hub control, active low)
+
+  NOTE: MISO is GP0, NOT GP4. The RP2040-Zero *default* SPI0 MISO is GP4, but GP0
+  is an equally valid SPI0 RX pin (valid set: {0,4,16,20}) and is selected explicitly
+  with SPI.setRX(0). GP4/GP5 are used for the main-brain MIDI UART instead.
+  (An earlier "GP0 doesn't work" conclusion was a false alarm caused by a broken
+  loopback test and a floating RST pin — GP0 is fine.)
+
+  RST: tie the MAX3421E RST pin to 3.3V (module has no pullup; floating RST holds the
+  chip in reset and it reads REVISION=0x00). Do NOT forget this on the PCB.
+
+RST pin on MAX3421E:
+  Not connected to a GPIO. The USB Host Shield 2.0 module board has a 10k pullup
+  to VCC on RST, so it defaults HIGH (not in reset) without a GPIO.
+  If you ever need to drive RST, use any spare GPIO and call regWr(rHCTL, bmCHIPRES)
+  in firmware — the library already does this during Init().
+
+Why these specific pins:
+  GP1 and GP26 are used because the RP2040 SPI0 peripheral's native CS pin is GP1,
+  and GP26 is a convenient ADC-capable pin. The library patch locks the RP2040 build
+  to exactly these two pins. If you ever need different pins, update the
+  ARDUINO_ARCH_RP2040 entry in UsbCore.h and keep the patch file in sync.
+
+What the UNPATCHED library uses (Arduino Uno defaults — DO NOT use for RP2040 builds):
+  SS  = pin 10  (GP10 on RP2040)
+  INT = pin 9   (GP9 on RP2040)
+  SPI = pins 11/12/13 (MOSI/MISO/SCK, mapped to GP3/GP0/GP2 via SPI.setRX/TX/SCK)

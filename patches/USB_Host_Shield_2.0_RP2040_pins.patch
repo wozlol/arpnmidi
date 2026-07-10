@@ -1,0 +1,34 @@
+USB_Host_Shield_Library_2.0 changes for RP2040-Zero / ARPnMIDI.
+Only FILE 1 (UsbCore.h) is a functional change. FILE 2 (usbhost.h) is left at the
+stock MISO=P0 value — see the note there.
+
+────────────────────────────────────────────────────────────────
+FILE 1: UsbCore.h — declares CS and INT pin numbers for the MAX3421E
+Library path: ~/Documents/Arduino/libraries/USB_Host_Shield_Library_2.0/UsbCore.h
+────────────────────────────────────────────────────────────────
+--- a/USB_Host_Shield_Library_2.0/UsbCore.h
++++ b/USB_Host_Shield_Library_2.0/UsbCore.h
+@@ -53,6 +53,8 @@
+ #elif defined(MIGHTYCORE)
+ typedef MAX3421e<Pb4, Pb3> MAX3421E; // MightyCore
++#elif defined(ARDUINO_ARCH_RP2040)
++typedef MAX3421e<P1, P26> MAX3421E; // ARPnMIDI MAX3421E-secondary build: CS GP1, INT GP26
+ #elif (defined(__AVR_ATmega644P__) || defined(__AVR_ATmega1284P__))
+ typedef MAX3421e<Pb4, Pb3> MAX3421E; // Sanguino
+ #else
+
+To revert: remove the two +#elif defined(ARDUINO_ARCH_RP2040) lines.
+To re-apply after a library update: add them back between MightyCore and AVR ATmega644P.
+
+────────────────────────────────────────────────────────────────
+FILE 2: usbhost.h — SPI pin roles for the spi<> template (NON-functional / stock)
+Library path: ~/Documents/Arduino/libraries/USB_Host_Shield_Library_2.0/usbhost.h
+────────────────────────────────────────────────────────────────
+Current RP2040 line (MISO = P0 = GP0, matches the ARPnMIDI PCB and stock value):
+  typedef SPi< P2, P3, P0, P1 > spi;  // SCK=GP2, MOSI=GP3, MISO=GP0, SS=GP1
+
+NOTE: On RP2040 with SPI_HAS_TRANSACTION, ONLY the SS pin (P1 = GP1) from this
+typedef matters at runtime — MISO/MOSI/SCK come from the Arduino SPI object via
+SPI.setRX()/setTX()/setSCK() in each sketch. So this line is documentation only;
+no functional patch is needed here. (During bring-up it was briefly set to P4
+while we mistakenly believed MISO had to be GP4; it is back to the correct GP0.)
