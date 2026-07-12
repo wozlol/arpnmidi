@@ -35,12 +35,13 @@ no serial links — so the USB host path can be validated on its own.
 - USB device port = the RP2040-Zero's own USB-C (to the computer).
 - USB host port = the MAX3421E's USB-A (plug controllers/hub here).
 
-## Requires these library patches (see ../patches/)
+## Library — vendored, self-contained (no global-library dependency)
 
-- `USB_Host_Shield_2.0_RP2040_pins.patch` — UsbCore.h `MAX3421e<P1, P26>` (CS GP1, INT GP26).
-- `USB_Host_Shield_2.0_OutTransfer_timeout.patch` — bounds two unguarded
-  completion-wait spins in `usb.cpp OutTransfer()` that otherwise hard-freeze the
-  RP2040 under bus stress. **Required for durability.**
+The patched USB Host Shield 2.0 is bundled in `src/USB_Host_Shield_Library_2.0/`
+and included with quotes, so this sketch compiles from its own copy and is immune
+to global Arduino-library updates. Verified: it builds (exit 0) with the global
+library moved aside. See `../patches/README.md` for what was changed vs. stock
+(RP2040 pins, RP2040 compat layer, and the critical `OutTransfer` freeze fix).
 
 ## Build
 

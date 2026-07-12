@@ -46,13 +46,14 @@ GP5 from the main brain fans out to USB device MIDI, external serial TX, and all
 MAX-hosted USB MIDI outs. No secondary input is routed directly to another
 secondary output.
 
-## Library patches (see ../patches/)
+## Library — vendored, self-contained
 
-- `USB_Host_Shield_2.0_RP2040_pins.patch` — UsbCore.h `MAX3421e<P1, P26>` (CS GP1, INT GP26).
-- `USB_Host_Shield_2.0_OutTransfer_timeout.patch` — bounds two unguarded
-  completion-wait spins in `usb.cpp OutTransfer()` that hard-freeze the RP2040
-  under bus stress. Required for durability under load.
-- Older combined notes also captured in `../uhs2_rp2040_compat.patch`.
+`max_secondary_brain` bundles the patched USB Host Shield 2.0 in
+`max_secondary_brain/src/USB_Host_Shield_Library_2.0/` and includes it with
+quotes, so it compiles from its own copy (verified to build with the global
+library moved aside). No global-library dependency. See `../patches/README.md`
+for what was changed vs. stock (RP2040 pins + compat layer + the `OutTransfer`
+freeze fix).
 
 macOS note: don't `#include <Usb.h>` directly — Arduino-Pico also ships a `USB.h`
 and the filesystem may resolve the wrong file. Include `usbhub.h` / `usbh_midi.h`,

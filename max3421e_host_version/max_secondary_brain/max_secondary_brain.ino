@@ -60,8 +60,11 @@
 #undef USBCORE_H
 #endif
 
-#include <usbhub.h>
-#include <usbh_midi.h>
+// Vendored, PATCHED USB Host Shield 2.0 in this sketch's src/ folder — the exact
+// working library travels with the code (self-contained, immune to global-library
+// updates). Do NOT switch back to <angle-bracket> or the global lib would be used.
+#include "src/USB_Host_Shield_Library_2.0/usbhub.h"
+#include "src/USB_Host_Shield_Library_2.0/usbh_midi.h"
 #include <Adafruit_TinyUSB.h>
 
 constexpr uint8_t PIN_MAX_SPI_MISO = 0;  // ARPnMIDI PCB: SPI0 MISO on GP0 (valid SPI0 RX)
