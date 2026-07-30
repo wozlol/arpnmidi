@@ -4,9 +4,10 @@
 
   Purpose:
   - MAX3421E-secondary version for the next PCB direction.
-  - MAX3421E will own USB host MIDI through SPI0 and the USB2514B hub.
+  - MAX3421E will own USB host MIDI through SPI0 and the USB2514B hub when
+    ARPNMIDI_SECONDARY_PIN_PROFILE_NEW_MAX_PCB is selected below.
   - GP4/GP5 are the main-brain MIDI serial link.
-  - GP23/GP25 are the external MIDI serial port for this accessible-pin draft.
+  - The pin profile below selects old/no-MAX bench wiring or new MAX PCB wiring.
 
   Special routing:
   - USB device MIDI in from the computer goes only to GP4 serial TX, into the main brain.
@@ -17,16 +18,17 @@
   - Nothing received by the secondary is routed directly to another secondary output.
 
   Wiring, matching the ARPnMIDI PCB pin convention:
-  - GP0 = MAX3421E SPI0 MISO  (valid SPI0 RX pin, selected via SPI.setRX(0))
-  - GP1 = MAX3421E CS
-  - GP2 = MAX3421E SPI0 SCK
-  - GP3 = MAX3421E SPI0 MOSI
+  - GP0 = MAX3421E SPI0 MISO  (new MAX PCB profile)
+  - GP1 = MAX3421E CS          (new MAX PCB profile)
+  - GP2 = MAX3421E SPI0 SCK    (new MAX PCB profile) or external MIDI TX (old/no-MAX profile)
+  - GP3 = MAX3421E SPI0 MOSI   (new MAX PCB profile) or external MIDI RX (old/no-MAX profile)
   - GP4 = main-brain MIDI serial TX from this RP2040
   - GP5 = main-brain MIDI serial RX into this RP2040
-  - GP23 = external MIDI serial TX from this RP2040
-  - GP25 = external MIDI serial RX into this RP2040 (TRS MIDI IN from opto)
+  - GP20 = external MIDI serial TX from this RP2040 (new MAX PCB profile)
+  - GP21 = external MIDI serial RX into this RP2040 (new MAX PCB profile)
+  - GP22 = optional MAX3421E RESET_N hardware line (new MAX PCB profile; not driven by firmware)
   - GP26 = MAX3421E INT
-  - GP24 = USB2514B RESET_N control for the external hub board
+  - GP24 = USB2514B RESET_N control for the external hub chip
 
   USB2514B RESET_N handling:
   - RESET_N is active low. The board already has a 10k pullup to 3.3 V and 1 uF to ground.
@@ -67,16 +69,40 @@
 #include "src/USB_Host_Shield_Library_2.0/usbh_midi.h"
 #include <Adafruit_TinyUSB.h>
 
-constexpr uint8_t PIN_MAX_SPI_MISO = 0;  // ARPnMIDI PCB: SPI0 MISO on GP0 (valid SPI0 RX)
+// Select one pin profile:
+// - OLD_NO_MAX: current bench wiring, external DIN on GP2/GP3, MAX/SPI disabled.
+// - NEW_MAX_PCB: new PCB wiring, MAX on SPI0 GP0-GP3, external DIN on GP20/GP21.
+#define ARPNMIDI_SECONDARY_PIN_PROFILE_OLD_NO_MAX 0
+#define ARPNMIDI_SECONDARY_PIN_PROFILE_NEW_MAX_PCB 1
+#ifndef ARPNMIDI_SECONDARY_PIN_PROFILE
+#define ARPNMIDI_SECONDARY_PIN_PROFILE ARPNMIDI_SECONDARY_PIN_PROFILE_OLD_NO_MAX
+#endif
+
+constexpr uint8_t PIN_MAIN_BRAIN_MIDI_TX = 4;
+constexpr uint8_t PIN_MAIN_BRAIN_MIDI_RX = 5;
+
+#if ARPNMIDI_SECONDARY_PIN_PROFILE == ARPNMIDI_SECONDARY_PIN_PROFILE_NEW_MAX_PCB
+constexpr bool ENABLE_MAX3421E_HOST = true;
+constexpr uint8_t PIN_MAX_SPI_MISO = 0;  // SPI0 RX
 constexpr uint8_t PIN_MAX_CS = 1;
 constexpr uint8_t PIN_MAX_SPI_SCK = 2;
 constexpr uint8_t PIN_MAX_SPI_MOSI = 3;
-constexpr uint8_t PIN_MAIN_BRAIN_MIDI_TX = 4;
-constexpr uint8_t PIN_MAIN_BRAIN_MIDI_RX = 5;
-constexpr uint8_t PIN_EXTERNAL_MIDI_TX = 23;
-constexpr uint8_t PIN_EXTERNAL_MIDI_RX = 25;
-constexpr uint8_t PIN_USB_HUB_RESET_N = 22; //24 normally, testing
+constexpr uint8_t PIN_EXTERNAL_MIDI_TX = 20;
+constexpr uint8_t PIN_EXTERNAL_MIDI_RX = 21;
+constexpr uint8_t PIN_USB_HUB_RESET_N = 24;
 constexpr uint8_t PIN_MAX_INT = 26;
+#else
+constexpr bool ENABLE_MAX3421E_HOST = false;
+constexpr uint8_t PIN_MAX_SPI_MISO = 0;
+constexpr uint8_t PIN_MAX_CS = 1;
+constexpr uint8_t PIN_MAX_SPI_SCK = 2;
+constexpr uint8_t PIN_MAX_SPI_MOSI = 3;
+constexpr uint8_t PIN_EXTERNAL_MIDI_TX = 2;
+constexpr uint8_t PIN_EXTERNAL_MIDI_RX = 3;
+constexpr uint8_t PIN_USB_HUB_RESET_N = 24;
+constexpr uint8_t PIN_MAX_INT = 26;
+#endif
+
 constexpr uint8_t MAX_HOST_MIDI_DEVICE_COUNT = 4;
 constexpr uint32_t MIDI_BAUD = 31250;
 constexpr uint32_t USB_HUB_RESET_PULSE_MS = 25;
@@ -259,6 +285,14 @@ void configureMax3421ePinsIdle() {
 }
 
 void setupMaxHost() {
+  if (!ENABLE_MAX3421E_HOST) {
+    maxHostReady = false;
+    maxInitResult = -1;
+    maxRevision = 0;
+    Serial.println("MAX3421E host disabled by pin profile");
+    return;
+  }
+
   SPI.setRX(PIN_MAX_SPI_MISO);
   SPI.setSCK(PIN_MAX_SPI_SCK);
   SPI.setTX(PIN_MAX_SPI_MOSI);
@@ -376,24 +410,32 @@ void pumpMaxHostToMainBrain() {
 }
 
 void setup() {
-  // Only drive hub reset if the reset pin is separate from the MAX INT pin.
-  // When PIN_USB_HUB_RESET_N == PIN_MAX_INT (testing mode), skip hub reset
-  // entirely so we don't corrupt the INT pullup.
-  if (PIN_USB_HUB_RESET_N != PIN_MAX_INT) {
-    holdUsbHubInReset();
-    configureMax3421ePinsIdle();
-    delay(USB_HUB_RESET_PULSE_MS);
-    releaseUsbHubForLocalHost();
+  if (ENABLE_MAX3421E_HOST) {
+    // Only drive hub reset if the reset pin is separate from the MAX INT pin.
+    // When PIN_USB_HUB_RESET_N == PIN_MAX_INT (testing mode), skip hub reset
+    // entirely so we don't corrupt the INT pullup.
+    if (PIN_USB_HUB_RESET_N != PIN_MAX_INT) {
+      holdUsbHubInReset();
+      configureMax3421ePinsIdle();
+      delay(USB_HUB_RESET_PULSE_MS);
+      releaseUsbHubForLocalHost();
+    } else {
+      configureMax3421ePinsIdle();
+      Serial.println("Hub reset skipped (PIN_USB_HUB_RESET_N == PIN_MAX_INT, testing mode)");
+    }
   } else {
-    configureMax3421ePinsIdle();
-    Serial.println("Hub reset skipped (PIN_USB_HUB_RESET_N == PIN_MAX_INT, testing mode)");
+    maxHostReady = false;
+    maxInitResult = -1;
+    maxRevision = 0;
   }
 
   if (!TinyUSBDevice.isInitialized()) {
     TinyUSBDevice.begin(0);
   }
 
-  usb_midi.setStringDescriptor("RP2040 DIN MIDI Bridge");
+  TinyUSBDevice.setManufacturerDescriptor("WozAction2");
+  TinyUSBDevice.setProductDescriptor("WozAction2");
+  usb_midi.setStringDescriptor("WozAction2");
   usb_midi.begin();
 
   if (TinyUSBDevice.mounted()) {

@@ -5203,8 +5203,8 @@ void runArpStep() {
     return;
   }
 
-  arpNoteOffs();
   drumArpNoteOffs();
+  arpNoteOffs();
   const uint8_t step = arpPatternStep % 16;
   const PatternToken token = kPatterns[arpPattern][step];
 
@@ -5218,6 +5218,14 @@ void runArpStep() {
       arpGateOffMs = millis() + max<uint32_t>(15, (divisionStepMs() * currentArpLengthPctSetting()) / 100);
     }
     return;
+  }
+
+  if (drumArpEnabled) {
+    for (uint8_t note = 0; note < 128; ++note) {
+      if (heldDrumNotes[note]) {
+        drumArpAddOutput(note);
+      }
+    }
   }
 
   if (mainArpEnabled && (token.noteIndex == TOK_ALL || arpMode == ARP_TRIGGER)) {
@@ -5237,14 +5245,6 @@ void runArpStep() {
     }
   }
 
-  if (drumArpEnabled) {
-    for (uint8_t note = 0; note < 128; ++note) {
-      if (heldDrumNotes[note]) {
-        drumArpAddOutput(note);
-      }
-    }
-  }
-
   const uint32_t gateMs = max<uint32_t>(15, (divisionStepMs() * currentArpLengthPctSetting()) / 100);
   arpGateOffMs = millis() + gateMs;
   arpPatternStep = (arpPatternStep + 1) % 16;
@@ -5253,18 +5253,25 @@ void runArpStep() {
 void tickArp() {
   const uint32_t now = millis();
   if (arpHeldCount == 0 && heldDrumCount == 0) {
-    arpNoteOffs();
     drumArpNoteOffs();
+    arpNoteOffs();
     return;
   }
   if (arpGateOffMs && now >= arpGateOffMs) {
-    arpNoteOffs();
     drumArpNoteOffs();
+    arpNoteOffs();
     arpGateOffMs = 0;
   }
   if (arpNextStepMs == 0 || now >= arpNextStepMs) {
+    const uint32_t stepMs = max<uint32_t>(10, divisionStepMs());
     runArpStep();
-    arpNextStepMs = now + max<uint32_t>(10, divisionStepMs());
+    if (arpNextStepMs == 0) {
+      arpNextStepMs = now + stepMs;
+    } else {
+      do {
+        arpNextStepMs += stepMs;
+      } while (static_cast<int32_t>(now - arpNextStepMs) >= 0);
+    }
   }
 }
 
@@ -6656,7 +6663,9 @@ void setupUsbDeviceMidi() {
     TinyUSBDevice.begin(0);
   }
 
-  usbDeviceMidi.setStringDescriptor("ARPnMIDI Main Brain");
+  TinyUSBDevice.setManufacturerDescriptor("WozAction1");
+  TinyUSBDevice.setProductDescriptor("WozAction1");
+  usbDeviceMidi.setStringDescriptor("WozAction1");
   usbDeviceMidi.begin();
 
   if (TinyUSBDevice.mounted()) {
