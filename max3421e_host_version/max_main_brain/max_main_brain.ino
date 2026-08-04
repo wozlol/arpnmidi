@@ -183,7 +183,7 @@ constexpr uint8_t SENSOR_NOTE_FAR_TRIM_PCT = 10;
 constexpr uint8_t SENSOR_NOTE_CLOSE_TRIM_PCT = 4;
 constexpr uint16_t SENSOR_POLL_MS = 20;
 constexpr uint32_t SENSOR_TIMEOUT_MS = 300;
-constexpr uint32_t SENSOR_LOOP_REARM_DEBOUNCE_MS = 100UL;
+constexpr uint32_t SENSOR_LOOP_REARM_DEBOUNCE_MS = 50UL;
 constexpr uint16_t PUSH_POLL_MS = 20;
 constexpr uint16_t PUSH_RAW_NEAR = 150;   // closest press (max effect)
 constexpr uint16_t PUSH_RAW_FAR = 682;    // lightest press that should still register
@@ -282,6 +282,7 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
                  bool recordForLoop = true);
 void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2);
 void loopAllOff();
+void tickLooperAt(uint64_t now);
 void tickLooper();
 void clearSavedLoopStorage();
 void saveLoopStorageIfAny();
@@ -3393,7 +3394,12 @@ void recordLoopNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t 
     loopStoredLengthMs = loopLengthMs;
   }
   if (loopOverdubbing && loopPlaying && loopHasData && loopLengthMs > 0) {
-    const uint32_t atMs = currentLoopPlaybackMs();
+    // Settle a due wrap before assigning this live event to a loop cycle. This
+    // also advances the playback cursor so the overdub is not replayed now.
+    const uint64_t eventUs = time_us_64();
+    tickLooperAt(eventUs);
+    const uint32_t atMs = static_cast<uint32_t>(
+        ((eventUs - loopStartUs) % loopLengthUs) / 1000ULL);
     if (insertLoopEvent(atMs, channel1, note, velocity, on)) {
       const bool held = on && velocity > 0;
       const bool wasWrapped = loopOverdubWasWrapped(channel1 - 1, note);
@@ -3417,8 +3423,7 @@ void recordLoopNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t 
   insertLoopEvent(atMs, channel1, note, velocity, on);
 }
 
-void tickLooper() {
-  const uint64_t now = time_us_64();
+void tickLooperAt(uint64_t now) {
   if (loopRecording && settings.loopBars != LOOP_BARS_FREE && loopLengthUs > 0 &&
       (now - loopStartUs) >= loopLengthUs) {
     finishLoopRecording(true);
@@ -3442,6 +3447,10 @@ void tickLooper() {
                                 (event.on ? 0x90 : 0x80) | ((event.channel - 1) & 0x0F),
                                 event.note, event.velocity);
   }
+}
+
+void tickLooper() {
+  tickLooperAt(time_us_64());
 }
 
 void clearSavedLoopStorage() {
