@@ -46,6 +46,31 @@ GP5 from the main brain fans out to USB device MIDI, external serial TX, and all
 MAX-hosted USB MIDI outs. No secondary input is routed directly to another
 secondary output.
 
+## Musical timing is a system invariant
+
+This is a real-time musical instrument, not a general-purpose data-forwarding
+appliance. Crisp, repeatable musical timing has priority over delivering every
+replaceable or stale MIDI message. Arp steps, loop boundaries, division changes,
+and note lifetimes must use one deterministic musical clock and resolve to the
+same grid every time. Independent rounded timers, accumulated drift, races,
+late replay, and deferred stale notes are correctness failures even when no MIDI
+bytes are technically lost.
+
+The goal is musical phase coherence, not impossible zero latency. A small,
+bounded delay can be acceptable when the entire musical action remains aligned;
+different layers skewing against each other or changing phase from one pass to
+the next is not. Brief scheduler lateness at a loop wrap must recover to the
+recorded grid without deleting recorded note-ons or note-offs. Apply those note
+state transitions and restore phase; do not discard source notes merely to make
+the clock appear caught up.
+
+Keep note-offs and ownership transitions reliable so notes cannot stick. Under
+load, coalesce or discard replaceable continuous controls before allowing them
+to disturb musical deadlines. An already-expired generated pulse may be skipped
+under genuine overload, but recorded source-note state must remain intact. Treat
+the timing path like a small hard real-time control system: bounded work,
+explicit priority, deterministic phase, and graceful load shedding.
+
 ## Library — vendored, self-contained
 
 `max_secondary_brain` bundles the patched USB Host Shield 2.0 in
