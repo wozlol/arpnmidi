@@ -5910,7 +5910,7 @@ void renderMainTop() {
       drawBarValue(v, String(v) + "%");
       break;
     case SET_INPUT_CH:
-      drawChannelScreen(F("INPUT"), v);
+      drawChannelScreen(F("MAIN INPUT"), v);
       break;
     case SET_ARP_OUT_CH:
       drawChannelScreen(F("ARP"), v, true);
