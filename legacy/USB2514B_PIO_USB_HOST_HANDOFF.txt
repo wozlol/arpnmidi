@@ -1,0 +1,400 @@
+ARPnMIDI USB2514B / RP2040 PIO-USB host handoff
+Last updated: 2026-07-01
+
+Goal
+----
+Make the main RP2040 ("main brain") reliably host USB MIDI devices through a
+custom PCB with a USB2514B-AEZC-TR hub. The failure is not normal disconnect
+behavior: devices usually enumerate, but MIDI note data stops after 0-5 seconds.
+This is now the only active debugging goal. Keep every USB stability experiment
+explicitly documented and switchable; do not leave half-tested changes hidden in
+the baseline.
+
+Current hardware as reported
+----------------------------
+- Main brain RP2040 uses Pico-PIO-USB host on GPIO14/GPIO15.
+- Main brain USB host DP = GPIO14, DM = GPIO15.
+- Hub chip is USB2514B-AEZC-TR.
+- USB2514B RESET_N is pin 26.
+- RESET_N hardware: 10k pullup to 3.3 V, 1 uF to ground, also connected to
+  the secondary RP2040 on GPIO24.
+- Secondary RP2040 bridge command UART:
+  - main GPIO4 TX -> secondary GPIO5 RX
+  - secondary GPIO4 TX -> main GPIO5 RX
+  - 115200 baud, command bytes AHR1, ready bytes AHD1.
+- Secondary bridge also handles MIDI routing:
+  - GPIO0/1 are serial MIDI link to main brain.
+  - GPIO2/3 are extra external serial MIDI TX/RX.
+- Hub strap/config details as reported:
+  - CFG_SEL pins 24/25 pulled low.
+  - VBUS_DET pin 27 on 3.3 V.
+  - NON_REM0/NON_REM1 pulled low with 100k.
+  - Port power/sense pins are not actively used; power is bussed.
+- User says the same main firmware worked through an external USB hub before
+  this PCB hub, which is why this is suspected to be PIO-USB/hub timing or
+  hardware integration, not basic app routing.
+
+Current observed behavior
+-------------------------
+- With one USB MIDI keyboard through the PCB hub:
+  - Device often enumerates as 1/1, but after recent experiments can also be
+    0/0 about half the time.
+  - MIDI notes either never arrive or arrive for about 0-5 seconds, then stop.
+  - Building with -O3 alone did not fix the issue. With the then-current
+    hard-wired slow-slew/2 mA and MIDI RX rearm experiments, behavior was no
+    better and possibly worse.
+- With two USB MIDI devices:
+  - Sometimes 2/2 or 2/1 appears.
+  - Briefly, one USB keyboard controlled the KOii through the hub for 2-4 seconds.
+  - It never became stable.
+- The panic/debug screen may show F. In the current sketch, F means USB RX
+  message queue pressure/drops, not necessarily disconnect.
+- A previous bad recovery attempt made it bounce 1/1 -> 0/0 -> 1/1 repeatedly.
+  That is not acceptable and was the wrong direction.
+
+Important compile/library fact
+------------------------------
+Arduino is compiling with:
+  /Users/woz/Documents/Arduino/libraries/Adafruit_TinyUSB_Library
+  /Users/woz/Documents/Arduino/libraries/Pico_PIO_USB
+
+It is NOT using the Adafruit_TinyUSB_Arduino copy inside:
+  /Users/woz/Library/Arduino15/packages/rp2040/hardware/rp2040/5.6.1/libraries
+
+Some earlier TinyUSB edits were accidentally made to that inactive core copy.
+The active copy under Documents/Arduino/libraries was patched later. Anyone
+continuing this should always check the "Used library" section from
+arduino-cli/Arduino IDE compile output.
+
+Build option under Arduino-Pico / Waveshare RP2040 Zero:
+- Tools -> Optimize should be "Optimize Even More (-O3)" while testing PIO-USB.
+- Earlier logs showed "Small (-Os) (standard)", which is not the desired
+  baseline for this software-timed host path.
+
+Current active library versions
+-------------------------------
+- Arduino-Pico core: rp2040:rp2040 5.6.1.
+- Adafruit TinyUSB Library: 3.7.7, active path above.
+- Pico PIO USB: 0.7.1, active path:
+  /Users/woz/Documents/Arduino/libraries/Pico_PIO_USB
+- A backup of Pico PIO USB 0.7.2 exists in the Arduino libraries folder. Move it
+  out of that folder if Library Manager complains about duplicate libraries.
+
+Current hub reset approach
+--------------------------
+Secondary bridge firmware:
+- Holds USB2514B RESET_N low at boot.
+- Waits forever for AHR1 from main brain.
+- Releases RESET_N to high impedance.
+- Waits 5 ms.
+- Sends AHD1 for 120 ms.
+
+Main brain firmware:
+- During setup, sends AHR1 repeatedly for up to 1000 ms.
+- Waits for AHD1.
+- Waits another 25 ms.
+- Starts the PIO-USB host on core1.
+
+This boot handshake made enumeration more consistent. However, resetting the
+hub after notes stop did NOT help and made the system bounce to 0/0 repeatedly.
+Do not pursue hub reset as the next recovery strategy unless new evidence appears.
+
+What has been tried
+-------------------
+1. Confirmed USB host mode setting was already IN+OUT.
+
+2. Confirmed REMOTE inputs were not the cause.
+   Main system and other MIDI paths run without pauses/glitches.
+
+3. Updated Arduino-Pico core to 5.6.1.
+   Behavior remained unstable.
+
+4. Tried Pico-PIO-USB 0.7.2.
+   Regression: one keyboard could enumerate but gave RX -- / no notes.
+   Reverted to Pico-PIO-USB 0.7.1.
+   0.7.1 is the better baseline and is also recommended by rppicomidi docs.
+
+5. Patched TinyUSB host config for hub/MIDI capacity.
+   Intended values:
+   - CFG_TUH_ENUMERATION_BUFSIZE 512
+   - CFG_TUH_HUB 1
+   - CFG_TUH_DEVICE_MAX (3 * CFG_TUH_HUB + 1)
+   - CFG_TUH_MIDI (CFG_TUH_DEVICE_MAX)
+   - CFG_TUH_TASK_EVENTS_PER_RUN 0
+   - temporarily disabled HID/MSC/CDC host classes for MIDI-only testing
+   Important: these were first patched in the inactive core TinyUSB copy; later
+   they were also patched in the active Documents/Arduino Adafruit TinyUSB copy.
+
+6. Changed USBHost.task() to USBHost.task(0).
+   This was important because the wrapper default timeout can block. This gave
+   one of the first "massive progress" moments, where the keyboard could control
+   KOii briefly.
+
+7. Switched app MIDI RX draining from TinyUSB packet reads to stream reads.
+   This follows rppicomidi examples using tuh_midi_stream_read() in the callback.
+   It did not solve the stall.
+
+8. Patched PIO-USB/TinyUSB reset recovery delay.
+   Added 10 ms T_RSTRCY delay after hcd_port_reset_end().
+   This is a documented USB reset recovery timing fix. It did not solve the note
+   stall by itself.
+
+9. Patched PIO-USB bulk-IN DATA PID resync.
+   The stock behavior ACKed a CRC-good but unexpected DATA0/DATA1 packet, then
+   discarded it, risking a permanent toggle mismatch. Patch accepts a valid
+   DATA0/DATA1 at the first packet of a bulk-IN transfer and aligns ep->data_id
+   to the received PID before continuing.
+   First version forgot to align ep->data_id; that was fixed.
+
+10. Patched PIO-USB bulk-IN transient receive failures.
+    Instead of surfacing brief full-speed bulk-IN decode/no-response misses as
+    XFER_FAILED after 3 tries, treat them like NAKs. This gave the best reported
+    "up to 7 seconds once" behavior, but still not stable.
+
+11. Tried a bounded bulk-IN failure count and MIDI callback error rearm.
+    This made things worse: often no notes or only split-second notes.
+    It was backed out.
+
+12. Increased full-speed PIO receive-start timeout from 3 us to 8 us.
+    Reason: external hub turnaround/jitter may exceed the tight direct-device
+    wait window. This did not materially solve the issue.
+
+13. Tried panic-screen RX-stall auto recovery that reset hub/host.
+    Bad result: it repeatedly bounced to 0/0 and back to 1/1, then settled 0/0.
+    User clarified "recovery" should mean ignore/skip bad data and keep going,
+    not re-enumerating/resetting the hub.
+    This auto reset path was removed.
+
+14. Added GPIO edge-rate softening for USB host pins.
+    First tested as hard-wired GPIO14/15 slow slew and 2 mA drive after
+    PIO-USB setup. This was based on possible reflection/edge-rate issues, but
+    did not solve it in the latest test and may have made enumeration less
+    consistent. It is now controlled by ARPNMIDI_USB_ELECTRICAL_PROFILE instead
+    of being hard-wired.
+
+15. Added TinyUSB MIDI RX endpoint rearm helper.
+    Added tuh_midi_rx_rearm(idx) to active Adafruit TinyUSB MIDI host driver.
+    Main sketch calls it when mounted MIDI IN goes stale. It aborts/restarts only
+    the MIDI bulk IN transfer, without hub reset or host deinit.
+    Latest user report after active-library patch: no progress, possibly worse.
+    It is now controlled by ARPNMIDI_USB_MIDI_RX_REARM_ENABLE and should remain
+    off for the next baseline test.
+
+16. Raised Pico-PIO-USB SOF hardware alarm IRQ priority.
+    ARPNMIDI_USB_SOF_IRQ_HIGH_PRIORITY raises TIMER_IRQ_2 to
+    PICO_HIGHEST_IRQ_PRIORITY. This directly tested whether the USB2514B was
+    losing stability because software-generated SOF/transaction service was
+    being delayed. User reported no difference. Keep it enabled for now because
+    it does not appear to hurt and may still help in combination with other
+    fixes.
+
+17. Bounded core1 USB MIDI TX draining.
+    ARPNMIDI_USB_LIMIT_CORE1_TX_DRAIN limits USB MIDI OUT queue work per core1
+    host pass so the loop returns to USBHost.task(0) frequently even if a USB
+    endpoint is slow/stuck. This tests the remaining "core1 task starvation"
+    path without disabling USB MIDI OUT.
+    User reported no difference in symptoms.
+
+18. Minimized TinyUSB MIDI RX callback work.
+    ARPNMIDI_USB_MINIMAL_RX_CALLBACK keeps tuh_midi_rx_cb() from draining and
+    parsing the stream inside TinyUSB's callback path. The callback now only
+    records activity; bounded RX draining runs after USBHost.task(0) returns.
+    USB_RX_READS_PER_HOST_PASS is set to 1 so core1 returns to USBHost.task(0)
+    frequently. This targets app work inside the host callback/hot path.
+    User reported no difference: still random whether it enumerates, gets a few
+    notes, or gets no notes.
+
+19. Added active Pico-PIO-USB SE0 disconnect debounce.
+    Edited:
+      /Users/woz/Documents/Arduino/libraries/Pico_PIO_USB/src/pio_usb_host.c
+    Added PIO_USB_DISCONNECT_DEBOUNCE_US = 50. The stock connection_check()
+    treated roughly 2 us of SE0 as a disconnect and immediately errored every
+    queued transfer on the root port. The new check requires SE0 to remain
+    asserted for 50 us before declaring disconnect.
+    This targets the newer random 0/0 enumeration symptom and possible hub
+    line-state glitches. If it makes enumeration more stable but notes still
+    stop, keep it and continue debugging the bulk data path separately.
+    User still saw 0/0 every 2-3 boots, so this is not sufficient by itself.
+
+20. Tightened startup hub release gating.
+    The bridge file comment said USB_HUB_RELEASE_COMMAND_TIMEOUT_MS should be 0
+    so the hub stays in reset until the main brain asks for release, but the
+    actual value had drifted to 500 ms. Changed it back to 0.
+    Also increased main brain USB_HUB_READY_TO_HOST_START_MS from 25 ms to
+    100 ms. This is still not a multi-second wait, but gives the USB2514B and
+    downstream ports a less marginal settle window before PIO-USB starts host
+    enumeration.
+    User reported no difference.
+
+21. Expanded active Pico-PIO-USB bulk-IN DATA PID resync.
+    Edited:
+      /Users/woz/Documents/Arduino/libraries/Pico_PIO_USB/src/pio_usb_host.c
+    Added PIO_USB_BULK_IN_ACCEPT_ANY_DATA_PID = 1. The earlier DATA0/DATA1
+    patch only accepted an unexpected valid DATA PID when ep->actual_len == 0.
+    This new version accepts any CRC-good DATA0/DATA1 packet on bulk IN,
+    aligns ep->data_id to the received PID, then lets pio_usb_ll_transfer_continue()
+    toggle to the next expected PID.
+    This is the closest match to the reported "DATA0/DATA1 toggle handling bug"
+    for the actual GPIO14/15 PIO-USB host path. Native TinyUSB hcd_rp2040.c
+    patches do not apply directly because this project is using
+    portable/raspberrypi/pio_usb/hcd_pio_usb.c plus Pico_PIO_USB.
+
+Current controlled test switches in arpnmidi.ino
+------------------------------------------------
+At the top of arpnmidi.ino:
+- ARPNMIDI_USB_ELECTRICAL_PROFILE
+  - 0 = no override, use Pico-PIO-USB/RP2040 defaults
+  - 1 = slow slew, 2 mA drive
+  - 2 = slow slew, 4 mA drive
+  - 3 = slow slew, 8 mA drive
+  - 4 = fast slew, 4 mA drive
+- ARPNMIDI_USB_MIDI_RX_REARM_ENABLE
+  - 0 = do not abort/rearm stale MIDI bulk IN transfers
+  - 1 = enable experimental tuh_midi_rx_rearm() path
+- ARPNMIDI_USB_SOF_IRQ_HIGH_PRIORITY
+  - 0 = leave Pico SDK default IRQ priority
+  - 1 = raise TIMER_IRQ_2 to PICO_HIGHEST_IRQ_PRIORITY
+    Pico-PIO-USB creates its SOF/transaction alarm pool with
+    alarm_pool_create(2, 1), so hardware alarm 2 drives the 1 ms USB frame
+    service. This directly tests the hub keep-alive / SOF timing theory.
+- ARPNMIDI_USB_LIMIT_CORE1_TX_DRAIN
+  - 0 = old behavior, drain all queued USB MIDI OUT messages in one core1 pass
+  - 1 = limit USB MIDI OUT queue work per core1 pass
+- ARPNMIDI_USB_MINIMAL_RX_CALLBACK
+  - 0 = old behavior, drain/parse MIDI stream inside tuh_midi_rx_cb()
+  - 1 = callback only records activity; bounded drain happens after
+    USBHost.task(0)
+
+Next systematic test order
+--------------------------
+Keep these fixed unless explicitly testing them:
+- Arduino-Pico core 5.6.1.
+- Pico-PIO-USB active library 0.7.1.
+- Tools -> Optimize = Optimize Even More (-O3).
+- USBHost.task(0).
+- Boot-time hub release handshake through secondary brain.
+- DATA0/DATA1 bulk-IN resync patch.
+- 10 ms T_RSTRCY reset-recovery delay.
+- No hub/host auto reset when notes stop.
+
+Immediate next test:
+1. ARPNMIDI_USB_SOF_IRQ_HIGH_PRIORITY = 1.
+2. ARPNMIDI_USB_ELECTRICAL_PROFILE = 0.
+3. ARPNMIDI_USB_MIDI_RX_REARM_ENABLE = 0.
+4. ARPNMIDI_USB_LIMIT_CORE1_TX_DRAIN = 1.
+5. ARPNMIDI_USB_MINIMAL_RX_CALLBACK = 1.
+6. USB_RX_READS_PER_HOST_PASS = 1.
+7. Build with Tools -> Optimize = Optimize Even More (-O3).
+
+SOF priority and bounded core1 TX made no reported difference, but remain
+enabled. The next added variable is minimizing RX callback work, which targets
+the remaining core-starve/callback-hot-path theory without retesting slow/2 mA
+or endpoint rearm.
+
+After no change from minimal RX callback, the next active test is the PIO-USB
+50 us SE0 disconnect debounce in the active Pico_PIO_USB library. Keep the
+existing app-level switches as-is while testing it.
+
+After SE0 debounce still left 0/0 every 2-3 boots, the next active test is
+startup gating:
+- Secondary bridge waits indefinitely for AHR1 before releasing hub RESET_N.
+- Main waits 100 ms after AHD1 before starting PIO-USB host.
+
+After startup gating made no difference, the next active test is expanded
+Pico-PIO-USB bulk-IN DATA PID resync:
+- PIO_USB_BULK_IN_ACCEPT_ANY_DATA_PID = 1 in active Pico_PIO_USB.
+- Keep all existing app switches and startup gating unchanged.
+
+Run one keyboard first. For every test, record:
+- Enumeration after boot: 0/0, 1/1, or other.
+- Whether notes appear.
+- Approximate time until notes stop.
+- Whether panic screen shows F.
+
+Electrical-profile tests, if SOF priority is not enough:
+1. Profile 0, rearm off.
+   Clean baseline. This removes the possibly-too-weak slow/2 mA override while
+   keeping all major timing fixes.
+2. Profile 2, rearm off.
+   Slow slew with 4 mA: still softens edge rate but restores normal-ish drive.
+3. Profile 3, rearm off.
+   Slow slew with 8 mA: useful if 4 mA is too weak but edge-rate softening helps.
+4. Profile 4, rearm off.
+   Explicit fast/4 mA: tests whether default behavior was being affected by
+   hidden prior pin state assumptions.
+5. Best electrical profile from steps 1-4, rearm on.
+   Only test RX rearm after pin behavior is understood. If it worsens
+   enumeration or shortens note lifetime, leave it off.
+
+Do not jump between unrelated patches while running this matrix. If a profile is
+clearly worse, note it and move to the next one. If a profile improves note time,
+repeat it several boots before adding another variable.
+
+Best-known / least-bad state
+----------------------------
+The best observed behavior so far was before the latest active-library rearm and
+MIDI-only config test:
+- Pico-PIO-USB 0.7.1.
+- USBHost.task(0).
+- Boot-time hub reset handshake / high-Z RESET_N release.
+- PIO-USB DATA PID resync fixed so ep->data_id aligns with received DATA PID.
+- PIO-USB transient bulk-IN receive misses treated like NAKs.
+- No automatic hub/host reset when notes stop.
+This state once produced up to about 7 seconds of notes with one keyboard, and
+earlier produced a brief 2-4 second window where one USB device controlled the
+other. Still not stable enough to use.
+
+What seems ruled out or deprioritized
+-------------------------------------
+- Main app MIDI routing is probably not the primary failure. Other MIDI paths
+  and internal generation work.
+- Basic enumeration is not the main failure. 1/1 is usually solid.
+- Hub reset timing alone is not the fix. It improved enumeration consistency,
+  but resetting after the stall makes things worse.
+- Power source alone is unlikely. User tested battery, adapter, MacBook, iPhone.
+- Pico-PIO-USB 0.7.2 is worse in this setup than 0.7.1.
+- A full "scorched earth" reset strategy is not acceptable for performance.
+
+Open questions / likely next audits
+-----------------------------------
+1. Verify whether every intended TinyUSB/PIO-USB patch is in the active library
+   actually used by Arduino. Always trust compile output, not installed-version UI.
+
+2. Build a minimal known-good sketch in this repo using the rppicomidi
+   usb_midi_host_pio_example or midi2piousbhub style against this exact hardware:
+   one keyboard only, no ARPnMIDI app code, no display, no sensor, no routing.
+   If the minimal sketch also dies after 0-5 seconds, the issue is below the app.
+   If it runs, port the known-good structure back into ARPnMIDI.
+
+3. Compare active Adafruit TinyUSB 3.7.7 MIDI host driver against current upstream
+   TinyUSB MIDI host. rppicomidi says their old driver is deprecated and current
+   TinyUSB MIDI host should be used, but our Arduino library copy may still differ
+   in important RP2040/PIO-USB host behavior.
+
+4. Check SOF timing / PIO interrupt priority. A software host feeding a hardware
+   hub is more sensitive than direct devices. Need evidence, not guesses.
+
+5. Hardware sanity checks still worth doing if software minimal test fails:
+   - RP2040 GPIO14/15 to USB2514B upstream DP/DN polarity and routing.
+   - Series resistors near RP2040 on DP/DN, even with short traces.
+   - USB2514B clock quality.
+   - USB2514B strap pins and unused over-current / power-control assumptions.
+   - Verify full-speed hub behavior with this chip in strap mode and bussed power.
+
+6. If the project needs guaranteed reliability with a hub, consider a native USB
+   host MCU or controller. RP2040 PIO-USB is software-timed and may be marginal
+   with a hardware hub, even if direct devices work.
+
+Files touched in this debugging phase
+-------------------------------------
+Repo files:
+- arpnmidi.ino
+- rp2040_usb_din_midi_bridge/rp2040_usb_din_midi_bridge.ino
+
+External Arduino libraries, not tracked by this repo:
+- /Users/woz/Documents/Arduino/libraries/Adafruit_TinyUSB_Library
+- /Users/woz/Documents/Arduino/libraries/Pico_PIO_USB
+
+Be careful: edits in external Arduino libraries are easy to lose or confuse with
+the inactive RP2040 core copy. If this work continues, consider vendoring exact
+patched library copies or adding patch files with clear apply instructions.

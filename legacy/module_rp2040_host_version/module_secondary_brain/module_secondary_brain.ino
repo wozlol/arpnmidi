@@ -25,10 +25,14 @@
 
   USB2514B RESET_N handling:
   - RESET_N is active low. The board already has a 10k pullup to 3.3 V and 1 uF to ground.
-  - This firmware holds RESET_N low at boot, waits a conservative fixed delay, then releases
-    the pin to high impedance so the external pullup/capacitor set the rising edge.
-  - No main-brain handshake is used yet. The delay is intentionally simple for first hardware
-    testing; increase USB_HUB_RESET_HOLD_MS if the hub needs to appear later.
+  - This firmware drives RESET_N low at boot and waits for the main brain to send AHR1 on GP5.
+  - On AHR1, it releases RESET_N to high impedance so the external pullup/capacitor set the
+    rising edge, waits a short datasheet-safe settle, then replies AHD1 to the main brain.
+  - The main brain starts PIO-USB host only after AHD1, so the hub is freshly out of reset when
+    the host begins enumeration.
+  - Module-version default uses a short timeout so this bridge will still boot
+    when the main brain is running the older RP2040 PIO-host module build and
+    does not send the later PCB-hub release command.
 
   Arduino setup:
   - Board: RP2040 / RP2040-Zero using Earle Philhower Arduino-Pico core
@@ -52,8 +56,14 @@ constexpr uint8_t PIN_COMMAND_TX_TO_MAIN = 4;
 constexpr uint8_t PIN_COMMAND_RX_FROM_MAIN = 5;
 constexpr uint8_t PIN_USB_HUB_RESET_N = 24;
 constexpr uint32_t MIDI_BAUD = 31250;
-constexpr uint32_t USB_HUB_RESET_HOLD_MS = 2000;
-constexpr uint32_t USB_HUB_RESET_RELEASE_SETTLE_MS = 20;
+constexpr uint32_t COMMAND_BAUD = 115200;
+constexpr uint32_t USB_HUB_RELEASE_COMMAND_TIMEOUT_MS = 500;
+constexpr uint32_t USB_HUB_RESET_PULSE_MS = 25;
+constexpr uint32_t USB_HUB_RESET_RELEASE_SETTLE_MS = 5;
+constexpr uint32_t USB_HUB_RESET_COMMAND_IGNORE_MS = 250;
+constexpr uint32_t USB_HUB_READY_SIGNAL_MS = 120;
+constexpr uint8_t USB_HUB_RELEASE_COMMAND[] = {'A', 'H', 'R', '1'};
+constexpr uint8_t USB_HUB_READY_RESPONSE[] = {'A', 'H', 'D', '1'};
 
 Adafruit_USBD_MIDI usb_midi;
 SerialPIO externalMidi(PIN_EXTERNAL_MIDI_TX, PIN_EXTERNAL_MIDI_RX);
@@ -67,6 +77,8 @@ struct SerialMidiParser {
 
 SerialMidiParser mainBrainParser;
 SerialMidiParser externalParser;
+uint32_t usbHubLastResetMs = 0;
+uint32_t usbHubIgnoreCommandsUntilMs = 0;
 
 uint8_t midiDataLength(uint8_t status) {
   if (status >= 0xF8) return 0;
@@ -176,6 +188,74 @@ void releaseUsbHubReset() {
   pinMode(PIN_USB_HUB_RESET_N, INPUT);
 }
 
+void setupCommandSerial() {
+  Serial2.setTX(PIN_COMMAND_TX_TO_MAIN);
+  Serial2.setRX(PIN_COMMAND_RX_FROM_MAIN);
+  Serial2.begin(COMMAND_BAUD);
+}
+
+bool hubReleaseCommandSeen(uint8_t &matched) {
+  while (Serial2.available() > 0) {
+    const uint8_t b = static_cast<uint8_t>(Serial2.read());
+    if (b == USB_HUB_RELEASE_COMMAND[matched]) {
+      matched++;
+      if (matched >= sizeof(USB_HUB_RELEASE_COMMAND)) {
+        matched = 0;
+        return true;
+      }
+    } else {
+      matched = (b == USB_HUB_RELEASE_COMMAND[0]) ? 1 : 0;
+    }
+  }
+  return false;
+}
+
+bool waitForHubReleaseCommand() {
+  uint8_t matched = 0;
+  const uint32_t startMs = millis();
+  while (USB_HUB_RELEASE_COMMAND_TIMEOUT_MS == 0 ||
+         (millis() - startMs) < USB_HUB_RELEASE_COMMAND_TIMEOUT_MS) {
+    if (hubReleaseCommandSeen(matched)) return true;
+    delay(1);
+  }
+  return false;
+}
+
+void sendHubReadyResponse() {
+  const uint32_t startMs = millis();
+  do {
+    Serial2.write(USB_HUB_READY_RESPONSE, sizeof(USB_HUB_READY_RESPONSE));
+    Serial2.flush();
+    delay(5);
+  } while ((millis() - startMs) < USB_HUB_READY_SIGNAL_MS);
+}
+
+void markUsbHubReleased() {
+  usbHubLastResetMs = millis();
+  usbHubIgnoreCommandsUntilMs = usbHubLastResetMs + USB_HUB_RESET_COMMAND_IGNORE_MS;
+  delay(USB_HUB_RESET_RELEASE_SETTLE_MS);
+  sendHubReadyResponse();
+}
+
+void releaseUsbHubForMain() {
+  releaseUsbHubReset();
+  markUsbHubReleased();
+}
+
+void pulseUsbHubReset() {
+  const uint32_t now = millis();
+  if (static_cast<int32_t>(now - usbHubIgnoreCommandsUntilMs) < 0) return;
+  if (usbHubLastResetMs != 0 && (now - usbHubLastResetMs) < USB_HUB_RESET_COMMAND_IGNORE_MS) return;
+  holdUsbHubInReset();
+  delay(USB_HUB_RESET_PULSE_MS);
+  releaseUsbHubForMain();
+}
+
+void serviceCommandSerial() {
+  static uint8_t matched = 0;
+  if (hubReleaseCommandSeen(matched)) pulseUsbHubReset();
+}
+
 void processSerialMidiByte(SerialMidiParser &parser, uint8_t b,
                            void (*sendMessage)(uint8_t, uint8_t, uint8_t, uint8_t)) {
   if (b >= 0xF8) {
@@ -235,9 +315,9 @@ void pumpExternalToMainBrain() {
 
 void setup() {
   holdUsbHubInReset();
-  delay(USB_HUB_RESET_HOLD_MS);
-  releaseUsbHubReset();
-  delay(USB_HUB_RESET_RELEASE_SETTLE_MS);
+  setupCommandSerial();
+  waitForHubReleaseCommand();
+  releaseUsbHubForMain();
 
   if (!TinyUSBDevice.isInitialized()) {
     TinyUSBDevice.begin(0);
@@ -264,6 +344,7 @@ void loop() {
   TinyUSBDevice.task();
 #endif
 
+  serviceCommandSerial();
   pumpUsbToMainBrain();
   pumpMainBrainToUsbAndExternal();
   pumpExternalToMainBrain();
