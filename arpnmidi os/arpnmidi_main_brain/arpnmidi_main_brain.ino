@@ -41,6 +41,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <VL53L0X.h>
+#include "src/clock_engine.h"
 
 #ifndef ARPNMIDI_ENABLE_USB_DEVICE_MIDI
 #define ARPNMIDI_ENABLE_USB_DEVICE_MIDI 1
@@ -155,9 +156,10 @@ constexpr uint16_t EEPROM_MAGIC_V5 = 0x4D47;
 constexpr uint16_t EEPROM_MAGIC_V6 = 0x4D48;
 constexpr uint16_t EEPROM_MAGIC_V7 = 0x4D49;
 constexpr uint16_t EEPROM_MAGIC_V8 = 0x4D4A;
-constexpr uint16_t EEPROM_MAGIC = 0x4D4D;
+constexpr uint16_t EEPROM_MAGIC_V9 = 0x4D4D;
+constexpr uint16_t EEPROM_MAGIC = 0x4D4E;
 constexpr uint16_t LOOP_EEPROM_MAGIC = 0x4C32;
-constexpr size_t EEPROM_BYTES = 8192;
+constexpr size_t EEPROM_BYTES = 4096;
 constexpr uint8_t ARP_CH_1_PLUS_10 = 17;
 constexpr uint8_t ARP_CH_1_PLUS_10_AFTERTOUCH = 18;
 constexpr uint8_t ARP_CH_1_TO_10_SPLIT_24 = 19;
@@ -183,6 +185,7 @@ void storeUiResumeHint(uint8_t settingId);
 void restartArpTiming(bool immediate);
 void renderDisplayIfNeeded();
 void arpNoteOffs();
+void drumArpNoteOffs();
 void saveStorage();
 void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t velocity, bool on,
                  bool recordForLoop = true);
@@ -201,6 +204,8 @@ void noteArpOffPassthrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity,
 void thruOutputRefOn(uint8_t sourcePort, uint8_t outNote, uint8_t velocity);
 void thruOutputRefOff(uint8_t sourcePort, uint8_t outNote);
 void updateBassVoice();
+void syncMusicalClockConfig(bool resetPhase = false);
+void handleRealtimeByte(uint8_t sourcePort, uint8_t status);
 
 enum MenuMode : uint8_t {
   MENU_SELECT = 0,
@@ -457,6 +462,15 @@ struct Settings {
   uint8_t mapCcChannelMode;
 };
 
+struct Firmware3Settings {
+  uint8_t clockInFollow;
+  uint8_t clockOutSend;
+  uint8_t timeSignature;
+  uint8_t swing;
+  uint8_t looperMidiTransport;
+  uint8_t reserved[3];
+};
+
 struct SettingsV8 {
   uint16_t manualBpm;
   uint8_t arpMode;
@@ -700,10 +714,18 @@ struct SettingsV1 {
   uint8_t pushMode;
 };
 
+struct StorageImageV9 {
+  uint16_t magic;
+  uint8_t currentPreset;
+  Settings presets[PRESET_COUNT];
+};
+
 struct StorageImage {
   uint16_t magic;
   uint8_t currentPreset;
   Settings presets[PRESET_COUNT];
+  Firmware3Settings firmware3[PRESET_COUNT];
+  uint8_t autoSave;
 };
 
 struct StorageImageV8 {
@@ -767,13 +789,14 @@ struct LoopStorageImage {
 };
 
 constexpr size_t LOOP_STORAGE_OFFSET = 4096;
-constexpr size_t UI_SCREEN_STORAGE_OFFSET = LOOP_STORAGE_OFFSET - 2;
+constexpr size_t UI_SCREEN_STORAGE_OFFSET = EEPROM_BYTES - 2;
 constexpr uint8_t UI_SCREEN_STORAGE_MAGIC = 0xA7;
 constexpr uint32_t UI_SCREEN_SAVE_IDLE_MS = 2000UL;
 static_assert(sizeof(StorageImage) <= UI_SCREEN_STORAGE_OFFSET,
               "Preset storage overlaps saved UI state");
-static_assert(LOOP_STORAGE_OFFSET + sizeof(LoopStorageImage) <= EEPROM_BYTES,
-              "EEPROM_BYTES too small for presets plus saved loop");
+// The August 26 loop image began at byte 4096, beyond Arduino-Pico's supported
+// EEPROM sector, and was therefore never written. Firmware 3 loop persistence
+// moves to LittleFS; these legacy definitions remain only for migration work.
 
 struct ClockTracker {
   uint32_t lastClockMicros = 0;
@@ -846,6 +869,8 @@ struct UiState {
 
 StorageImage storage;
 Settings settings;
+Firmware3Settings firmware3Settings;
+arpnmidi3::ClockEngine musicalClock;
 ClockTracker clockTracker;
 EncoderState encoder;
 SensorRuntime sensorRt;
@@ -1274,7 +1299,26 @@ bool liveNoteViewActive() {
 }
 
 uint16_t currentBpm() {
+  if (firmware3Settings.clockInFollow) {
+    const float followed = musicalClock.bpm();
+    return constrain(static_cast<int>(followed + 0.5f), 20, 300);
+  }
   return constrain(static_cast<int>(settings.manualBpm), 20, 300);
+}
+
+arpnmidi3::ClockConfig currentClockConfig() {
+  arpnmidi3::ClockConfig config;
+  config.followExternal = firmware3Settings.clockInFollow != 0;
+  config.sendClock = firmware3Settings.clockOutSend != 0;
+  config.threeFour = firmware3Settings.timeSignature != 0;
+  config.manualBpm = constrain(static_cast<int>(settings.manualBpm), 20, 300);
+  return config;
+}
+
+void syncMusicalClockConfig(bool resetPhase) {
+  const uint64_t nowUs = time_us_64();
+  if (resetPhase) musicalClock.begin(currentClockConfig(), nowUs);
+  else musicalClock.setConfig(currentClockConfig(), nowUs);
 }
 
 uint8_t midiMessageDataLength(uint8_t status) {
@@ -3441,8 +3485,39 @@ uint8_t nextRoundRobinChannel(uint8_t baseCh) {
   return baseCh;
 }
 
+void applyIncomingTransport(arpnmidi3::TransportEvent event) {
+  if (!firmware3Settings.clockInFollow || event == arpnmidi3::TransportEvent::None) return;
+
+  const uint64_t nowUs = time_us_64();
+  if (event == arpnmidi3::TransportEvent::Start) {
+    restartArpTiming(true);
+    if (firmware3Settings.looperMidiTransport && loopHasData) startLoopPlaybackAt(nowUs);
+  } else if (event == arpnmidi3::TransportEvent::Continue) {
+    if (firmware3Settings.looperMidiTransport && loopHasData && !loopPlaying) startLoopPlaybackAt(nowUs);
+  } else if (event == arpnmidi3::TransportEvent::Stop) {
+    arpNoteOffs();
+    drumArpNoteOffs();
+    arpNextStepUs = 0;
+    if (firmware3Settings.looperMidiTransport) {
+      if (loopRecording || loopRecordingArmed) finishLoopRecording(false);
+      stopLoopPlaybackOnly();
+    }
+  }
+  ui.dirty = true;
+}
+
+void handleRealtimeByte(uint8_t sourcePort, uint8_t status) {
+  const arpnmidi3::TransportEvent event =
+      musicalClock.receiveRealtime(status, time_us_64());
+  applyIncomingTransport(event);
+
+  if (firmware3Settings.clockOutSend && firmware3Settings.clockInFollow) {
+    sendFanout(sourcePort, status, 0, 0);
+  }
+}
+
 void handleClockByte(bool fromDin) {
-  (void)fromDin;
+  handleRealtimeByte(fromDin ? 0 : USB_DEVICE_SOURCE_PORT, 0xF8);
 }
 
 bool sensorParamEligible(uint8_t settingId) {
@@ -3531,7 +3606,10 @@ int16_t getSettingValueRaw(uint8_t settingId) {
 
 void setSettingValueRaw(uint8_t settingId, int16_t value) {
   switch (settingId) {
-    case SET_BPM: settings.manualBpm = constrain(value, 20, 300); break;
+    case SET_BPM:
+      settings.manualBpm = constrain(value, 20, 300);
+      syncMusicalClockConfig(false);
+      break;
     case SET_ARP_MODE: settings.arpMode = clampU8(value, 0, ARP_SELECTION_COUNT - 1); break;
     case SET_DIVISION: settings.division = clampU8(value, 0, DIVISION_COUNT - 1); break;
     case SET_VELOCITY: settings.arpVelocity = clampU8(value, 1, 127); break;
@@ -3716,10 +3794,39 @@ void sanitizeSettings(Settings &s) {
   s.mapCcChannelMode &= (MAP_CC_CHANNEL_ALL_BIT | MAP_CC_RR_CH10_TO_1_BIT | MAP_CC_RR_CH10_TO_2_BIT);
 }
 
+Firmware3Settings defaultFirmware3Settings() {
+  Firmware3Settings s{};
+  s.clockInFollow = 0;
+  s.clockOutSend = 0;
+  s.timeSignature = 0;
+  s.swing = 0;
+  s.looperMidiTransport = 1;
+  return s;
+}
+
+void sanitizeFirmware3Settings(Firmware3Settings &s) {
+  s.clockInFollow = s.clockInFollow ? 1 : 0;
+  s.clockOutSend = s.clockOutSend ? 1 : 0;
+  s.timeSignature = s.timeSignature ? 1 : 0;
+  s.swing = clampU8(s.swing, 0, 75);
+  s.looperMidiTransport = s.looperMidiTransport ? 1 : 0;
+  memset(s.reserved, 0, sizeof(s.reserved));
+}
+
+void initializeFirmware3PresetExtensions() {
+  for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
+    storage.firmware3[i] = defaultFirmware3Settings();
+  }
+  storage.autoSave = 1;
+}
+
 void loadCurrentPreset() {
   screenSaverForceNow = false;
   settings = storage.presets[storage.currentPreset];
   sanitizeSettings(settings);
+  firmware3Settings = storage.firmware3[storage.currentPreset];
+  sanitizeFirmware3Settings(firmware3Settings);
+  syncMusicalClockConfig(false);
   divNotesCursor = 0;
   mapCcCursor = 0;
   syncMapCcRuntimeFromSettings();
@@ -3753,6 +3860,7 @@ void saveStorage() {
   storage.magic = EEPROM_MAGIC;
   syncMapCcRuntimeToSettings();
   storage.presets[storage.currentPreset] = settings;
+  storage.firmware3[storage.currentPreset] = firmware3Settings;
   storage.presets[storage.currentPreset].loadPreset = storage.currentPreset;
   storage.presets[storage.currentPreset].savePreset = storage.currentPreset;
   EEPROM.put(0, storage);
@@ -4083,10 +4191,15 @@ void initStorageIfNeeded() {
   EEPROM.begin(EEPROM_BYTES);
   uint16_t storedMagic = 0;
   EEPROM.get(0, storedMagic);
-  if (storedMagic != EEPROM_MAGIC) storedMagic = 0;
 
   if (storedMagic == EEPROM_MAGIC) {
     EEPROM.get(0, storage);
+  } else if (storedMagic == EEPROM_MAGIC_V9) {
+    StorageImageV9 legacy{};
+    EEPROM.get(0, legacy);
+    storage.magic = EEPROM_MAGIC;
+    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
+    memcpy(storage.presets, legacy.presets, sizeof(storage.presets));
   } else if (storedMagic == EEPROM_MAGIC_V8) {
     StorageImageV8 legacy{};
     EEPROM.get(0, legacy);
@@ -4193,6 +4306,17 @@ void initStorageIfNeeded() {
     }
     EEPROM.put(0, storage);
     EEPROM.commit();
+  }
+  if (storedMagic != EEPROM_MAGIC) {
+    initializeFirmware3PresetExtensions();
+    storage.magic = EEPROM_MAGIC;
+    EEPROM.put(0, storage);
+    EEPROM.commit();
+  } else {
+    storage.autoSave = storage.autoSave ? 1 : 0;
+    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
+      sanitizeFirmware3Settings(storage.firmware3[i]);
+    }
   }
   loadCurrentPreset();
   loadSavedLoopStorage();
@@ -4662,6 +4786,18 @@ void handleDinClock() {
   handleClockByte(true);
 }
 
+void handleDinStart() {
+  handleRealtimeByte(0, 0xFA);
+}
+
+void handleDinContinue() {
+  handleRealtimeByte(0, 0xFB);
+}
+
+void handleDinStop() {
+  handleRealtimeByte(0, 0xFC);
+}
+
 void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
   const uint8_t type = status & 0xF0;
   uint8_t channel = (status & 0x0F) + 1;
@@ -4846,6 +4982,7 @@ void tickArp() {
     arpNoteOffs();
     arpGateOffMs = 0;
   }
+  if (!musicalClock.synchronizedAdvanceAllowed(nowUs)) return;
   if (arpNextStepUs == 0 || nowUs >= arpNextStepUs) {
     const uint64_t stepNumerator =
         static_cast<uint64_t>(kDivisionPulseSteps[currentDivisionSetting()]) * 60000000ULL;
@@ -6147,6 +6284,9 @@ void setupDinMidi() {
   DinMIDI.setHandleProgramChange(handleDinProgramChange);
   DinMIDI.setHandleAfterTouchChannel(handleDinAfterTouchChannel);
   DinMIDI.setHandleClock(handleDinClock);
+  DinMIDI.setHandleStart(handleDinStart);
+  DinMIDI.setHandleContinue(handleDinContinue);
+  DinMIDI.setHandleStop(handleDinStop);
 }
 
 void setupUsbDeviceMidi() {
@@ -6179,8 +6319,11 @@ void pumpUsbDeviceMidiInput() {
     const uint8_t data1 = (len > 1) ? packet[2] : 0;
     const uint8_t data2 = (len > 2) ? packet[3] : 0;
     if (status >= 0xF8) {
-      if (status == 0xF8) handleClockByte(false);
-      sendFanout(USB_DEVICE_SOURCE_PORT, status, 0, 0);
+      if (status == 0xF8 || status == 0xFA || status == 0xFB || status == 0xFC) {
+        handleRealtimeByte(USB_DEVICE_SOURCE_PORT, status);
+      } else {
+        sendFanout(USB_DEVICE_SOURCE_PORT, status, 0, 0);
+      }
     } else if (status >= 0x80 && status <= 0xEF) {
       routeIncomingChannelMessage(USB_DEVICE_SOURCE_PORT, status, data1, data2);
     }
@@ -6242,6 +6385,7 @@ void setup() {
   maybeConfirmFactoryResetAtBoot();
   showBootStage(F("Storage..."));
   initStorageIfNeeded();
+  syncMusicalClockConfig(true);
   uint8_t resumeSetting = SET_BPM;
   if (loadPersistedUiSetting(resumeSetting)) ui.selectedSetting = resumeSetting;
   if (takeUiResumeHint(resumeSetting) && resumeSetting < SETTING_COUNT && selectableSetting(resumeSetting)) {
@@ -6271,6 +6415,9 @@ void loop() {
   pollButtons();
   DinMIDI.read();
   pumpUsbDeviceMidiInput();
+  for (uint8_t sent = 0; sent < 4 && musicalClock.takeInternalClock(time_us_64()); ++sent) {
+    sendFanout(255, 0xF8, 0, 0);
+  }
   pollSensor();
   pollPush();
   tickLooper();
