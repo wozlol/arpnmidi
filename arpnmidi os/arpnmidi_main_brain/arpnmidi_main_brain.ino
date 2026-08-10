@@ -32,6 +32,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <EEPROM.h>
+#include <LittleFS.h>
 #include <hardware/watchdog.h>
 #include <MIDI.h>
 #if ARPNMIDI_ENABLE_RGB_LED
@@ -122,6 +123,7 @@ constexpr uint32_t BUTTON_PULSE_MS = 35UL;
 
 constexpr uint8_t MAX_HELD_NOTES = 32;
 constexpr uint8_t MAX_ARP_OUTPUT_NOTES = 8;
+constexpr uint16_t MAX_PARAMETER_LOCKS = 256;
 constexpr uint16_t MAX_LOOP_EVENTS = 672;
 constexpr uint8_t LOOP_BOUNDARY_OFF_RESERVE = 64;
 constexpr uint8_t PRESET_COUNT = 16;
@@ -154,6 +156,8 @@ constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 // receives a new schema identity instead of carrying migration code. A mismatch installs all
 // factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
 constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF301;
+constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3010001UL;
+constexpr uint8_t MAX_CUSTOM_ARP_EVENTS = 32;
 constexpr uint16_t LOOP_EEPROM_MAGIC = 0x4C32;
 constexpr size_t EEPROM_BYTES = 4096;
 constexpr uint8_t ARP_CH_1_PLUS_10 = 17;
@@ -192,6 +196,9 @@ void tickLooper();
 void clearSavedLoopStorage();
 void saveLoopStorageIfAny();
 void loadSavedLoopStorage();
+bool initializeExtendedPresetStorage(bool forceFactoryDefaults);
+bool loadExtendedPreset(uint8_t slot);
+bool saveExtendedPreset(uint8_t slot);
 void capturePhysicalHeldNotesForOverdub();
 bool insertLoopEvent(uint32_t atMs, uint8_t channel1, uint8_t note, uint8_t velocity, bool on);
 bool insertLoopEventLimited(uint32_t atMs, uint8_t channel1, uint8_t note, uint8_t velocity, bool on, uint32_t limitMs);
@@ -365,6 +372,7 @@ enum ForceScaleId : uint8_t {
   SCALE_BLUES_BOTH,
   SCALE_HARM_MINOR,
   SCALE_MELODIC_MINOR,
+  SCALE_USER,
   FORCE_SCALE_COUNT
 };
 
@@ -491,6 +499,10 @@ struct Firmware3Settings {
   uint8_t quickJumpOutputChannel;
   uint8_t bassHighestNote;
   uint8_t parameterLockChannel;
+  uint8_t forwardChannelAftertouch;
+  uint8_t forwardPolyAftertouch;
+  uint8_t channelAftertouchCc;
+  uint8_t mainAftertouchArpVelocity;
   uint8_t chordEnabled;
   int8_t chordPositions[4];
   uint16_t userScaleMask;
@@ -844,6 +856,38 @@ struct CcMapSlot {
   uint8_t channel = 0;
 };
 
+struct ParameterLockEntry {
+  uint8_t note = 0;
+  uint8_t cc = 0;
+  uint8_t value = 0;
+};
+
+struct CustomArpEvent {
+  uint16_t startPulse = 0;
+  uint16_t gatePulses = 1;
+  int8_t pitchOffset = 0;
+  uint8_t velocity = 96;
+};
+
+struct CustomArpPattern {
+  uint8_t count = 0;
+  uint8_t lengthSelection = 2;
+  CustomArpEvent events[MAX_CUSTOM_ARP_EVENTS];
+};
+
+struct ExtendedPresetRecord {
+  CustomArpPattern customArp;
+  uint16_t parameterLockCount = 0;
+  ParameterLockEntry parameterLocks[MAX_PARAMETER_LOCKS];
+};
+
+struct ExtendedPresetFileHeader {
+  uint32_t magic = EXTENDED_PRESET_SCHEMA_MAGIC;
+  uint16_t recordSize = sizeof(ExtendedPresetRecord);
+  uint8_t presetCount = PRESET_COUNT;
+  uint8_t reserved = 0;
+};
+
 struct EncoderState {
   uint8_t lastAB = 0;
   int8_t stepAccum = 0;
@@ -909,6 +953,13 @@ bool uiScreenSavePending = false;
 uint32_t uiScreenChangedMs = 0;
 
 uint8_t drumAftertouchPressure = 127;
+uint8_t mainAftertouchPressure = 127;
+ParameterLockEntry parameterLocks[MAX_PARAMETER_LOCKS];
+uint16_t parameterLockCount = 0;
+uint32_t parameterLockOverflowCount = 0;
+bool parameterLockHeldNotes[128];
+CustomArpPattern customArpPattern;
+bool littleFsReady = false;
 
 bool heldInputNotes[128];
 uint8_t heldVelocities[128];
@@ -929,6 +980,10 @@ bool loopHeldDrumNotes[128];
 uint8_t loopHeldDrumVelocities[128];
 uint8_t mappedThruNotes[128];
 uint8_t mappedLoopThruNotes[128];
+uint8_t mappedThruChordNotes[128][3];
+uint8_t mappedLoopThruChordNotes[128][3];
+uint8_t mappedThruChordCount[128];
+uint8_t mappedLoopThruChordCount[128];
 uint8_t mappedArpOffNotes[128];
 uint8_t mappedArpOffChannels[128];
 uint8_t mappedLoopArpOffNotes[128];
@@ -1089,7 +1144,7 @@ const char *const kPatternNames[PATTERN_COUNT] = {
 
 const char *const kForceScaleNames[FORCE_SCALE_COUNT] = {
   "OFF", "MAJOR", "MINOR", "MAJ+MIN", "BLUES", "MAJ BLUES",
-  "BLUES+BOTH", "HARM MIN", "MEL MIN"
+  "BLUES+BOTH", "HARM MIN", "MEL MIN", "USER"
 };
 
 const char *const kSensorModeNames[SENSOR_MODE_COUNT] = {
@@ -1282,6 +1337,10 @@ bool applyRouterToChannelMessage(uint8_t &status, uint8_t &data1) {
   if (!channelEnabled(outCh)) outCh = ch1;
   const uint8_t type = status & 0xF0;
   if (type == 0x80 || type == 0x90 || type == 0xA0) {
+    if (data1 < firmware3Settings.routerLowNotes[idx] ||
+        data1 > firmware3Settings.routerHighNotes[idx]) {
+      return true;
+    }
     const int outNote = static_cast<int>(data1) + settings.routerTranspose[idx];
     if (outNote < 0 || outNote > 127) return false;
     data1 = static_cast<uint8_t>(outNote);
@@ -2230,6 +2289,7 @@ void resetHeldState() {
   memset(heldVelocities, 0, sizeof(heldVelocities));
   memset(heldNoteOrder, 0, sizeof(heldNoteOrder));
   heldNoteOrderCounter = 0;
+  memset(parameterLockHeldNotes, 0, sizeof(parameterLockHeldNotes));
   memset(physicalHeldInputNotes, 0, sizeof(physicalHeldInputNotes));
   memset(physicalHeldVelocities, 0, sizeof(physicalHeldVelocities));
   memset(loopHeldInputNotes, 0, sizeof(loopHeldInputNotes));
@@ -2248,6 +2308,10 @@ void resetHeldState() {
   memset(loopHeldDrumVelocities, 0, sizeof(loopHeldDrumVelocities));
   memset(mappedThruNotes, 0xFF, sizeof(mappedThruNotes));
   memset(mappedLoopThruNotes, 0xFF, sizeof(mappedLoopThruNotes));
+  memset(mappedThruChordNotes, 0xFF, sizeof(mappedThruChordNotes));
+  memset(mappedLoopThruChordNotes, 0xFF, sizeof(mappedLoopThruChordNotes));
+  memset(mappedThruChordCount, 0, sizeof(mappedThruChordCount));
+  memset(mappedLoopThruChordCount, 0, sizeof(mappedLoopThruChordCount));
   memset(mappedArpOffNotes, 0xFF, sizeof(mappedArpOffNotes));
   memset(mappedArpOffChannels, 0, sizeof(mappedArpOffChannels));
   memset(mappedLoopArpOffNotes, 0xFF, sizeof(mappedLoopArpOffNotes));
@@ -2268,6 +2332,7 @@ void resetHeldState() {
   arpHeldCount = 0;
   heldDrumCount = 0;
   drumAftertouchPressure = 127;
+  mainAftertouchPressure = 127;
   activeArpCount = 0;
   activeDrumArpCount = 0;
   memset(activeArpNotes, 0xFF, sizeof(activeArpNotes));
@@ -2313,6 +2378,10 @@ bool noteInScale(uint8_t pc, uint8_t key, uint8_t scale) {
     case SCALE_BLUES_BOTH: return has(kBlues) || has(kMajorBlues) || has(kMinor);
     case SCALE_HARM_MINOR: return has(kHarmMinor);
     case SCALE_MELODIC_MINOR: return has(kMelMinor);
+    case SCALE_USER: {
+      const uint8_t relative = (pc + 12 - tonic) % 12;
+      return (firmware3Settings.userScaleMask & (1U << relative)) != 0;
+    }
     default: return true;
   }
 }
@@ -2364,6 +2433,37 @@ uint8_t quantizeUp(uint8_t note) {
     candidate++;
   }
   return note;
+}
+
+uint8_t chordNoteForPosition(uint8_t root, int8_t position) {
+  if (position == 0 || position == 1) return root;
+  const int direction = position > 0 ? 1 : -1;
+  uint8_t remaining = static_cast<uint8_t>(abs(position) - 1);
+  int candidate = root;
+  const uint8_t scale = effectiveScaleForKeyMode(settings.forceKey, settings.forceScale);
+  const bool useScale = settings.forceKey != 0 && scale != SCALE_OFF;
+  while (remaining > 0) {
+    candidate += direction;
+    if (candidate < 0 || candidate > 127) break;
+    if (!useScale || noteInScale(candidate % 12, settings.forceKey, scale)) --remaining;
+  }
+  return clampU8(candidate, 0, 127);
+}
+
+uint8_t buildChordNotes(uint8_t root, uint8_t *notes) {
+  const uint8_t correctedRoot = quantizeUp(root);
+  if (!firmware3Settings.chordEnabled) {
+    notes[0] = correctedRoot;
+    return 1;
+  }
+  uint8_t count = 0;
+  for (uint8_t i = 0; i < 4; ++i) {
+    const uint8_t note = chordNoteForPosition(correctedRoot, firmware3Settings.chordPositions[i]);
+    bool duplicate = false;
+    for (uint8_t j = 0; j < count; ++j) duplicate |= notes[j] == note;
+    if (!duplicate) notes[count++] = note;
+  }
+  return count;
 }
 
 bool loopOwnsInput(uint8_t sourcePort) {
@@ -2459,9 +2559,17 @@ void updateBassVoice() {
 
   rebuildHeldSorted();
   rebuildArpHeldSorted();
-  const int8_t nextSource = (arpLatchPlusEnabled() || arpFreezePlusActive)
-                              ? ((arpHeldCount > 0) ? arpHeldSorted[0] : -1)
-                              : ((heldCount > 0) ? heldSorted[0] : -1);
+  const uint8_t *bassCandidates = (arpLatchPlusEnabled() || arpFreezePlusActive)
+                                      ? arpHeldSorted : heldSorted;
+  const uint8_t bassCandidateCount = (arpLatchPlusEnabled() || arpFreezePlusActive)
+                                         ? arpHeldCount : heldCount;
+  int8_t nextSource = -1;
+  for (uint8_t i = 0; i < bassCandidateCount; ++i) {
+    if (bassCandidates[i] <= firmware3Settings.bassHighestNote) {
+      nextSource = bassCandidates[i];
+      break;
+    }
+  }
   if (nextSource < 0) {
     if (currentBassOutNote >= 0) {
       const bool legatoOwnsSame = legatoOutputActive &&
@@ -2595,6 +2703,9 @@ uint8_t applyDownByPercent(uint8_t base, uint8_t pct, uint8_t floorValue) {
 
 uint8_t currentArpVelocitySetting() {
   const uint8_t base = constrain(getSettingValueRaw(SET_VELOCITY), 1, 127);
+  if (firmware3Settings.mainAftertouchArpVelocity) {
+    return max<uint8_t>(1, mainAftertouchPressure);
+  }
   uint8_t value = base;
   if (sensorRt.inRange && settings.sensorMode == SENSOR_VEL_DOWN) {
     value = min<uint8_t>(value, applyDownByPercent(base, sensorPercent(), 1));
@@ -3423,13 +3534,23 @@ void thruOutputRefOff(uint8_t sourcePort, uint8_t outNote) {
 
 void noteThrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on) {
   uint8_t *mappedNotes = loopOwnsInput(sourcePort) ? mappedLoopThruNotes : mappedThruNotes;
+  uint8_t (*extraNotes)[3] = loopOwnsInput(sourcePort) ? mappedLoopThruChordNotes : mappedThruChordNotes;
+  uint8_t *extraCount = loopOwnsInput(sourcePort) ? mappedLoopThruChordCount : mappedThruChordCount;
   if (on) {
-    const uint8_t q = quantizeUp(inNote);
-    mappedNotes[inNote] = q;
-    thruOutputRefOn(sourcePort, q, velocity);
+    uint8_t notes[4];
+    const uint8_t count = buildChordNotes(inNote, notes);
+    mappedNotes[inNote] = notes[0];
+    extraCount[inNote] = count - 1;
+    for (uint8_t i = 1; i < count; ++i) extraNotes[inNote][i - 1] = notes[i];
+    for (uint8_t i = 0; i < count; ++i) thruOutputRefOn(sourcePort, notes[i], velocity);
   } else {
     const uint8_t q = mappedNotes[inNote];
     if (q <= 127) thruOutputRefOff(sourcePort, q);
+    for (uint8_t i = 0; i < extraCount[inNote]; ++i) {
+      if (extraNotes[inNote][i] <= 127) thruOutputRefOff(sourcePort, extraNotes[inNote][i]);
+      extraNotes[inNote][i] = 0xFF;
+    }
+    extraCount[inNote] = 0;
     mappedNotes[inNote] = 0xFF;
   }
 }
@@ -3551,6 +3672,13 @@ void clearSplitNoteFromMainPaths(uint8_t sourcePort, uint8_t note) {
     sendFanout(sourcePort, 0x80 | ((thruCh - 1) & 0x0F), thruOut, 0);
   }
   thruMap[note] = 0xFF;
+  uint8_t (*extraNotes)[3] = loopOwnsInput(sourcePort) ? mappedLoopThruChordNotes : mappedThruChordNotes;
+  uint8_t *extraCount = loopOwnsInput(sourcePort) ? mappedLoopThruChordCount : mappedThruChordCount;
+  for (uint8_t i = 0; i < extraCount[note]; ++i) {
+    if (extraNotes[note][i] <= 127) thruOutputRefOff(sourcePort, extraNotes[note][i]);
+    extraNotes[note][i] = 0xFF;
+  }
+  extraCount[note] = 0;
 
   uint8_t *arpMap = loopOwnsInput(sourcePort) ? mappedLoopArpOffNotes : mappedArpOffNotes;
   uint8_t *arpChannels = loopOwnsInput(sourcePort) ? mappedLoopArpOffChannels : mappedArpOffChannels;
@@ -3928,11 +4056,15 @@ Firmware3Settings defaultFirmware3Settings() {
   s.quickJumpOutputChannel = 2;
   s.bassHighestNote = 127;
   s.parameterLockChannel = 0;
+  s.forwardChannelAftertouch = 1;
+  s.forwardPolyAftertouch = 1;
+  s.channelAftertouchCc = 0xFF;
+  s.mainAftertouchArpVelocity = 0;
   s.chordEnabled = 0;
-  s.chordPositions[0] = 0;
-  s.chordPositions[1] = 2;
-  s.chordPositions[2] = 4;
-  s.chordPositions[3] = 6;
+  s.chordPositions[0] = 1;
+  s.chordPositions[1] = 3;
+  s.chordPositions[2] = 5;
+  s.chordPositions[3] = 7;
   s.userScaleMask = 0x0AB5;  // C major pitch classes
   for (uint8_t ch = 0; ch < 16; ++ch) {
     s.routerLowNotes[ch] = 0;
@@ -3963,6 +4095,10 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
   s.quickJumpOutputChannel = clampU8(s.quickJumpOutputChannel, 1, 16);
   s.bassHighestNote = clampU8(s.bassHighestNote, 0, 127);
   s.parameterLockChannel = clampU8(s.parameterLockChannel, 0, 16);
+  s.forwardChannelAftertouch = s.forwardChannelAftertouch ? 1 : 0;
+  s.forwardPolyAftertouch = s.forwardPolyAftertouch ? 1 : 0;
+  if (s.channelAftertouchCc > 127) s.channelAftertouchCc = 0xFF;
+  s.mainAftertouchArpVelocity = s.mainAftertouchArpVelocity ? 1 : 0;
   s.chordEnabled = s.chordEnabled ? 1 : 0;
   for (uint8_t i = 0; i < 4; ++i) {
     s.chordPositions[i] = constrain(static_cast<int>(s.chordPositions[i]), -12, 12);
@@ -3982,8 +4118,89 @@ void initializeFirmware3PresetExtensions() {
   storage.autoSave = 1;
 }
 
+constexpr const char *EXTENDED_PRESET_PATH = "/presets.f3";
+
+ExtendedPresetRecord currentExtendedPresetRecord() {
+  ExtendedPresetRecord record{};
+  record.customArp = customArpPattern;
+  record.parameterLockCount = min<uint16_t>(parameterLockCount, MAX_PARAMETER_LOCKS);
+  memcpy(record.parameterLocks, parameterLocks,
+         record.parameterLockCount * sizeof(ParameterLockEntry));
+  return record;
+}
+
+bool initializeExtendedPresetStorage(bool forceFactoryDefaults) {
+  if (!littleFsReady) return false;
+  bool valid = false;
+  if (!forceFactoryDefaults) {
+    File file = LittleFS.open(EXTENDED_PRESET_PATH, "r");
+    ExtendedPresetFileHeader header{};
+    if (file && file.read(reinterpret_cast<uint8_t *>(&header), sizeof(header)) == sizeof(header)) {
+      const size_t expected = sizeof(header) + PRESET_COUNT * sizeof(ExtendedPresetRecord);
+      valid = header.magic == EXTENDED_PRESET_SCHEMA_MAGIC &&
+              header.recordSize == sizeof(ExtendedPresetRecord) &&
+              header.presetCount == PRESET_COUNT && file.size() == expected;
+    }
+    file.close();
+  }
+  if (valid) return true;
+
+  File file = LittleFS.open(EXTENDED_PRESET_PATH, "w");
+  if (!file) return false;
+  const ExtendedPresetFileHeader header{};
+  if (file.write(reinterpret_cast<const uint8_t *>(&header), sizeof(header)) != sizeof(header)) {
+    file.close();
+    return false;
+  }
+  for (uint8_t slot = 0; slot < PRESET_COUNT; ++slot) {
+    ExtendedPresetRecord record{};
+    record.customArp.lengthSelection = defaultFirmware3Settings().customArpLength;
+    if (file.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record)) != sizeof(record)) {
+      file.close();
+      return false;
+    }
+  }
+  file.close();
+  return true;
+}
+
+bool loadExtendedPreset(uint8_t slot) {
+  customArpPattern = CustomArpPattern{};
+  customArpPattern.lengthSelection = firmware3Settings.customArpLength;
+  parameterLockCount = 0;
+  if (!littleFsReady || slot >= PRESET_COUNT) return false;
+  File file = LittleFS.open(EXTENDED_PRESET_PATH, "r");
+  if (!file) return false;
+  const size_t offset = sizeof(ExtendedPresetFileHeader) + slot * sizeof(ExtendedPresetRecord);
+  ExtendedPresetRecord record{};
+  const bool ok = file.seek(offset, SeekSet) &&
+                  file.read(reinterpret_cast<uint8_t *>(&record), sizeof(record)) == sizeof(record);
+  file.close();
+  if (!ok || record.customArp.count > MAX_CUSTOM_ARP_EVENTS ||
+      record.parameterLockCount > MAX_PARAMETER_LOCKS) return false;
+  customArpPattern = record.customArp;
+  customArpPattern.lengthSelection = clampU8(customArpPattern.lengthSelection, 0, 5);
+  parameterLockCount = record.parameterLockCount;
+  memcpy(parameterLocks, record.parameterLocks,
+         parameterLockCount * sizeof(ParameterLockEntry));
+  return true;
+}
+
+bool saveExtendedPreset(uint8_t slot) {
+  if (!littleFsReady || slot >= PRESET_COUNT) return false;
+  File file = LittleFS.open(EXTENDED_PRESET_PATH, "r+");
+  if (!file) return false;
+  const size_t offset = sizeof(ExtendedPresetFileHeader) + slot * sizeof(ExtendedPresetRecord);
+  const ExtendedPresetRecord record = currentExtendedPresetRecord();
+  const bool ok = file.seek(offset, SeekSet) &&
+                  file.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record)) == sizeof(record);
+  file.close();
+  return ok;
+}
+
 void loadCurrentPreset() {
   screenSaverForceNow = false;
+  memset(parameterLockHeldNotes, 0, sizeof(parameterLockHeldNotes));
   settings = storage.presets[storage.currentPreset];
   sanitizeSettings(settings);
   firmware3Settings = storage.firmware3[storage.currentPreset];
@@ -3992,6 +4209,7 @@ void loadCurrentPreset() {
       firmware3Settings.drumDivision == DRUM_DIVISION_FOLLOW_ARP) {
     firmware3Settings.drumDivision = DIV_1_16;
   }
+  loadExtendedPreset(storage.currentPreset);
   syncMusicalClockConfig(false);
   divNotesCursor = 0;
   mapCcCursor = 0;
@@ -4032,6 +4250,7 @@ void saveStorage() {
   EEPROM.put(0, storage);
   stagePersistedUiSetting(ui.selectedSetting);
   EEPROM.commit();
+  saveExtendedPreset(storage.currentPreset);
   captureMapCcPersistBaseline(settings);
 }
 
@@ -4358,7 +4577,8 @@ void initStorageIfNeeded() {
   uint16_t storedMagic = 0;
   EEPROM.get(0, storedMagic);
 
-  if (storedMagic == PRESET_SCHEMA_MAGIC) {
+  const bool factoryDefaultsRequired = storedMagic != PRESET_SCHEMA_MAGIC;
+  if (!factoryDefaultsRequired) {
     EEPROM.get(0, storage);
   } else {
     storage = StorageImage{};
@@ -4382,6 +4602,7 @@ void initStorageIfNeeded() {
     sanitizeSettings(storage.presets[i]);
     sanitizeFirmware3Settings(storage.firmware3[i]);
   }
+  initializeExtendedPresetStorage(factoryDefaultsRequired);
   loadCurrentPreset();
   loadSavedLoopStorage();
 }
@@ -4784,27 +5005,46 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
 }
 
 void handleDinNoteOn(byte channel, byte pitch, byte velocity) {
-  if (captureDivNoteAssignment(channel, pitch, velocity > 0)) return;
-  uint8_t ch = channel;
-  uint8_t note = pitch;
-  const uint8_t divNoteAction = handleDivNoteOverride(0, ch, note, velocity, velocity > 0);
-  if (divNoteAction == 1) return;
-  translateSplitInputToDrum(ch, note);
-  onInputNote(0, ch, note, velocity, velocity > 0, divNoteAction != 2);
+  routeIncomingChannelMessage(0, 0x90 | ((channel - 1) & 0x0F), pitch, velocity);
 }
 
 void handleDinNoteOff(byte channel, byte pitch, byte velocity) {
-  (void)velocity;
-  if (captureDivNoteAssignment(channel, pitch, false)) return;
-  uint8_t ch = channel;
-  uint8_t note = pitch;
-  const uint8_t divNoteAction = handleDivNoteOverride(0, ch, note, 0, false);
-  if (divNoteAction == 1) return;
-  translateSplitInputToDrum(ch, note);
-  onInputNote(0, ch, note, 0, false, divNoteAction != 2);
+  routeIncomingChannelMessage(0, 0x80 | ((channel - 1) & 0x0F), pitch, velocity);
+}
+
+void recallParameterLocks(uint8_t sourcePort, uint8_t channel, uint8_t note) {
+  for (uint16_t i = 0; i < parameterLockCount; ++i) {
+    const ParameterLockEntry &entry = parameterLocks[i];
+    if (entry.note == note) {
+      sendFanout(sourcePort, 0xB0 | ((channel - 1) & 0x0F), entry.cc, entry.value);
+    }
+  }
+}
+
+void captureParameterLockCc(uint8_t channel, uint8_t cc, uint8_t value) {
+  if (!channelEnabled(firmware3Settings.parameterLockChannel) ||
+      channel != firmware3Settings.parameterLockChannel) return;
+  for (uint8_t note = 0; note < 128; ++note) {
+    if (!parameterLockHeldNotes[note]) continue;
+    bool replaced = false;
+    for (uint16_t i = 0; i < parameterLockCount; ++i) {
+      if (parameterLocks[i].note == note && parameterLocks[i].cc == cc) {
+        parameterLocks[i].value = value;
+        replaced = true;
+        break;
+      }
+    }
+    if (replaced) continue;
+    if (parameterLockCount >= MAX_PARAMETER_LOCKS) {
+      ++parameterLockOverflowCount;
+      continue;
+    }
+    parameterLocks[parameterLockCount++] = ParameterLockEntry{note, cc, value};
+  }
 }
 
 void routeControlChange(uint8_t sourcePort, byte channel, byte control, byte value) {
+  captureParameterLockCc(channel, control, value);
   if (captureMapCcAssignment(channel, control)) return;
   applyMappedCcAssignments(channel, control, value);
   if (control != 0 && control != 32) markActivity(false);
@@ -4818,7 +5058,7 @@ void routeControlChange(uint8_t sourcePort, byte channel, byte control, byte val
 }
 
 void handleDinCc(byte channel, byte control, byte value) {
-  routeControlChange(0, channel, control, value);
+  routeIncomingChannelMessage(0, 0xB0 | ((channel - 1) & 0x0F), control, value);
 }
 
 void routePitchBend(uint8_t sourcePort, byte channel, int bend) {
@@ -4846,19 +5086,37 @@ void routeProgramLikeMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, 
 
 void routeChannelAftertouch(uint8_t sourcePort, uint8_t channel, uint8_t pressure) {
   if (channel == 10) drumAftertouchPressure = pressure;
-  routeProgramLikeMessage(sourcePort, 0xD0 | ((channel - 1) & 0x0F), pressure, 0);
+  if (channel == settings.inputChannel && firmware3Settings.mainAftertouchArpVelocity) {
+    mainAftertouchPressure = pressure;
+  }
+  if (firmware3Settings.channelAftertouchCc <= 127) {
+    if (channel == settings.inputChannel) {
+      forEachCcOutput([&](uint8_t outCh) {
+        sendFanout(sourcePort, 0xB0 | ((outCh - 1) & 0x0F),
+                   firmware3Settings.channelAftertouchCc, pressure);
+      });
+    } else {
+      sendFanout(sourcePort, 0xB0 | ((channel - 1) & 0x0F),
+                 firmware3Settings.channelAftertouchCc, pressure);
+    }
+  }
+  if (firmware3Settings.forwardChannelAftertouch) {
+    routeProgramLikeMessage(sourcePort, 0xD0 | ((channel - 1) & 0x0F), pressure, 0);
+  }
 }
 
 void handleDinPb(byte channel, int bend) {
-  routePitchBend(0, channel, bend);
+  const int bend14 = bend + 8192;
+  routeIncomingChannelMessage(0, 0xE0 | ((channel - 1) & 0x0F), bend14 & 0x7F,
+                              (bend14 >> 7) & 0x7F);
 }
 
 void handleDinProgramChange(byte channel, byte number) {
-  routeProgramLikeMessage(0, 0xC0 | ((channel - 1) & 0x0F), number, 0);
+  routeIncomingChannelMessage(0, 0xC0 | ((channel - 1) & 0x0F), number, 0);
 }
 
 void handleDinAfterTouchChannel(byte channel, byte pressure) {
-  routeChannelAftertouch(0, channel, pressure);
+  routeIncomingChannelMessage(0, 0xD0 | ((channel - 1) & 0x0F), pressure, 0);
 }
 
 void handleDinClock() {
@@ -4880,13 +5138,24 @@ void handleDinStop() {
 void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
   const uint8_t type = status & 0xF0;
   uint8_t channel = (status & 0x0F) + 1;
+  if (firmware3Settings.quickJumpEnabled &&
+      channel == firmware3Settings.quickJumpInputChannel) {
+    channel = firmware3Settings.quickJumpOutputChannel;
+    status = type | ((channel - 1) & 0x0F);
+  }
   if (type == 0x90) {
+    if (channel == firmware3Settings.parameterLockChannel) {
+      const bool noteOn = data2 > 0;
+      parameterLockHeldNotes[data1] = noteOn;
+      if (noteOn) recallParameterLocks(sourcePort, channel, data1);
+    }
     if (captureDivNoteAssignment(channel, data1, data2 > 0)) return;
     const uint8_t divNoteAction = handleDivNoteOverride(sourcePort, channel, data1, data2, data2 > 0);
     if (divNoteAction == 1) return;
     translateSplitInputToDrum(channel, data1);
     onInputNote(sourcePort, channel, data1, data2, data2 > 0, divNoteAction != 2);
   } else if (type == 0x80) {
+    if (channel == firmware3Settings.parameterLockChannel) parameterLockHeldNotes[data1] = false;
     if (captureDivNoteAssignment(channel, data1, false)) return;
     const uint8_t divNoteAction = handleDivNoteOverride(sourcePort, channel, data1, 0, false);
     if (divNoteAction == 1) return;
@@ -4898,7 +5167,11 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
     routePitchBend(sourcePort, channel, static_cast<int>(data1 | (data2 << 7)) - 8192);
   } else if (type == 0xD0) {
     routeChannelAftertouch(sourcePort, channel, data1);
-  } else if (type == 0xC0 || type == 0xA0) {
+  } else if (type == 0xA0) {
+    if (firmware3Settings.forwardPolyAftertouch) {
+      routeProgramLikeMessage(sourcePort, status, data1, data2);
+    }
+  } else if (type == 0xC0) {
     routeProgramLikeMessage(sourcePort, status, data1, data2);
   }
 }
@@ -4946,7 +5219,7 @@ void arpNoteOffs() {
   activeArpCount = 0;
 }
 
-void arpAddOutput(uint8_t note) {
+void arpAddSingleOutput(uint8_t note) {
   const uint8_t outCh = mainArpOutChannel();
   if (!channelEnabled(outCh)) return;
   if (activeArpCount >= MAX_ARP_OUTPUT_NOTES) return;
@@ -4958,6 +5231,14 @@ void arpAddOutput(uint8_t note) {
   activeArpChannels[activeArpCount] = actualCh;
   activeArpCount++;
   sendFanout(255, 0x90 | ((actualCh - 1) & 0x0F), note, currentArpVelocitySetting());
+}
+
+void arpAddOutput(uint8_t note) {
+  uint8_t notes[4];
+  const uint8_t count = buildChordNotes(note, notes);
+  for (uint8_t i = 0; i < count && activeArpCount < MAX_ARP_OUTPUT_NOTES; ++i) {
+    arpAddSingleOutput(notes[i]);
+  }
 }
 
 void drumArpNoteOffs() {
@@ -6493,6 +6774,11 @@ void setup() {
   setupDisplay();
   maybeConfirmFactoryResetAtBoot();
   showBootStage(F("Storage..."));
+  littleFsReady = LittleFS.begin();
+  if (!littleFsReady) {
+    LittleFS.format();
+    littleFsReady = LittleFS.begin();
+  }
   initStorageIfNeeded();
   syncMusicalClockConfig(true);
   uint8_t resumeSetting = SET_BPM;
