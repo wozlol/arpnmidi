@@ -315,6 +315,12 @@ Per-note Parameter Lock selects Off or a MIDI channel and includes Back.
 
 ## Routing, Quick Jump, bass, chord, and scale
 
+Round Robin keeps its normal cycling behavior by default. Its submenu adds a
+saved Random toggle. When enabled, each new routed note independently selects
+one of the enabled Round Robin output channels using the RP2040 hardware random
+generator. Immediate repeats are valid random results; this is not a shuffled
+or forced-no-repeat cycle.
+
 Each Router channel receives a low and high note bound. Only notes in that range
 are routed and transposed. Notes outside the range continue on their original
 channel unchanged.

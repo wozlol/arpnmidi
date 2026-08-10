@@ -131,8 +131,9 @@ constexpr uint8_t DIV_NOTE_RESET_SLOT = DIV_NOTE_SLOT_COUNT + 1;
 constexpr uint8_t DIV_NOTE_BACK_SLOT = DIV_NOTE_SLOT_COUNT + 2;
 constexpr uint8_t RND_RBN_CH10_TO_1_SLOT = 16;
 constexpr uint8_t RND_RBN_CH10_TO_2_SLOT = 17;
-constexpr uint8_t RND_RBN_CLEAR_SLOT = 18;
-constexpr uint8_t RND_RBN_BACK_SLOT = 19;
+constexpr uint8_t RND_RBN_RANDOM_SLOT = 18;
+constexpr uint8_t RND_RBN_CLEAR_SLOT = 19;
+constexpr uint8_t RND_RBN_BACK_SLOT = 20;
 constexpr uint8_t ROUTER_CLEAR_SLOT = 16;
 constexpr uint8_t ROUTER_BACK_SLOT = 17;
 constexpr int8_t ROUTER_TRANSPOSE_MIN = -24;
@@ -141,6 +142,7 @@ constexpr uint8_t MAPCC_PARAM_COUNT_V5 = 16;
 constexpr uint8_t MAP_CC_CHANNEL_ALL_BIT = 0x01;
 constexpr uint8_t MAP_CC_RR_CH10_TO_1_BIT = 0x02;
 constexpr uint8_t MAP_CC_RR_CH10_TO_2_BIT = 0x04;
+constexpr uint8_t MAP_CC_RR_RANDOM_BIT = 0x08;
 constexpr uint32_t MAP_CC_UI_SETTLE_MS = 260UL;
 constexpr uint32_t MAP_CC_DEFER_COMMIT_MS = 500UL;
 constexpr uint8_t LOOP_SOURCE_PORT = 251;
@@ -1190,6 +1192,14 @@ bool roundRobinCh10To2Enabled() {
   return roundRobinCh10To2Enabled(settings);
 }
 
+bool roundRobinRandomEnabled(const Settings &s) {
+  return (s.mapCcChannelMode & MAP_CC_RR_RANDOM_BIT) != 0;
+}
+
+bool roundRobinRandomEnabled() {
+  return roundRobinRandomEnabled(settings);
+}
+
 void setRoundRobinCh10To1(Settings &s, bool enabled) {
   if (enabled) {
     s.mapCcChannelMode |= MAP_CC_RR_CH10_TO_1_BIT;
@@ -1206,6 +1216,11 @@ void setRoundRobinCh10To2(Settings &s, bool enabled) {
   } else {
     s.mapCcChannelMode &= static_cast<uint8_t>(~MAP_CC_RR_CH10_TO_2_BIT);
   }
+}
+
+void setRoundRobinRandom(Settings &s, bool enabled) {
+  if (enabled) s.mapCcChannelMode |= MAP_CC_RR_RANDOM_BIT;
+  else s.mapCcChannelMode &= static_cast<uint8_t>(~MAP_CC_RR_RANDOM_BIT);
 }
 
 void updateRouterActiveBit(Settings &s, uint8_t idx) {
@@ -1532,7 +1547,8 @@ void syncMapCcRuntimeToSettings() {
     settings.mapCcChannels[i] = mapCcSlots[i].channel;
     settings.mapCcNumbers[i] = mapCcSlots[i].cc;
   }
-  settings.mapCcChannelMode = (settings.mapCcChannelMode & (MAP_CC_RR_CH10_TO_1_BIT | MAP_CC_RR_CH10_TO_2_BIT)) |
+  settings.mapCcChannelMode = (settings.mapCcChannelMode &
+                               (MAP_CC_RR_CH10_TO_1_BIT | MAP_CC_RR_CH10_TO_2_BIT | MAP_CC_RR_RANDOM_BIT)) |
                               (mapCcChannelAll ? MAP_CC_CHANNEL_ALL_BIT : 0);
 }
 
@@ -3478,6 +3494,22 @@ void clearSplitNoteFromMainPaths(uint8_t sourcePort, uint8_t note) {
 
 uint8_t nextRoundRobinChannel(uint8_t baseCh) {
   if (!channelEnabled(baseCh) || settings.roundRobinMask == 0) return baseCh;
+  if (roundRobinRandomEnabled()) {
+    uint8_t candidates[16];
+    uint8_t count = 0;
+    for (uint8_t idx = 0; idx < 16; ++idx) {
+      if (settings.roundRobinMask & static_cast<uint16_t>(1U << idx)) candidates[count++] = idx + 1;
+    }
+    // Use the RP2040 hardware RNG. Repeats are intentional: every enabled channel is an
+    // independent random choice rather than a shuffled or no-repeat cycle. Reject the tiny
+    // modulo remainder so channel probabilities stay exactly even for every candidate count.
+    const uint32_t threshold = (0U - static_cast<uint32_t>(count)) % count;
+    uint32_t randomValue;
+    do {
+      randomValue = rp2040.hwrand32();
+    } while (randomValue < threshold);
+    return candidates[randomValue % count];
+  }
   for (uint8_t attempts = 0; attempts < 16; ++attempts) {
     const uint8_t idx = roundRobinCursor++ & 0x0F;
     if (settings.roundRobinMask & static_cast<uint16_t>(1U << idx)) return idx + 1;
@@ -3791,7 +3823,8 @@ void sanitizeSettings(Settings &s) {
     if (s.mapCcChannels[i] > 16) s.mapCcChannels[i] = 0;
     if (s.mapCcNumbers[i] > 127) s.mapCcNumbers[i] = 0xFF;
   }
-  s.mapCcChannelMode &= (MAP_CC_CHANNEL_ALL_BIT | MAP_CC_RR_CH10_TO_1_BIT | MAP_CC_RR_CH10_TO_2_BIT);
+  s.mapCcChannelMode &=
+      (MAP_CC_CHANNEL_ALL_BIT | MAP_CC_RR_CH10_TO_1_BIT | MAP_CC_RR_CH10_TO_2_BIT | MAP_CC_RR_RANDOM_BIT);
 }
 
 Firmware3Settings defaultFirmware3Settings() {
@@ -4420,10 +4453,19 @@ void activateClickAction() {
         encoder.switchIgnoreUntilMs = millis() + 120;
         return;
       }
+      if (roundRobinMenuCursor == RND_RBN_RANDOM_SLOT) {
+        setRoundRobinRandom(settings, !roundRobinRandomEnabled());
+        saveStorage();
+        ui.dirty = true;
+        markActivity();
+        encoder.switchIgnoreUntilMs = millis() + 120;
+        return;
+      }
       if (roundRobinMenuCursor == RND_RBN_CLEAR_SLOT) {
         settings.roundRobinMask = 0;
         setRoundRobinCh10To1(settings, false);
         setRoundRobinCh10To2(settings, false);
+        setRoundRobinRandom(settings, false);
         saveStorage();
         ui.dirty = true;
         markActivity();
@@ -5415,6 +5457,7 @@ String settingValueString(uint8_t id) {
     case SET_RND_RBN:
       if (v == RND_RBN_CH10_TO_1_SLOT) return roundRobinCh10To1Enabled() ? "[x]CH10-1+" : "[ ]CH10-1+";
       if (v == RND_RBN_CH10_TO_2_SLOT) return roundRobinCh10To2Enabled() ? "[x]CH10-2+" : "[ ]CH10-2+";
+      if (v == RND_RBN_RANDOM_SLOT) return roundRobinRandomEnabled() ? "[x] RANDOM" : "[ ] RANDOM";
       if (v == RND_RBN_CLEAR_SLOT) return "CLEAR";
       if (v == RND_RBN_BACK_SLOT) return "BACK";
       return String((settings.roundRobinMask & channelBit(v + 1)) ? "[x] CH " : "[ ] CH ") + String(v + 1);
@@ -5795,6 +5838,7 @@ String roundRobinChannelList() {
     if (out.length()) out += ",";
     out += F("CH10-2+");
   }
+  if (roundRobinRandomEnabled()) out += F(" RANDOM");
   return out;
 }
 
@@ -5821,6 +5865,8 @@ void drawRoundRobinScreen(uint8_t cursor) {
     display.print(roundRobinCh10To1Enabled() ? F("[x]CH10-1+") : F("[ ]CH10-1+"));
   } else if (cursor == RND_RBN_CH10_TO_2_SLOT) {
     display.print(roundRobinCh10To2Enabled() ? F("[x]CH10-2+") : F("[ ]CH10-2+"));
+  } else if (cursor == RND_RBN_RANDOM_SLOT) {
+    display.print(roundRobinRandomEnabled() ? F("[x] RANDOM") : F("[ ] RANDOM"));
   } else if (cursor == RND_RBN_CLEAR_SLOT) {
     display.print(F("CLEAR"));
   } else {
