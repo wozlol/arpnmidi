@@ -43,6 +43,7 @@
 #include <Fonts/FreeSans9pt7b.h>
 #include <VL53L0X.h>
 #include "src/clock_engine.h"
+#include "src/four_track_looper.h"
 
 #ifndef ARPNMIDI_ENABLE_USB_DEVICE_MIDI
 #define ARPNMIDI_ENABLE_USB_DEVICE_MIDI 1
@@ -148,6 +149,7 @@ constexpr uint8_t MAP_CC_RR_RANDOM_BIT = 0x08;
 constexpr uint32_t MAP_CC_UI_SETTLE_MS = 260UL;
 constexpr uint32_t MAP_CC_DEFER_COMMIT_MS = 500UL;
 constexpr uint8_t LOOP_SOURCE_PORT = 251;
+constexpr uint8_t LOOP_TRACK_SOURCE_BASE = 240;
 constexpr uint32_t LOOP_STOP_DELETE_DEBOUNCE_MS = 300;
 constexpr uint32_t LOOP_REC_PLAY_DOUBLE_SWIPE_MS = 1000UL;
 constexpr uint32_t ARP_KEY_SYNC_CAPTURE_MS = 6UL;
@@ -155,10 +157,11 @@ constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 // Firmware 3 is still prototype firmware, so an incompatible preset-map change deliberately
 // receives a new schema identity instead of carrying migration code. A mismatch installs all
 // factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
-constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF301;
-constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3010001UL;
+constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF302;
+constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3020001UL;
 constexpr uint8_t MAX_CUSTOM_ARP_EVENTS = 32;
 constexpr uint16_t LOOP_EEPROM_MAGIC = 0x4C32;
+constexpr uint32_t LOOP_FILE_MAGIC = 0x4C503303UL;  // "LP3" schema 3
 constexpr size_t EEPROM_BYTES = 4096;
 constexpr uint8_t ARP_CH_1_PLUS_10 = 17;
 constexpr uint8_t ARP_CH_1_PLUS_10_AFTERTOUCH = 18;
@@ -209,6 +212,12 @@ void thruOutputRefOff(uint8_t sourcePort, uint8_t outNote);
 void updateBassVoice();
 void syncMusicalClockConfig(bool resetPhase = false);
 void handleRealtimeByte(uint8_t sourcePort, uint8_t status);
+uint8_t nextRoundRobinChannel(uint8_t baseCh);
+void handleMultitrackRecPlay();
+void handleMultitrackStopDelete();
+void releaseMultitrackOutput(void *context, uint8_t track);
+void emitMultitrackEvent(void *context, uint8_t track, const arpnmidi3::LoopMidiEvent &event);
+void syncLegacyLoopStatusFromMultitrack();
 
 enum MenuMode : uint8_t {
   MENU_SELECT = 0,
@@ -315,6 +324,7 @@ enum ArpSelection : uint8_t {
   ARPSEL_PAT_FIFTH,
   ARPSEL_PAT_BASS_CHORD,
   ARPSEL_PAT_CHORD_RUN,
+  ARPSEL_CUSTOM,
   ARP_SELECTION_COUNT
 };
 
@@ -483,6 +493,11 @@ struct Firmware3Settings {
   uint8_t timeSignature;
   uint8_t swing;
   uint8_t looperMidiTransport;
+  uint8_t looperAutoRec;
+  uint8_t looperTimeTravel;
+  uint8_t looperTrackMode;
+  uint8_t looperQuantize;
+  uint8_t looperRecordCc;
   uint8_t arpOctaves;
   uint8_t arpRetriggerSync;
   uint8_t arpNoteOrder;
@@ -827,6 +842,31 @@ struct LoopStorageImage {
   PackedLoopEvent events[MAX_LOOP_EVENTS];
 };
 
+struct LoopFileTrack {
+  uint32_t lengthUs = 0;
+  uint32_t generation = 0;
+  uint8_t flags = 0;
+  uint8_t lengthSelection = 2;
+  uint8_t reserved[2] = {0, 0};
+};
+
+struct LoopFileHeader {
+  uint32_t magic = LOOP_FILE_MAGIC;
+  uint16_t eventCount = 0;
+  uint8_t selectedTrack = 0;
+  uint8_t trackMode = 0;
+  uint32_t checksum = 2166136261UL;
+  LoopFileTrack tracks[arpnmidi3::kLoopTrackCount];
+};
+
+struct LoopFileEvent {
+  uint32_t atUs = 0;
+  uint8_t track = 0;
+  uint8_t status = 0;
+  uint8_t data1 = 0;
+  uint8_t data2 = 0;
+};
+
 constexpr size_t LOOP_STORAGE_OFFSET = 4096;
 constexpr size_t UI_SCREEN_STORAGE_OFFSET = EEPROM_BYTES - 2;
 constexpr uint8_t UI_SCREEN_STORAGE_MAGIC = 0xA7;
@@ -856,6 +896,19 @@ struct CcMapSlot {
   uint8_t channel = 0;
 };
 
+struct LoopCcPruneState {
+  bool used = false;
+  bool pending = false;
+  uint8_t channel = 1;
+  uint8_t cc = 0;
+  uint8_t lastStored = 0;
+  uint8_t lastSeen = 0;
+  uint8_t filtered = 0;
+  int8_t direction = 0;
+  uint32_t lastStoredMs = 0;
+  uint32_t lastSeenMs = 0;
+};
+
 struct ParameterLockEntry {
   uint8_t note = 0;
   uint8_t cc = 0;
@@ -873,6 +926,13 @@ struct CustomArpPattern {
   uint8_t count = 0;
   uint8_t lengthSelection = 2;
   CustomArpEvent events[MAX_CUSTOM_ARP_EVENTS];
+};
+
+struct CustomArpVoice {
+  bool active = false;
+  uint8_t note = 0;
+  uint8_t channel = 1;
+  uint64_t offUs = 0;
 };
 
 struct ExtendedPresetRecord {
@@ -959,7 +1019,23 @@ uint16_t parameterLockCount = 0;
 uint32_t parameterLockOverflowCount = 0;
 bool parameterLockHeldNotes[128];
 CustomArpPattern customArpPattern;
+bool customArpLearning = false;
+bool customArpWaitingForFirstNote = false;
+uint64_t customArpLearnStartUs = 0;
+uint64_t customArpLearnEndUs = 0;
+uint8_t customArpLearnLowestNote = 127;
+int8_t customArpLearnActiveEvent[128];
+CustomArpVoice customArpVoices[64];
+uint64_t customArpCycleStartUs = 0;
+uint8_t customArpPlayIndex = 0;
 bool littleFsReady = false;
+arpnmidi3::FourTrackLooper multitrackLooper;
+uint8_t multitrackPlaybackHeld[arpnmidi3::kLoopTrackCount][16][16];
+bool loopStorageDirty = false;
+bool loopStorageError = false;
+uint8_t loopTrackLengthSelection[arpnmidi3::kLoopTrackCount] = {2, 2, 2, 2};
+LoopCcPruneState loopCcPrune[64];
+uint32_t loopCcPruneOverflowCount = 0;
 
 bool heldInputNotes[128];
 uint8_t heldVelocities[128];
@@ -969,6 +1045,8 @@ bool physicalHeldInputNotes[128];
 uint8_t physicalHeldVelocities[128];
 bool loopHeldInputNotes[128];
 uint8_t loopHeldVelocities[128];
+bool loopTrackHeldInputNotes[arpnmidi3::kLoopTrackCount][128];
+uint8_t loopTrackHeldVelocities[arpnmidi3::kLoopTrackCount][128];
 bool arpLatchedNotes[128];
 uint8_t arpLatchedVelocities[128];
 bool thruLatchedNotes[128];
@@ -978,16 +1056,18 @@ bool physicalHeldDrumNotes[128];
 uint8_t physicalHeldDrumVelocities[128];
 bool loopHeldDrumNotes[128];
 uint8_t loopHeldDrumVelocities[128];
+bool loopTrackHeldDrumNotes[arpnmidi3::kLoopTrackCount][128];
+uint8_t loopTrackHeldDrumVelocities[arpnmidi3::kLoopTrackCount][128];
 uint8_t mappedThruNotes[128];
-uint8_t mappedLoopThruNotes[128];
+uint8_t mappedLoopThruNotes[arpnmidi3::kLoopTrackCount][128];
 uint8_t mappedThruChordNotes[128][3];
-uint8_t mappedLoopThruChordNotes[128][3];
+uint8_t mappedLoopThruChordNotes[arpnmidi3::kLoopTrackCount][128][3];
 uint8_t mappedThruChordCount[128];
-uint8_t mappedLoopThruChordCount[128];
+uint8_t mappedLoopThruChordCount[arpnmidi3::kLoopTrackCount][128];
 uint8_t mappedArpOffNotes[128];
 uint8_t mappedArpOffChannels[128];
-uint8_t mappedLoopArpOffNotes[128];
-uint8_t mappedLoopArpOffChannels[128];
+uint8_t mappedLoopArpOffNotes[arpnmidi3::kLoopTrackCount][128];
+uint8_t mappedLoopArpOffChannels[arpnmidi3::kLoopTrackCount][128];
 uint8_t thruOutputRefCount[128];
 uint8_t arpOffOutputRefCount[128];
 uint8_t legatoHeldCount[128];
@@ -1116,7 +1196,7 @@ const char *const kArpModeNames[ARP_MODE_COUNT] = {
 const char *const kArpSelectionNames[ARP_SELECTION_COUNT] = {
   "OFF", "UP", "DOWN", "UP-DOWN 1", "UP-DOWN 2", "TRIGGER", "RANDOM",
   "UP 1-OCT",
-  "RHYTHM", "OSTINATO", "OCT WALK", "FIFTH", "BASS+CHORD", "CHORD+RUN"
+  "RHYTHM", "OSTINATO", "OCT WALK", "FIFTH", "BASS+CHORD", "CHORD+RUN", "CUSTOM"
 };
 
 const char *const kDivisionNames[DIVISION_COUNT] = {
@@ -2190,6 +2270,11 @@ void panicMappedRelevantOnly(uint8_t settingId, int16_t nextValue) {
 
   activeArpCount = 0;
   activeDrumArpCount = 0;
+  memset(customArpVoices, 0, sizeof(customArpVoices));
+  customArpCycleStartUs = 0;
+  customArpPlayIndex = 0;
+  customArpLearning = false;
+  customArpWaitingForFirstNote = false;
   loopPlaying = false;
   loopRecording = false;
   loopRecordingArmed = false;
@@ -2294,6 +2379,8 @@ void resetHeldState() {
   memset(physicalHeldVelocities, 0, sizeof(physicalHeldVelocities));
   memset(loopHeldInputNotes, 0, sizeof(loopHeldInputNotes));
   memset(loopHeldVelocities, 0, sizeof(loopHeldVelocities));
+  memset(loopTrackHeldInputNotes, 0, sizeof(loopTrackHeldInputNotes));
+  memset(loopTrackHeldVelocities, 0, sizeof(loopTrackHeldVelocities));
   memset(arpLatchedNotes, 0, sizeof(arpLatchedNotes));
   memset(arpLatchedVelocities, 0, sizeof(arpLatchedVelocities));
   memset(thruLatchedNotes, 0, sizeof(thruLatchedNotes));
@@ -2306,6 +2393,8 @@ void resetHeldState() {
   memset(physicalHeldDrumVelocities, 0, sizeof(physicalHeldDrumVelocities));
   memset(loopHeldDrumNotes, 0, sizeof(loopHeldDrumNotes));
   memset(loopHeldDrumVelocities, 0, sizeof(loopHeldDrumVelocities));
+  memset(loopTrackHeldDrumNotes, 0, sizeof(loopTrackHeldDrumNotes));
+  memset(loopTrackHeldDrumVelocities, 0, sizeof(loopTrackHeldDrumVelocities));
   memset(mappedThruNotes, 0xFF, sizeof(mappedThruNotes));
   memset(mappedLoopThruNotes, 0xFF, sizeof(mappedLoopThruNotes));
   memset(mappedThruChordNotes, 0xFF, sizeof(mappedThruChordNotes));
@@ -2337,6 +2426,11 @@ void resetHeldState() {
   activeDrumArpCount = 0;
   memset(activeArpNotes, 0xFF, sizeof(activeArpNotes));
   memset(activeArpChannels, 0, sizeof(activeArpChannels));
+  memset(customArpVoices, 0, sizeof(customArpVoices));
+  customArpCycleStartUs = 0;
+  customArpPlayIndex = 0;
+  customArpLearning = false;
+  customArpWaitingForFirstNote = false;
   roundRobinCursor = 0;
   arpGlobalStep = 0;
   arpPatternStep = 0;
@@ -2466,35 +2560,217 @@ uint8_t buildChordNotes(uint8_t root, uint8_t *notes) {
   return count;
 }
 
+uint16_t customArpLengthPulses(uint8_t selection) {
+  const uint16_t bar = arpnmidi3::barPulses(firmware3Settings.timeSignature != 0);
+  switch (selection) {
+    case 0: return max<uint16_t>(1, bar / 4);
+    case 1: return max<uint16_t>(1, bar / 2);
+    case 2: return bar;
+    case 3: return bar * 2U;
+    case 4: return bar * 4U;
+    default: return bar * 8U;
+  }
+}
+
+uint16_t customArpElapsedPulses(uint64_t nowUs) {
+  if (customArpLearnStartUs == 0 || nowUs <= customArpLearnStartUs) return 0;
+  const uint64_t onePulseUs = max<uint64_t>(1, musicalDurationUs(1));
+  return min<uint64_t>(UINT16_MAX, (nowUs - customArpLearnStartUs) / onePulseUs);
+}
+
+void startCustomArpLearn() {
+  customArpPattern = CustomArpPattern{};
+  customArpPattern.lengthSelection = firmware3Settings.customArpLength;
+  memset(customArpLearnActiveEvent, 0xFF, sizeof(customArpLearnActiveEvent));
+  customArpLearning = true;
+  customArpWaitingForFirstNote = true;
+  customArpLearnStartUs = 0;
+  customArpLearnEndUs = 0;
+  customArpLearnLowestNote = 127;
+}
+
+void finishCustomArpLearn() {
+  if (!customArpLearning) return;
+  const uint16_t lengthPulses = customArpLengthPulses(customArpPattern.lengthSelection);
+  const uint16_t endPulse = customArpLearnStartUs ?
+      min<uint16_t>(lengthPulses, customArpElapsedPulses(time_us_64())) : 0;
+  for (uint8_t note = 0; note < 128; ++note) {
+    const int8_t idx = customArpLearnActiveEvent[note];
+    if (idx >= 0 && idx < customArpPattern.count) {
+      CustomArpEvent &event = customArpPattern.events[idx];
+      event.gatePulses = max<uint16_t>(1, endPulse > event.startPulse ?
+          endPulse - event.startPulse : 1);
+    }
+  }
+  if (customArpPattern.count > 0) {
+    for (uint8_t i = 0; i < customArpPattern.count; ++i) {
+      CustomArpEvent &event = customArpPattern.events[i];
+      event.pitchOffset = static_cast<int8_t>(event.pitchOffset - customArpLearnLowestNote);
+      const uint16_t remaining = max<uint16_t>(1, lengthPulses - event.startPulse);
+      event.gatePulses = min<uint16_t>(max<uint16_t>(1, event.gatePulses), remaining);
+    }
+  }
+  customArpLearning = false;
+  customArpWaitingForFirstNote = false;
+  memset(customArpLearnActiveEvent, 0xFF, sizeof(customArpLearnActiveEvent));
+  saveExtendedPreset(storage.currentPreset);
+  ui.dirty = true;
+}
+
+void clearCustomArpPattern() {
+  customArpPattern = CustomArpPattern{};
+  customArpPattern.lengthSelection = firmware3Settings.customArpLength;
+  saveExtendedPreset(storage.currentPreset);
+  ui.dirty = true;
+}
+
+void captureCustomArpNote(uint8_t note, uint8_t velocity, bool on, uint64_t nowUs) {
+  if (!customArpLearning) return;
+  if (on && velocity > 0) {
+    if (customArpWaitingForFirstNote) {
+      customArpWaitingForFirstNote = false;
+      customArpLearnStartUs = nowUs;
+      customArpLearnEndUs = nowUs + musicalDurationUs(
+          customArpLengthPulses(customArpPattern.lengthSelection));
+    }
+    if (customArpPattern.count >= MAX_CUSTOM_ARP_EVENTS || nowUs >= customArpLearnEndUs) return;
+    const uint8_t idx = customArpPattern.count++;
+    CustomArpEvent &event = customArpPattern.events[idx];
+    event.startPulse = min<uint16_t>(customArpLengthPulses(customArpPattern.lengthSelection) - 1,
+                                     customArpElapsedPulses(nowUs));
+    event.gatePulses = 1;
+    event.pitchOffset = static_cast<int8_t>(note);
+    event.velocity = max<uint8_t>(1, velocity);
+    customArpLearnActiveEvent[note] = idx;
+    customArpLearnLowestNote = min<uint8_t>(customArpLearnLowestNote, note);
+  } else {
+    const int8_t idx = customArpLearnActiveEvent[note];
+    if (idx >= 0 && idx < customArpPattern.count) {
+      CustomArpEvent &event = customArpPattern.events[idx];
+      const uint16_t offPulse = min<uint16_t>(customArpLengthPulses(customArpPattern.lengthSelection),
+                                              customArpElapsedPulses(nowUs));
+      event.gatePulses = max<uint16_t>(1, offPulse > event.startPulse ?
+          offPulse - event.startPulse : 1);
+      customArpLearnActiveEvent[note] = -1;
+    }
+  }
+}
+
+void releaseCustomArpVoices() {
+  for (CustomArpVoice &voice : customArpVoices) {
+    if (voice.active) {
+      sendFanout(255, 0x80 | ((voice.channel - 1) & 0x0F), voice.note, 0);
+      voice.active = false;
+    }
+  }
+}
+
+void tickCustomArp(uint64_t nowUs) {
+  for (CustomArpVoice &voice : customArpVoices) {
+    if (voice.active && nowUs >= voice.offUs) {
+      sendFanout(255, 0x80 | ((voice.channel - 1) & 0x0F), voice.note, 0);
+      voice.active = false;
+    }
+  }
+  if (arpHeldCount == 0 || customArpPattern.count == 0 || !channelEnabled(mainArpOutChannel())) {
+    releaseCustomArpVoices();
+    customArpCycleStartUs = 0;
+    customArpPlayIndex = 0;
+    return;
+  }
+  const uint16_t lengthPulses = customArpLengthPulses(customArpPattern.lengthSelection);
+  const uint64_t lengthUs = max<uint64_t>(1, musicalDurationUs(lengthPulses));
+  if (customArpCycleStartUs == 0) customArpCycleStartUs = nowUs;
+  while (nowUs - customArpCycleStartUs >= lengthUs) {
+    releaseCustomArpVoices();
+    customArpCycleStartUs += lengthUs;
+    customArpPlayIndex = 0;
+  }
+  uint8_t lowest = 127;
+  for (uint8_t i = 0; i < arpHeldCount; ++i) lowest = min<uint8_t>(lowest, arpHeldSorted[i]);
+  const uint64_t elapsedUs = nowUs - customArpCycleStartUs;
+  while (customArpPlayIndex < customArpPattern.count) {
+    const CustomArpEvent &event = customArpPattern.events[customArpPlayIndex];
+    const uint64_t eventUs = musicalDurationUs(event.startPulse);
+    if (eventUs > elapsedUs) break;
+    const uint8_t root = clampU8(static_cast<int>(lowest) + event.pitchOffset, 0, 127);
+    uint8_t notes[4];
+    const uint8_t count = buildChordNotes(root, notes);
+    for (uint8_t n = 0; n < count; ++n) {
+      for (CustomArpVoice &voice : customArpVoices) {
+        if (voice.active) continue;
+        voice.active = true;
+        voice.note = notes[n];
+        voice.channel = nextRoundRobinChannel(mainArpOutChannel());
+        voice.offUs = min<uint64_t>(customArpCycleStartUs + lengthUs,
+            customArpCycleStartUs + eventUs + musicalDurationUs(event.gatePulses));
+        sendFanout(255, 0x90 | ((voice.channel - 1) & 0x0F), voice.note, event.velocity);
+        break;
+      }
+    }
+    ++customArpPlayIndex;
+  }
+}
+
 bool loopOwnsInput(uint8_t sourcePort) {
-  return sourcePort == LOOP_SOURCE_PORT;
+  return sourcePort == LOOP_SOURCE_PORT ||
+         (sourcePort >= LOOP_TRACK_SOURCE_BASE &&
+          sourcePort < LOOP_TRACK_SOURCE_BASE + arpnmidi3::kLoopTrackCount);
+}
+
+uint8_t loopTrackForSource(uint8_t sourcePort) {
+  if (sourcePort >= LOOP_TRACK_SOURCE_BASE &&
+      sourcePort < LOOP_TRACK_SOURCE_BASE + arpnmidi3::kLoopTrackCount) {
+    return sourcePort - LOOP_TRACK_SOURCE_BASE;
+  }
+  return 0;
 }
 
 bool inputOwnerHeld(uint8_t sourcePort, uint8_t note) {
-  return loopOwnsInput(sourcePort) ? loopHeldInputNotes[note] : physicalHeldInputNotes[note];
+  return loopOwnsInput(sourcePort)
+      ? loopTrackHeldInputNotes[loopTrackForSource(sourcePort)][note]
+      : physicalHeldInputNotes[note];
 }
 
 void setInputOwnerState(uint8_t sourcePort, uint8_t note, uint8_t velocity, bool on) {
-  bool *ownerNotes = loopOwnsInput(sourcePort) ? loopHeldInputNotes : physicalHeldInputNotes;
-  uint8_t *ownerVelocities = loopOwnsInput(sourcePort) ? loopHeldVelocities : physicalHeldVelocities;
+  bool *ownerNotes = loopOwnsInput(sourcePort)
+      ? loopTrackHeldInputNotes[loopTrackForSource(sourcePort)] : physicalHeldInputNotes;
+  uint8_t *ownerVelocities = loopOwnsInput(sourcePort)
+      ? loopTrackHeldVelocities[loopTrackForSource(sourcePort)] : physicalHeldVelocities;
   if (on && !ownerNotes[note]) heldNoteOrder[note] = ++heldNoteOrderCounter;
   ownerNotes[note] = on;
   ownerVelocities[note] = on ? velocity : 0;
+  loopHeldInputNotes[note] = false;
+  loopHeldVelocities[note] = 0;
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    if (loopTrackHeldInputNotes[track][note]) {
+      loopHeldInputNotes[note] = true;
+      loopHeldVelocities[note] = loopTrackHeldVelocities[track][note];
+      break;
+    }
+  }
   heldInputNotes[note] = physicalHeldInputNotes[note] || loopHeldInputNotes[note];
-  heldVelocities[note] = physicalHeldInputNotes[note]
-                           ? physicalHeldVelocities[note]
-                           : loopHeldVelocities[note];
+  heldVelocities[note] = physicalHeldInputNotes[note] ? physicalHeldVelocities[note] : loopHeldVelocities[note];
 }
 
 void setDrumOwnerState(uint8_t sourcePort, uint8_t note, uint8_t velocity, bool on) {
-  bool *ownerNotes = loopOwnsInput(sourcePort) ? loopHeldDrumNotes : physicalHeldDrumNotes;
-  uint8_t *ownerVelocities = loopOwnsInput(sourcePort) ? loopHeldDrumVelocities : physicalHeldDrumVelocities;
+  bool *ownerNotes = loopOwnsInput(sourcePort)
+      ? loopTrackHeldDrumNotes[loopTrackForSource(sourcePort)] : physicalHeldDrumNotes;
+  uint8_t *ownerVelocities = loopOwnsInput(sourcePort)
+      ? loopTrackHeldDrumVelocities[loopTrackForSource(sourcePort)] : physicalHeldDrumVelocities;
   ownerNotes[note] = on;
   ownerVelocities[note] = on ? velocity : 0;
+  loopHeldDrumNotes[note] = false;
+  loopHeldDrumVelocities[note] = 0;
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    if (loopTrackHeldDrumNotes[track][note]) {
+      loopHeldDrumNotes[note] = true;
+      loopHeldDrumVelocities[note] = loopTrackHeldDrumVelocities[track][note];
+      break;
+    }
+  }
   heldDrumNotes[note] = physicalHeldDrumNotes[note] || loopHeldDrumNotes[note];
-  heldDrumVelocities[note] = physicalHeldDrumNotes[note]
-                            ? physicalHeldDrumVelocities[note]
-                            : loopHeldDrumVelocities[note];
+  heldDrumVelocities[note] = physicalHeldDrumNotes[note] ? physicalHeldDrumVelocities[note] : loopHeldDrumVelocities[note];
 }
 
 void rebuildHeldSorted() {
@@ -2823,8 +3099,10 @@ void noteArpOffPassthrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity,
   uint8_t outCh = baseOutCh;
   if (!channelEnabled(outCh)) return;
   if (outCh == effectiveThruChannel()) return;
-  uint8_t *mappedNotes = loopOwnsInput(sourcePort) ? mappedLoopArpOffNotes : mappedArpOffNotes;
-  uint8_t *mappedChannels = loopOwnsInput(sourcePort) ? mappedLoopArpOffChannels : mappedArpOffChannels;
+  uint8_t *mappedNotes = loopOwnsInput(sourcePort)
+      ? mappedLoopArpOffNotes[loopTrackForSource(sourcePort)] : mappedArpOffNotes;
+  uint8_t *mappedChannels = loopOwnsInput(sourcePort)
+      ? mappedLoopArpOffChannels[loopTrackForSource(sourcePort)] : mappedArpOffChannels;
   const uint8_t q = drumSplit ? inNote : quantizeUp(inNote);
   if (on) {
     mappedNotes[inNote] = q;
@@ -2894,8 +3172,8 @@ void releaseArpClockIfLooperIdle() {
 void releaseResidualLoopOwners() {
   const uint8_t previousDivision = currentDivisionSetting();
   for (uint8_t note = 0; note < 128; ++note) {
-    if (mappedLoopThruNotes[note] <= 127) noteThrough(LOOP_SOURCE_PORT, note, 0, false);
-    if (mappedLoopArpOffNotes[note] <= 127) {
+    if (mappedLoopThruNotes[0][note] <= 127) noteThrough(LOOP_SOURCE_PORT, note, 0, false);
+    if (mappedLoopArpOffNotes[0][note] <= 127) {
       noteArpOffPassthrough(LOOP_SOURCE_PORT, note, 0, false);
     }
     setInputOwnerState(LOOP_SOURCE_PORT, note, 0, false);
@@ -2920,6 +3198,7 @@ void clearLoopOverdubTracking() {
 }
 
 void loopAllOff() {
+  if (multitrackLooper.playing()) multitrackLooper.stop(releaseMultitrackOutput, nullptr);
   for (uint8_t channel = 0; channel < 16; ++channel) {
     for (uint8_t noteByte = 0; noteByte < 16; ++noteByte) {
       const uint8_t heldBits = loopPlaybackHeld[channel][noteByte];
@@ -3311,6 +3590,9 @@ void armLoopReplaceRecording() {
 }
 
 void handleLoopRecPlayTrigger() {
+  handleMultitrackRecPlay();
+  return;
+
   const bool doubleSwipe = loopRecPlayDoubleSwipe();
 
   if (loopRecordingArmed) {
@@ -3358,6 +3640,9 @@ void handleLoopRecPlayTrigger() {
 }
 
 void handleLoopStopDeleteTrigger() {
+  handleMultitrackStopDelete();
+  return;
+
   const uint32_t now = millis();
   const bool active = loopPlaying || loopRecording || loopRecordingArmed;
   if (active) {
@@ -3375,7 +3660,262 @@ void handleLoopStopDeleteTrigger() {
   ui.dirty = true;
 }
 
+uint32_t multitrackFixedLengthUs(uint8_t track) {
+  if (track >= arpnmidi3::kLoopTrackCount) return 0;
+  const uint8_t selection = loopTrackLengthSelection[track];
+  if (track == 0 && selection == 6) return 0;  // Free
+  uint64_t oneBarUs = musicalDurationUs(
+      static_cast<uint64_t>(MUSICAL_PPQN) * (firmware3Settings.timeSignature ? 3ULL : 4ULL));
+  if (loopTrackLengthSelection[0] == 6 && multitrackLooper.track(0).lengthUs > 0) {
+    oneBarUs = multitrackLooper.track(0).lengthUs;
+  }
+  switch (min<uint8_t>(selection, 5)) {
+    case 0: oneBarUs /= 4ULL; break;
+    case 1: oneBarUs /= 2ULL; break;
+    case 3: oneBarUs *= 2ULL; break;
+    case 4: oneBarUs *= 4ULL; break;
+    case 5: oneBarUs *= 8ULL; break;
+    default: break;
+  }
+  return static_cast<uint32_t>(min<uint64_t>(UINT32_MAX, max<uint64_t>(1, oneBarUs)));
+}
+
+void adoptFreeTrackOneTempo() {
+  if (loopTrackLengthSelection[0] != 6 || multitrackLooper.track(0).lengthUs == 0) return;
+  const uint32_t beats = firmware3Settings.timeSignature ? 3U : 4U;
+  const uint64_t numerator = 60000000ULL * beats;
+  settings.manualBpm = constrain(static_cast<int>((numerator +
+      multitrackLooper.track(0).lengthUs / 2ULL) /
+      multitrackLooper.track(0).lengthUs), 20, 300);
+  syncMusicalClockConfig(true);
+}
+
+uint32_t multitrackQuantizeUs() {
+  static constexpr uint8_t divisions[5] = {
+    DIV_1_64, DIV_1_32, DIV_1_16, DIV_1_8, DIV_1_4
+  };
+  if (firmware3Settings.looperQuantize == 0) return 0;
+  return static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
+      musicalDurationUs(kDivisionPulseSteps[divisions[firmware3Settings.looperQuantize - 1]])));
+}
+
+void syncLegacyLoopStatusFromMultitrack() {
+  loopHasData = multitrackLooper.hasAnyData();
+  loopPlaying = multitrackLooper.playing();
+  loopRecordingArmed = multitrackLooper.recordingArmed();
+  loopRecording = multitrackLooper.recording();
+  loopOverdubbing = multitrackLooper.overdubbing();
+  loopEventCount = multitrackLooper.usedEvents();
+  const arpnmidi3::LoopTrackState &track = multitrackLooper.track(multitrackLooper.selectedTrack());
+  loopLengthUs = track.lengthUs;
+  loopLengthMs = static_cast<uint32_t>((track.lengthUs + 999ULL) / 1000ULL);
+}
+
+void releaseMultitrackOutput(void *, uint8_t track) {
+  if (track >= arpnmidi3::kLoopTrackCount) return;
+  const uint8_t sourcePort = LOOP_TRACK_SOURCE_BASE + track;
+  for (uint8_t channel = 0; channel < 16; ++channel) {
+    for (uint8_t noteByte = 0; noteByte < 16; ++noteByte) {
+      const uint8_t held = multitrackPlaybackHeld[track][channel][noteByte];
+      multitrackPlaybackHeld[track][channel][noteByte] = 0;
+      for (uint8_t bit = 0; bit < 8; ++bit) {
+        if ((held & (1U << bit)) == 0) continue;
+        routeIncomingChannelMessage(sourcePort, 0x80 | channel, noteByte * 8 + bit, 0);
+      }
+    }
+  }
+}
+
+void emitMultitrackEvent(void *, uint8_t track, const arpnmidi3::LoopMidiEvent &event) {
+  if (track >= arpnmidi3::kLoopTrackCount) return;
+  const uint8_t type = event.status & 0xF0;
+  if ((type == 0x90 || type == 0x80) && event.data1 <= 127) {
+    uint8_t &bits = multitrackPlaybackHeld[track][event.status & 0x0F][event.data1 >> 3];
+    const uint8_t mask = 1U << (event.data1 & 0x07);
+    if (type == 0x90 && event.data2 > 0) bits |= mask;
+    else bits &= static_cast<uint8_t>(~mask);
+  }
+  routeIncomingChannelMessage(LOOP_TRACK_SOURCE_BASE + track,
+                              event.status, event.data1, event.data2);
+}
+
+void configureMultitrackLooper() {
+  multitrackLooper.setTrackMode(
+      static_cast<arpnmidi3::LoopTrackMode>(firmware3Settings.looperTrackMode));
+  multitrackLooper.setRecordQuantizeUs(multitrackQuantizeUs());
+}
+
+void resetLoopCcPruning() {
+  memset(loopCcPrune, 0, sizeof(loopCcPrune));
+}
+
+bool capturePrunedLoopCcEvent(uint8_t channel, uint8_t cc, uint8_t value) {
+  const arpnmidi3::LoopMidiEvent event{0,
+      static_cast<uint8_t>(0xB0 | ((channel - 1) & 0x0F)), cc, value};
+  if (!multitrackLooper.capture(time_us_64(), event)) return false;
+  loopStorageDirty = true;
+  return true;
+}
+
+void flushLoopCcPruning(bool forceAll) {
+  const uint32_t now = millis();
+  for (LoopCcPruneState &state : loopCcPrune) {
+    if (!state.used || !state.pending) continue;
+    if (!forceAll && now - state.lastSeenMs < 80) continue;
+    if (capturePrunedLoopCcEvent(state.channel, state.cc, state.lastSeen)) {
+      state.lastStored = state.lastSeen;
+      state.lastStoredMs = now;
+      state.pending = false;
+    }
+  }
+}
+
+void recordLoopCc(uint8_t sourcePort, uint8_t channel, uint8_t cc, uint8_t value) {
+  if (loopOwnsInput(sourcePort) || !firmware3Settings.looperRecordCc ||
+      !multitrackLooper.recording()) return;
+  LoopCcPruneState *state = nullptr;
+  for (LoopCcPruneState &candidate : loopCcPrune) {
+    if (candidate.used && candidate.channel == channel && candidate.cc == cc) {
+      state = &candidate;
+      break;
+    }
+    if (!state && !candidate.used) state = &candidate;
+  }
+  if (!state) {
+    ++loopCcPruneOverflowCount;
+    return;
+  }
+  const uint32_t now = millis();
+  if (!state->used) {
+    *state = LoopCcPruneState{};
+    state->used = true;
+    state->channel = channel;
+    state->cc = cc;
+    state->lastStored = state->lastSeen = state->filtered = value;
+    state->lastStoredMs = state->lastSeenMs = now;
+    capturePrunedLoopCcEvent(channel, cc, value);
+    return;
+  }
+  const int delta = static_cast<int>(value) - state->lastSeen;
+  const int8_t direction = delta > 0 ? 1 : (delta < 0 ? -1 : 0);
+  const bool directionChanged = direction != 0 && state->direction != 0 && direction != state->direction;
+  state->filtered = static_cast<uint8_t>((static_cast<uint16_t>(state->filtered) * 2U + value + 1U) / 3U);
+  state->lastSeen = value;
+  state->lastSeenMs = now;
+  state->pending = value != state->lastStored;
+  const uint8_t distance = static_cast<uint8_t>(abs(static_cast<int>(state->filtered) - state->lastStored));
+  const bool timedSmoothPoint = distance >= 2 && now - state->lastStoredMs >= 25;
+  const bool fastMove = abs(delta) >= 6 && now - state->lastStoredMs >= 8;
+  if (directionChanged || timedSmoothPoint || fastMove) {
+    const uint8_t storedValue = (directionChanged || fastMove) ? value : state->filtered;
+    if (capturePrunedLoopCcEvent(channel, cc, storedValue)) {
+      state->lastStored = storedValue;
+      state->lastStoredMs = now;
+      state->pending = value != storedValue;
+    }
+  }
+  if (direction != 0) state->direction = direction;
+}
+
+void armSelectedMultitrack(bool overdub) {
+  configureMultitrackLooper();
+  const uint8_t track = multitrackLooper.selectedTrack();
+  multitrackLooper.armRecord(track, multitrackFixedLengthUs(track), overdub);
+  resetLoopCcPruning();
+  syncLegacyLoopStatusFromMultitrack();
+  ui.dirty = true;
+}
+
+void handleMultitrackRecPlay() {
+  const uint64_t nowUs = time_us_64();
+  configureMultitrackLooper();
+  if (multitrackLooper.recordingArmed() || multitrackLooper.recording()) {
+    flushLoopCcPruning(true);
+    const bool captured = multitrackLooper.finishRecording(nowUs);
+    loopStorageDirty |= captured;
+    if (captured && multitrackLooper.recordingTrack() == 0) adoptFreeTrackOneTempo();
+    if (captured && !multitrackLooper.playing()) multitrackLooper.start(nowUs);
+  } else if (!multitrackLooper.hasAnyData()) {
+    armSelectedMultitrack(false);
+  } else if (!multitrackLooper.playing()) {
+    multitrackLooper.start(nowUs);
+  } else {
+    uint8_t target = multitrackLooper.selectedTrack();
+    const auto mode = multitrackLooper.trackMode();
+    if (mode == arpnmidi3::LoopTrackMode::Layers) {
+      bool foundEmpty = false;
+      for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+        if (multitrackLooper.track(i).count == 0) {
+          target = i;
+          foundEmpty = true;
+          break;
+        }
+      }
+      if (!foundEmpty) target = multitrackLooper.oldestPopulatedTrack();
+      multitrackLooper.selectTrack(target);
+      armSelectedMultitrack(!foundEmpty);
+    } else {
+      armSelectedMultitrack(multitrackLooper.track(target).count > 0);
+      if (mode == arpnmidi3::LoopTrackMode::PartsAutoSolo) {
+        for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+          multitrackLooper.setSolo(i, i == target, releaseMultitrackOutput, nullptr);
+        }
+        loopStorageDirty = true;
+      }
+    }
+  }
+  syncLegacyLoopStatusFromMultitrack();
+  ui.dirty = true;
+}
+
+void handleMultitrackStopDelete() {
+  const uint8_t track = multitrackLooper.selectedTrack();
+  if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
+    flushLoopCcPruning(true);
+    loopStorageDirty |= multitrackLooper.finishRecording(time_us_64());
+  }
+  if (multitrackLooper.playing()) {
+    multitrackLooper.stop(releaseMultitrackOutput, nullptr);
+    loopDeleteArmed = true;
+  } else if (loopDeleteArmed && multitrackLooper.usedEvents() > 0) {
+    if (multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers) {
+      bool anyHidden = false;
+      for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+        anyHidden |= multitrackLooper.track(i).hidden;
+      }
+      for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+        if (anyHidden) multitrackLooper.undoClear(i);
+        else multitrackLooper.safeClear(i, releaseMultitrackOutput, nullptr);
+      }
+    } else if (multitrackLooper.track(track).hidden) {
+      multitrackLooper.undoClear(track);
+    } else {
+      multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
+    }
+    loopDeleteArmed = false;
+    loopStorageDirty = true;
+  } else {
+    loopDeleteArmed = multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers
+        ? multitrackLooper.usedEvents() > 0 : multitrackLooper.track(track).count > 0;
+  }
+  syncLegacyLoopStatusFromMultitrack();
+  ui.dirty = true;
+}
+
 void recordLoopNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t velocity, bool on) {
+  if (!loopOwnsInput(sourcePort)) {
+    if (firmware3Settings.looperAutoRec && !multitrackLooper.hasAnyData() &&
+        !multitrackLooper.recording() && !multitrackLooper.recordingArmed() && on && velocity > 0) {
+      armSelectedMultitrack(false);
+    }
+    const arpnmidi3::LoopMidiEvent event{0,
+        static_cast<uint8_t>((on && velocity > 0 ? 0x90 : 0x80) | ((channel1 - 1) & 0x0F)),
+        note, static_cast<uint8_t>(on ? velocity : 0)};
+    if (multitrackLooper.capture(time_us_64(), event)) loopStorageDirty = true;
+    syncLegacyLoopStatusFromMultitrack();
+  }
+  return;
+
   if (sourcePort == LOOP_SOURCE_PORT) return;
   if (loopRecordingArmed) {
     if (!on || velocity == 0) return;
@@ -3451,69 +3991,140 @@ void tickLooperAt(uint64_t now) {
 }
 
 void tickLooper() {
-  tickLooperAt(time_us_64());
+  const bool wasRecording = multitrackLooper.recording();
+  flushLoopCcPruning(false);
+  configureMultitrackLooper();
+  multitrackLooper.tick(time_us_64(), emitMultitrackEvent,
+                        releaseMultitrackOutput, nullptr);
+  syncLegacyLoopStatusFromMultitrack();
+  if (wasRecording && !multitrackLooper.recording()) {
+    loopStorageDirty = true;
+    if (multitrackLooper.recordingTrack() == 0) adoptFreeTrackOneTempo();
+  }
+}
+
+void pollLoopStoragePersistence() {
+  if (!loopStorageDirty || multitrackLooper.recording() || multitrackLooper.recordingArmed() ||
+      multitrackLooper.playing()) return;
+  if (anyPhysicalInputNotesHeld() || heldDrumCount > 0 || arpAnyPlaybackActive()) return;
+  saveLoopStorageIfAny();
 }
 
 void clearSavedLoopStorage() {
-  uint16_t emptyMagic = 0xFFFF;
-  EEPROM.put(LOOP_STORAGE_OFFSET, emptyMagic);
-  EEPROM.commit();
+  if (littleFsReady) LittleFS.remove("/loops.f3");
+  loopStorageDirty = false;
+}
+
+uint32_t loopChecksumUpdate(uint32_t checksum, const uint8_t *data, size_t length) {
+  for (size_t i = 0; i < length; ++i) {
+    checksum ^= data[i];
+    checksum *= 16777619UL;
+  }
+  return checksum;
+}
+
+struct LoopSaveContext {
+  File *file = nullptr;
+  uint32_t checksum = 2166136261UL;
+  bool ok = true;
+};
+
+bool writeLoopFileEvent(void *raw, uint8_t track, const arpnmidi3::LoopMidiEvent &event) {
+  LoopSaveContext &context = *static_cast<LoopSaveContext *>(raw);
+  const LoopFileEvent stored{event.atUs, track, event.status, event.data1, event.data2};
+  context.checksum = loopChecksumUpdate(context.checksum,
+      reinterpret_cast<const uint8_t *>(&stored), sizeof(stored));
+  context.ok = context.ok && context.file->write(
+      reinterpret_cast<const uint8_t *>(&stored), sizeof(stored)) == sizeof(stored);
+  return context.ok;
 }
 
 void saveLoopStorageIfAny() {
-  if (!loopHasData || loopEventCount == 0 || loopLengthMs == 0) {
+  if (!littleFsReady) {
+    loopStorageError = true;
+    return;
+  }
+  if (multitrackLooper.usedEvents() == 0) {
     clearSavedLoopStorage();
     return;
   }
-
-  LoopStorageImage image{};
-  image.magic = LOOP_EEPROM_MAGIC;
-  image.count = min<uint16_t>(loopEventCount, MAX_LOOP_EVENTS);
-  image.lengthMs = loopStoredLengthMs ? loopStoredLengthMs : loopLengthMs;
-  image.activeLengthMs = loopLengthMs;
-  image.bars = settings.loopBars;
-  for (uint16_t i = 0; i < image.count; ++i) {
-    image.events[i].at10ms = min<uint32_t>(65535UL, (loopEvents[i].atMs + 5UL) / 10UL);
-    image.events[i].channel = loopEvents[i].channel;
-    image.events[i].note = loopEvents[i].note;
-    image.events[i].velocity = loopEvents[i].velocity;
-    image.events[i].flags = loopEvents[i].on ? 1 : 0;
+  File file = LittleFS.open("/loops.tmp", "w+");
+  if (!file) {
+    loopStorageError = true;
+    return;
   }
-  EEPROM.put(LOOP_STORAGE_OFFSET, image);
-  EEPROM.commit();
+  LoopFileHeader header{};
+  header.eventCount = multitrackLooper.usedEvents();
+  header.selectedTrack = multitrackLooper.selectedTrack();
+  header.trackMode = static_cast<uint8_t>(multitrackLooper.trackMode());
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    const arpnmidi3::LoopTrackState &state = multitrackLooper.track(track);
+    header.tracks[track].lengthUs = state.lengthUs;
+    header.tracks[track].generation = state.generation;
+    header.tracks[track].flags = (state.muted ? 0x01 : 0) |
+                                (state.solo ? 0x02 : 0) |
+                                (state.hidden ? 0x04 : 0);
+    header.tracks[track].lengthSelection = loopTrackLengthSelection[track];
+  }
+  header.checksum = 0;
+  bool ok = file.write(reinterpret_cast<const uint8_t *>(&header), sizeof(header)) == sizeof(header);
+  LoopSaveContext context{&file, 2166136261UL, ok};
+  if (ok) ok = multitrackLooper.visitEvents(writeLoopFileEvent, &context) && context.ok;
+  header.checksum = context.checksum;
+  if (ok) ok = file.seek(0, SeekSet) &&
+      file.write(reinterpret_cast<const uint8_t *>(&header), sizeof(header)) == sizeof(header);
+  file.close();
+  if (ok) {
+    LittleFS.remove("/loops.f3");
+    ok = LittleFS.rename("/loops.tmp", "/loops.f3");
+  } else {
+    LittleFS.remove("/loops.tmp");
+  }
+  loopStorageError = !ok;
+  if (ok) loopStorageDirty = false;
 }
 
 void loadSavedLoopStorage() {
-  LoopStorageImage image{};
-  EEPROM.get(LOOP_STORAGE_OFFSET, image);
-  if (image.magic != LOOP_EEPROM_MAGIC || image.count == 0 || image.count > MAX_LOOP_EVENTS ||
-      image.lengthMs == 0) {
-    loopHasData = false;
-    loopEventCount = 0;
+  multitrackLooper.reset();
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    loopTrackLengthSelection[track] = 2;
+  }
+  if (!littleFsReady) return;
+  File file = LittleFS.open("/loops.f3", "r");
+  LoopFileHeader header{};
+  bool ok = file && file.read(reinterpret_cast<uint8_t *>(&header), sizeof(header)) == sizeof(header) &&
+            header.magic == LOOP_FILE_MAGIC && header.eventCount <= arpnmidi3::kLoopEventPoolSize;
+  uint32_t checksum = 2166136261UL;
+  for (uint16_t i = 0; ok && i < header.eventCount; ++i) {
+    LoopFileEvent stored{};
+    ok = file.read(reinterpret_cast<uint8_t *>(&stored), sizeof(stored)) == sizeof(stored) &&
+         stored.track < arpnmidi3::kLoopTrackCount;
+    if (!ok) break;
+    checksum = loopChecksumUpdate(checksum, reinterpret_cast<const uint8_t *>(&stored), sizeof(stored));
+    ok = multitrackLooper.restoreEvent(stored.track,
+        arpnmidi3::LoopMidiEvent{stored.atUs, stored.status, stored.data1, stored.data2});
+  }
+  file.close();
+  ok = ok && checksum == header.checksum;
+  if (!ok) {
+    multitrackLooper.reset();
+    loopStorageError = true;
+    syncLegacyLoopStatusFromMultitrack();
     return;
   }
-
-  loopEventCount = image.count;
-  loopPlayIndex = 0;
-  loopStoredLengthMs = image.lengthMs;
-  loopLengthMs = image.activeLengthMs ? image.activeLengthMs : image.lengthMs;
-  loopLengthUs = static_cast<uint64_t>(loopLengthMs) * 1000ULL;
-  loopHasData = true;
-  loopRecordingArmed = false;
-  loopRecording = false;
-  loopPlaying = false;
-  loopOverdubbing = false;
-  loopDeleteArmed = false;
-  clearLoopOverdubTracking();
-  for (uint16_t i = 0; i < loopEventCount; ++i) {
-    loopEvents[i].atMs = static_cast<uint32_t>(image.events[i].at10ms) * 10UL;
-    if (loopEvents[i].atMs >= loopStoredLengthMs) loopEvents[i].atMs = loopStoredLengthMs - 1;
-    loopEvents[i].channel = clampU8(image.events[i].channel, 1, 16);
-    loopEvents[i].note = clampU8(image.events[i].note, 0, 127);
-    loopEvents[i].velocity = clampU8(image.events[i].velocity, 0, 127);
-    loopEvents[i].on = (image.events[i].flags & 1) != 0;
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    const LoopFileTrack &saved = header.tracks[track];
+    multitrackLooper.setRestoredTrackState(track, saved.lengthUs, saved.generation,
+        saved.flags & 0x01, saved.flags & 0x02, saved.flags & 0x04);
+    loopTrackLengthSelection[track] = clampU8(saved.lengthSelection, 0, track == 0 ? 6 : 5);
   }
-  applyLoopBarsLengthChange(false);
+  multitrackLooper.selectTrack(clampU8(header.selectedTrack, 0,
+      arpnmidi3::kLoopTrackCount - 1));
+  multitrackLooper.setTrackMode(static_cast<arpnmidi3::LoopTrackMode>(
+      clampU8(header.trackMode, 0, static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual))));
+  loopStorageDirty = false;
+  loopStorageError = false;
+  syncLegacyLoopStatusFromMultitrack();
 }
 
 void thruOutputRefOn(uint8_t sourcePort, uint8_t outNote, uint8_t velocity) {
@@ -3533,9 +4144,12 @@ void thruOutputRefOff(uint8_t sourcePort, uint8_t outNote) {
 }
 
 void noteThrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on) {
-  uint8_t *mappedNotes = loopOwnsInput(sourcePort) ? mappedLoopThruNotes : mappedThruNotes;
-  uint8_t (*extraNotes)[3] = loopOwnsInput(sourcePort) ? mappedLoopThruChordNotes : mappedThruChordNotes;
-  uint8_t *extraCount = loopOwnsInput(sourcePort) ? mappedLoopThruChordCount : mappedThruChordCount;
+  uint8_t *mappedNotes = loopOwnsInput(sourcePort)
+      ? mappedLoopThruNotes[loopTrackForSource(sourcePort)] : mappedThruNotes;
+  uint8_t (*extraNotes)[3] = loopOwnsInput(sourcePort)
+      ? mappedLoopThruChordNotes[loopTrackForSource(sourcePort)] : mappedThruChordNotes;
+  uint8_t *extraCount = loopOwnsInput(sourcePort)
+      ? mappedLoopThruChordCount[loopTrackForSource(sourcePort)] : mappedThruChordCount;
   if (on) {
     uint8_t notes[4];
     const uint8_t count = buildChordNotes(inNote, notes);
@@ -3664,7 +4278,8 @@ void handleLegatoInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, u
 void clearSplitNoteFromMainPaths(uint8_t sourcePort, uint8_t note) {
   setInputOwnerState(sourcePort, note, 0, false);
 
-  uint8_t *thruMap = loopOwnsInput(sourcePort) ? mappedLoopThruNotes : mappedThruNotes;
+  uint8_t *thruMap = loopOwnsInput(sourcePort)
+      ? mappedLoopThruNotes[loopTrackForSource(sourcePort)] : mappedThruNotes;
   const uint8_t thruOut = thruMap[note];
   const uint8_t thruCh = effectiveThruChannel();
   if (thruOut <= 127 && channelEnabled(thruCh) &&
@@ -3672,16 +4287,20 @@ void clearSplitNoteFromMainPaths(uint8_t sourcePort, uint8_t note) {
     sendFanout(sourcePort, 0x80 | ((thruCh - 1) & 0x0F), thruOut, 0);
   }
   thruMap[note] = 0xFF;
-  uint8_t (*extraNotes)[3] = loopOwnsInput(sourcePort) ? mappedLoopThruChordNotes : mappedThruChordNotes;
-  uint8_t *extraCount = loopOwnsInput(sourcePort) ? mappedLoopThruChordCount : mappedThruChordCount;
+  uint8_t (*extraNotes)[3] = loopOwnsInput(sourcePort)
+      ? mappedLoopThruChordNotes[loopTrackForSource(sourcePort)] : mappedThruChordNotes;
+  uint8_t *extraCount = loopOwnsInput(sourcePort)
+      ? mappedLoopThruChordCount[loopTrackForSource(sourcePort)] : mappedThruChordCount;
   for (uint8_t i = 0; i < extraCount[note]; ++i) {
     if (extraNotes[note][i] <= 127) thruOutputRefOff(sourcePort, extraNotes[note][i]);
     extraNotes[note][i] = 0xFF;
   }
   extraCount[note] = 0;
 
-  uint8_t *arpMap = loopOwnsInput(sourcePort) ? mappedLoopArpOffNotes : mappedArpOffNotes;
-  uint8_t *arpChannels = loopOwnsInput(sourcePort) ? mappedLoopArpOffChannels : mappedArpOffChannels;
+  uint8_t *arpMap = loopOwnsInput(sourcePort)
+      ? mappedLoopArpOffNotes[loopTrackForSource(sourcePort)] : mappedArpOffNotes;
+  uint8_t *arpChannels = loopOwnsInput(sourcePort)
+      ? mappedLoopArpOffChannels[loopTrackForSource(sourcePort)] : mappedArpOffChannels;
   const uint8_t arpOut = arpMap[note];
   const uint8_t arpCh = arpChannels[note] ? arpChannels[note] : mainArpOutChannel();
   if (arpOut <= 127 && channelEnabled(arpCh) &&
@@ -3723,18 +4342,24 @@ void applyIncomingTransport(arpnmidi3::TransportEvent event) {
   const uint64_t nowUs = time_us_64();
   if (event == arpnmidi3::TransportEvent::Start) {
     restartArpTiming(true);
-    if (firmware3Settings.looperMidiTransport && loopHasData) startLoopPlaybackAt(nowUs);
+    if (firmware3Settings.looperMidiTransport && multitrackLooper.hasAnyData()) {
+      multitrackLooper.start(nowUs);
+    }
   } else if (event == arpnmidi3::TransportEvent::Continue) {
-    if (firmware3Settings.looperMidiTransport && loopHasData && !loopPlaying) startLoopPlaybackAt(nowUs);
+    if (firmware3Settings.looperMidiTransport && multitrackLooper.hasAnyData() &&
+        !multitrackLooper.playing()) multitrackLooper.start(nowUs);
   } else if (event == arpnmidi3::TransportEvent::Stop) {
     arpNoteOffs();
     drumArpNoteOffs();
     arpNextStepUs = 0;
     if (firmware3Settings.looperMidiTransport) {
-      if (loopRecording || loopRecordingArmed) finishLoopRecording(false);
-      stopLoopPlaybackOnly();
+      if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
+        loopStorageDirty |= multitrackLooper.finishRecording(nowUs);
+      }
+      multitrackLooper.stop(releaseMultitrackOutput, nullptr);
     }
   }
+  syncLegacyLoopStatusFromMultitrack();
   ui.dirty = true;
 }
 
@@ -3919,7 +4544,14 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       break;
     case SET_LOOP_BARS:
       settings.loopBars = clampU8(value, 0, LOOP_BARS_COUNT - 1);
-      applyLoopBarsLengthChange(true);
+      {
+        const uint8_t track = multitrackLooper.selectedTrack();
+        uint8_t selection = settings.loopBars == LOOP_BARS_FREE ? 6 :
+            static_cast<uint8_t>(settings.loopBars + 2);
+        if (track != 0 && selection == 6) selection = 2;
+        loopTrackLengthSelection[track] = selection;
+        loopStorageDirty = true;
+      }
       break;
     case SET_FORCE_KEY:
       settings.forceKey = clampU8(value, 0, 24);
@@ -4040,6 +4672,11 @@ Firmware3Settings defaultFirmware3Settings() {
   s.timeSignature = 0;
   s.swing = 0;
   s.looperMidiTransport = 1;
+  s.looperAutoRec = 0;
+  s.looperTimeTravel = 0;
+  s.looperTrackMode = static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Layers);
+  s.looperQuantize = 0;
+  s.looperRecordCc = 0;
   s.arpOctaves = 1;
   s.arpRetriggerSync = 0;
   s.arpNoteOrder = 0;
@@ -4079,6 +4716,12 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
   s.timeSignature = s.timeSignature ? 1 : 0;
   s.swing = clampU8(s.swing, 0, 75);
   s.looperMidiTransport = s.looperMidiTransport ? 1 : 0;
+  s.looperAutoRec = s.looperAutoRec ? 1 : 0;
+  s.looperTimeTravel = s.looperTimeTravel ? 1 : 0;
+  s.looperTrackMode = clampU8(s.looperTrackMode, 0,
+      static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
+  s.looperQuantize = clampU8(s.looperQuantize, 0, 5);
+  s.looperRecordCc = s.looperRecordCc ? 1 : 0;
   s.arpOctaves = clampU8(s.arpOctaves, 1, 4);
   s.arpRetriggerSync = s.arpRetriggerSync ? 1 : 0;
   s.arpNoteOrder = s.arpNoteOrder ? 1 : 0;
@@ -5044,6 +5687,7 @@ void captureParameterLockCc(uint8_t channel, uint8_t cc, uint8_t value) {
 }
 
 void routeControlChange(uint8_t sourcePort, byte channel, byte control, byte value) {
+  recordLoopCc(sourcePort, channel, control, value);
   captureParameterLockCc(channel, control, value);
   if (captureMapCcAssignment(channel, control)) return;
   applyMappedCcAssignments(channel, control, value);
@@ -5135,6 +5779,13 @@ void handleDinStop() {
   handleRealtimeByte(0, 0xFC);
 }
 
+void handleSongSelect(byte song) {
+  if (!firmware3Settings.looperMidiTransport || song >= arpnmidi3::kLoopTrackCount) return;
+  multitrackLooper.selectTrack(song);
+  syncLegacyLoopStatusFromMultitrack();
+  ui.dirty = true;
+}
+
 void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
   const uint8_t type = status & 0xF0;
   uint8_t channel = (status & 0x0F) + 1;
@@ -5144,6 +5795,9 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
     status = type | ((channel - 1) & 0x0F);
   }
   if (type == 0x90) {
+    if (channel == settings.inputChannel) {
+      captureCustomArpNote(data1, data2, data2 > 0, time_us_64());
+    }
     if (channel == firmware3Settings.parameterLockChannel) {
       const bool noteOn = data2 > 0;
       parameterLockHeldNotes[data1] = noteOn;
@@ -5155,6 +5809,7 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
     translateSplitInputToDrum(channel, data1);
     onInputNote(sourcePort, channel, data1, data2, data2 > 0, divNoteAction != 2);
   } else if (type == 0x80) {
+    if (channel == settings.inputChannel) captureCustomArpNote(data1, 0, false, time_us_64());
     if (channel == firmware3Settings.parameterLockChannel) parameterLockHeldNotes[data1] = false;
     if (captureDivNoteAssignment(channel, data1, false)) return;
     const uint8_t divNoteAction = handleDivNoteOverride(sourcePort, channel, data1, 0, false);
@@ -5332,8 +5987,20 @@ void runDrumStep(uint8_t division) {
 void tickArp() {
   const uint32_t nowMs = millis();
   const uint64_t nowUs = time_us_64();
-  if (arpHeldCount == 0) {
+  if (customArpLearning && !customArpWaitingForFirstNote && nowUs >= customArpLearnEndUs) {
+    finishCustomArpLearn();
+  }
+  const bool customMode = currentArpSelection() == ARPSEL_CUSTOM;
+  if (customMode) {
     arpNoteOffs();
+    arpGateOffMs = 0;
+    arpNextStepUs = 0;
+    tickCustomArp(nowUs);
+  } else {
+    releaseCustomArpVoices();
+    customArpCycleStartUs = 0;
+    customArpPlayIndex = 0;
+    if (arpHeldCount == 0) arpNoteOffs();
   }
   if (arpGateOffMs && nowMs >= arpGateOffMs) {
     arpNoteOffs();
@@ -5345,7 +6012,7 @@ void tickArp() {
     drumGateOffMs = 0;
   }
   if (!musicalClock.synchronizedAdvanceAllowed(nowUs)) return;
-  if (arpHeldCount > 0 && (arpNextStepUs == 0 || nowUs >= arpNextStepUs)) {
+  if (!customMode && arpHeldCount > 0 && (arpNextStepUs == 0 || nowUs >= arpNextStepUs)) {
     const uint64_t stepNumerator =
         static_cast<uint64_t>(kDivisionPulseSteps[currentDivisionSetting()]) * 60000000ULL;
     const uint64_t pulseDenominator = static_cast<uint64_t>(currentBpm()) * MUSICAL_PPQN;
@@ -6677,6 +7344,7 @@ void setupDinMidi() {
   DinMIDI.setHandleStart(handleDinStart);
   DinMIDI.setHandleContinue(handleDinContinue);
   DinMIDI.setHandleStop(handleDinStop);
+  DinMIDI.setHandleSongSelect(handleSongSelect);
 }
 
 void setupUsbDeviceMidi() {
@@ -6716,6 +7384,8 @@ void pumpUsbDeviceMidiInput() {
       }
     } else if (status >= 0x80 && status <= 0xEF) {
       routeIncomingChannelMessage(USB_DEVICE_SOURCE_PORT, status, data1, data2);
+    } else if (status == 0xF3 && len > 1) {
+      handleSongSelect(data1);
     }
   }
 #endif
@@ -6821,4 +7491,5 @@ void loop() {
   renderDisplayIfNeeded();
   processDeferredUiActions();
   pollUiScreenPersistence();
+  pollLoopStoragePersistence();
 }

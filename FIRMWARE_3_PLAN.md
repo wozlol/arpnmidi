@@ -165,11 +165,13 @@ Four loop tracks share a bounded RAM event pool. Tracks and recorded CC
 automation survive reboot globally but are not stored per preset. Time-travel
 history is RAM-only.
 
-Preset settings remain in the supported 4 KB EEPROM-emulation sector. Global
-loop data uses a separate LittleFS region rather than EEPROM. The prototype must
-be built with a flash layout that reserves filesystem space. The current
-pre-3.0 request for 8 KB of emulated EEPROM is capped to 4 KB by Arduino-Pico,
-so its loop image above offset 4096 was not actually persistent.
+Compact preset controls remain in the supported 4 KB EEPROM-emulation sector.
+Bounded per-preset payloads such as custom arp events and parameter locks use
+fixed records in LittleFS under the same schema identity. Global loop data also
+uses LittleFS rather than EEPROM. The prototype must be built with a flash
+layout that reserves filesystem space. The pre-3.0 request for 8 KB of emulated
+EEPROM was capped to 4 KB by Arduino-Pico, so its loop image above offset 4096
+was not actually persistent.
 
 Looper Settings includes:
 
