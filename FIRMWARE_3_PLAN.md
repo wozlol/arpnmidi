@@ -318,6 +318,8 @@ A Note-to-CC screen learns or manually selects:
 - Back
 
 The knob may select values manually or listen to played notes and received CCs.
+Sixteen fixed slots are stored per preset. Momentary sends 127 while held and 0
+on release; Toggle changes state on each Note On.
 
 Four-button modes include:
 

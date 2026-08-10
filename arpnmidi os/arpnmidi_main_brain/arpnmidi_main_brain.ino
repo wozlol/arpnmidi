@@ -261,6 +261,15 @@ enum CcRemapUiStage : uint8_t {
   CC_REMAP_UI_OUTPUT_CC
 };
 
+enum NoteCcUiStage : uint8_t {
+  NOTE_CC_UI_LIST = 0,
+  NOTE_CC_UI_INPUT_CHANNEL,
+  NOTE_CC_UI_INPUT_NOTE,
+  NOTE_CC_UI_OUTPUT_CHANNEL,
+  NOTE_CC_UI_OUTPUT_CC,
+  NOTE_CC_UI_BEHAVIOR
+};
+
 enum FourButtonUiStage : uint8_t {
   FOUR_BUTTON_UI_MAIN = 0,
   FOUR_BUTTON_UI_MODE,
@@ -289,6 +298,7 @@ enum SettingId : uint8_t {
   SET_DIV_NOTES,
   SET_MAP_CC,
   SET_CC_MAP,
+  SET_NOTE_CC,
   SET_CC_OUT_CH,
   SET_LEGATO_CH,
   SET_REMOTE_CH,
@@ -300,6 +310,7 @@ enum SettingId : uint8_t {
   SET_PUSH_MODE,
   SET_FOUR_BUTTON,
   SET_LOOP_BARS,
+  SET_MUTE_SOLO,
   SET_FORCE_KEY,
   SET_FORCE_SCALE,
   SET_GUITAR_PIANO,
@@ -402,6 +413,7 @@ constexpr uint8_t DRUM_DIVISION_FREE = DIVISION_COUNT + 1;
 constexpr uint8_t LIVE_TARGET_COUNT = 5;  // Main plus Looper Tracks 1-4.
 constexpr uint8_t STUTTER_BUTTON_DIVISION_COUNT = 6;
 constexpr uint8_t CC_REMAP_SLOT_COUNT = 16;
+constexpr uint8_t NOTE_CC_SLOT_COUNT = 16;
 
 enum FeatureKnobId : uint8_t {
   FEATURE_KNOB_VELOCITY_BASE = 0,
@@ -456,6 +468,11 @@ enum CustomButtonBehavior : uint8_t {
   CUSTOM_BUTTON_BEHAVIOR_COUNT
 };
 
+enum NoteCcBehavior : uint8_t {
+  NOTE_CC_MOMENTARY = 0,
+  NOTE_CC_TOGGLE
+};
+
 constexpr uint8_t LOOPER_BUTTON_SELECT = 0x01;
 constexpr uint8_t LOOPER_BUTTON_MUTE = 0x02;
 constexpr uint8_t LOOPER_BUTTON_SOLO = 0x04;
@@ -493,6 +510,14 @@ struct ChordMemorySlot {
   uint8_t velocities[16]{};
 };
 
+struct NoteCcMapEntry {
+  uint8_t inputChannel = 0;
+  uint8_t inputNote = 0xFF;
+  uint8_t outputChannel = 1;
+  uint8_t outputCc = 0;
+  uint8_t behavior = NOTE_CC_MOMENTARY;
+};
+
 struct FeatureControlSettings {
   FeatureKnobBinding knobs[FEATURE_KNOB_COUNT];
   FeatureButtonBinding buttons[FEATURE_BUTTON_COUNT];
@@ -502,6 +527,7 @@ struct FeatureControlSettings {
   uint8_t looperButtonActions = LOOPER_BUTTON_SELECT;
   CustomButtonConfig customButtons[4];
   ChordMemorySlot chordMemories[4];
+  NoteCcMapEntry noteCcMaps[NOTE_CC_SLOT_COUNT];
 };
 
 struct LiveTargetSettings {
@@ -1324,6 +1350,12 @@ bool featuresLearnActive = false;
 uint8_t ccRemapUiStage = CC_REMAP_UI_LIST;
 uint8_t ccRemapCursor = 0;
 bool ccRemapLearnActive = false;
+uint8_t noteCcUiStage = NOTE_CC_UI_LIST;
+uint8_t noteCcCursor = 0;
+bool noteCcLearnActive = false;
+bool noteCcToggleState[NOTE_CC_SLOT_COUNT];
+uint8_t muteSoloCursor = 0;
+bool muteSoloModeSolo = false;
 uint8_t fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
 uint8_t fourButtonUiCursor = 0;
 uint8_t fourButtonEditButton = 0;
@@ -1400,10 +1432,10 @@ const int8_t kEncoderTransitionTable[16] = {
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 ARP MODE", "3 DIVISION", "4 VELOCITY", "5 LENGTH", "",
   "6 INPUT CH", "7 ARP CH", "8 BASS CH", "9 THRU OUT", "10 RNDRBN", "11 ROUTER",
-  "12 DRUM ROLL", "13 FEATURES", "14 CC MAP", "15 IN CC >", "16 MONO RETRIG",
-  "17 REMOTE", "18 REMOTE 1", "19 REMOTE 2", "20 SCRNSVR", "21 EYE/PUSH",
-  "22 EYE MODE", "23 PUSH", "24 4BUTTON", "25 LOOP", "26 KEY", "27 SCALE",
-  "28 GIT/KEYS", "29 LOAD", "30 SAVE", "31 PANIC"
+  "12 DRUM ROLL", "13 FEATURES", "14 CC MAP", "15 NOTE>CC", "16 IN CC >",
+  "17 MONO RETRIG", "18 REMOTE", "19 REMOTE 1", "20 REMOTE 2", "21 SCRNSVR",
+  "22 EYE/PUSH", "23 EYE MODE", "24 PUSH", "25 4BUTTON", "26 LOOP", "27 MUTE/SOLO",
+  "28 KEY", "29 SCALE", "30 GIT/KEYS", "31 LOAD", "32 SAVE", "33 PANIC"
 };
 
 const char *const kArpModeNames[ARP_MODE_COUNT] = {
@@ -4954,6 +4986,12 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (ccRemapUiStage == CC_REMAP_UI_INPUT) return 128;
       if (ccRemapUiStage == CC_REMAP_UI_OUTPUT_CHANNEL) return 16;
       return 127;
+    case SET_NOTE_CC:
+      if (noteCcUiStage == NOTE_CC_UI_LIST) return NOTE_CC_SLOT_COUNT + 1;
+      if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL ||
+          noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) return 16;
+      if (noteCcUiStage == NOTE_CC_UI_BEHAVIOR) return 1;
+      return 127;
     case SET_LEGATO_CH: return 16;
     case SET_CC_OUT_CH: return 17;
     case SET_REMOTE_CH: return 16;
@@ -4971,6 +5009,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) return 5;
       return 2;
     case SET_LOOP_BARS: return LOOP_BARS_COUNT - 1;
+    case SET_MUTE_SOLO: return 6;
     case SET_FORCE_KEY: return 24;
     case SET_FORCE_SCALE: return FORCE_SCALE_COUNT - 1;
     case SET_GUITAR_PIANO: return 1;
@@ -5014,6 +5053,23 @@ int16_t getSettingValueRaw(uint8_t settingId) {
         return featureControls.ccRemaps[ccRemapCursor].outputChannel;
       }
       return featureControls.ccRemaps[ccRemapCursor].outputCc;
+    case SET_NOTE_CC:
+      if (noteCcUiStage == NOTE_CC_UI_LIST) return noteCcCursor;
+      if (noteCcCursor >= NOTE_CC_SLOT_COUNT) return 0;
+      if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
+        return max<uint8_t>(1, featureControls.noteCcMaps[noteCcCursor].inputChannel);
+      }
+      if (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE) {
+        return featureControls.noteCcMaps[noteCcCursor].inputNote <= 127
+            ? featureControls.noteCcMaps[noteCcCursor].inputNote : 0;
+      }
+      if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) {
+        return featureControls.noteCcMaps[noteCcCursor].outputChannel;
+      }
+      if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) {
+        return featureControls.noteCcMaps[noteCcCursor].outputCc;
+      }
+      return featureControls.noteCcMaps[noteCcCursor].behavior;
     case SET_LEGATO_CH: return settings.legatoChannel;
     case SET_CC_OUT_CH: return settings.ccOutChannel;
     case SET_REMOTE_CH: return settings.remoteChannel;
@@ -5037,6 +5093,7 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       }
       return featureControls.customButtons[fourButtonEditButton].behavior;
     case SET_LOOP_BARS: return settings.loopBars;
+    case SET_MUTE_SOLO: return muteSoloCursor;
     case SET_FORCE_KEY: return settings.forceKey;
     case SET_FORCE_SCALE: return settings.forceScale;
     case SET_GUITAR_PIANO: return settings.instrumentView;
@@ -5109,6 +5166,24 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
           entry.outputChannel = clampU8(value, 1, 16);
         } else {
           entry.outputCc = clampU8(value, 0, 127);
+        }
+      }
+      break;
+    case SET_NOTE_CC:
+      if (noteCcUiStage == NOTE_CC_UI_LIST) {
+        noteCcCursor = clampU8(value, 0, NOTE_CC_SLOT_COUNT + 1);
+      } else if (noteCcCursor < NOTE_CC_SLOT_COUNT) {
+        NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
+        if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
+          entry.inputChannel = clampU8(value, 1, 16);
+        } else if (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE) {
+          entry.inputNote = clampU8(value, 0, 127);
+        } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) {
+          entry.outputChannel = clampU8(value, 1, 16);
+        } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) {
+          entry.outputCc = clampU8(value, 0, 127);
+        } else {
+          entry.behavior = value ? NOTE_CC_TOGGLE : NOTE_CC_MOMENTARY;
         }
       }
       break;
@@ -5185,6 +5260,9 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
         loopTrackLengthSelection[track] = selection;
         loopStorageDirty = true;
       }
+      break;
+    case SET_MUTE_SOLO:
+      muteSoloCursor = clampU8(value, 0, 6);
       break;
     case SET_FORCE_KEY:
       settings.forceKey = clampU8(value, 0, 24);
@@ -5535,6 +5613,13 @@ bool loadExtendedPreset(uint8_t slot) {
       chord.velocities[note] = clampU8(chord.velocities[note], 1, 127);
     }
   }
+  for (NoteCcMapEntry &entry : featureControls.noteCcMaps) {
+    if (entry.inputChannel > 16 || entry.inputNote > 127) entry = NoteCcMapEntry{};
+    entry.outputChannel = clampU8(entry.outputChannel, 1, 16);
+    entry.outputCc = clampU8(entry.outputCc, 0, 127);
+    entry.behavior = entry.behavior == NOTE_CC_TOGGLE ? NOTE_CC_TOGGLE : NOTE_CC_MOMENTARY;
+  }
+  memset(noteCcToggleState, 0, sizeof(noteCcToggleState));
   memset(featureButtonCcHeld, 0, sizeof(featureButtonCcHeld));
   customArpPattern = record.customArp;
   customArpPattern.lengthSelection = clampU8(customArpPattern.lengthSelection, 0, 5);
@@ -5576,6 +5661,10 @@ void loadCurrentPreset() {
   ccRemapUiStage = CC_REMAP_UI_LIST;
   ccRemapCursor = 0;
   ccRemapLearnActive = false;
+  noteCcUiStage = NOTE_CC_UI_LIST;
+  noteCcCursor = 0;
+  noteCcLearnActive = false;
+  memset(noteCcToggleState, 0, sizeof(noteCcToggleState));
   fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
   fourButtonUiCursor = 0;
   fourButtonEditButton = 0;
@@ -5983,6 +6072,10 @@ void applySettingDelta(int delta, bool fastStep) {
   if (id == SET_PANIC) return;
   if (id == SET_MAP_CC) featuresLearnActive = false;
   if (id == SET_CC_MAP && ccRemapUiStage == CC_REMAP_UI_INPUT) ccRemapLearnActive = false;
+  if (id == SET_NOTE_CC && (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE ||
+                            noteCcUiStage == NOTE_CC_UI_OUTPUT_CC)) {
+    noteCcLearnActive = false;
+  }
   if (id == SET_FOUR_BUTTON && fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
     fourButtonLearnActive = false;
   }
@@ -6003,6 +6096,10 @@ void applySettingDelta(int delta, bool fastStep) {
     next = wrapIndex(next - 1, 16) + 1;
   }
   else if (id == SET_FOUR_BUTTON && fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
+    next = wrapIndex(next - 1, 16) + 1;
+  }
+  else if (id == SET_NOTE_CC && (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL ||
+                                 noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL)) {
     next = wrapIndex(next - 1, 16) + 1;
   }
   else if (id == SET_VELOCITY) next = constrain(next, 1, 127);
@@ -6124,6 +6221,38 @@ void activateClickAction() {
       ui.dirty = true;
       markActivity();
       return;
+    } else if (ui.selectedSetting == SET_NOTE_CC) {
+      if (noteCcUiStage == NOTE_CC_UI_LIST) {
+        if (noteCcCursor < NOTE_CC_SLOT_COUNT) {
+          noteCcUiStage = NOTE_CC_UI_INPUT_CHANNEL;
+        } else if (noteCcCursor == NOTE_CC_SLOT_COUNT) {
+          for (NoteCcMapEntry &entry : featureControls.noteCcMaps) entry = NoteCcMapEntry{};
+          memset(noteCcToggleState, 0, sizeof(noteCcToggleState));
+          saveStorage();
+        } else {
+          ui.menuMode = MENU_SELECT;
+          ui.deferredExitWork = true;
+        }
+      } else if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
+        noteCcUiStage = NOTE_CC_UI_INPUT_NOTE;
+        noteCcLearnActive = true;
+      } else if (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE) {
+        noteCcLearnActive = false;
+        noteCcUiStage = NOTE_CC_UI_OUTPUT_CHANNEL;
+      } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) {
+        noteCcUiStage = NOTE_CC_UI_OUTPUT_CC;
+        noteCcLearnActive = true;
+      } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) {
+        noteCcLearnActive = false;
+        noteCcUiStage = NOTE_CC_UI_BEHAVIOR;
+      } else {
+        noteCcUiStage = NOTE_CC_UI_LIST;
+        saveStorage();
+      }
+      encoder.switchIgnoreUntilMs = millis() + 120;
+      ui.dirty = true;
+      markActivity();
+      return;
     } else if (ui.selectedSetting == SET_FOUR_BUTTON) {
       if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) {
         if (fourButtonUiCursor == 0) fourButtonUiStage = FOUR_BUTTON_UI_MODE;
@@ -6189,6 +6318,35 @@ void activateClickAction() {
           fourButtonUiCursor = 0;
         }
       }
+      encoder.switchIgnoreUntilMs = millis() + 120;
+      ui.dirty = true;
+      markActivity();
+      return;
+    } else if (ui.selectedSetting == SET_MUTE_SOLO) {
+      if (muteSoloCursor < arpnmidi3::kLoopTrackCount) {
+        if (muteSoloModeSolo) {
+          multitrackLooper.setSolo(muteSoloCursor,
+              !multitrackLooper.track(muteSoloCursor).solo,
+              releaseMultitrackOutput, nullptr);
+        } else {
+          multitrackLooper.setMuted(muteSoloCursor,
+              !multitrackLooper.track(muteSoloCursor).muted,
+              releaseMultitrackOutput, nullptr);
+        }
+        loopStorageDirty = true;
+      } else if (muteSoloCursor == 4) {
+        muteSoloModeSolo = !muteSoloModeSolo;
+      } else if (muteSoloCursor == 5) {
+        for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+          multitrackLooper.setMuted(track, false, releaseMultitrackOutput, nullptr);
+          multitrackLooper.setSolo(track, false, releaseMultitrackOutput, nullptr);
+        }
+        loopStorageDirty = true;
+      } else {
+        ui.menuMode = MENU_SELECT;
+        ui.deferredExitWork = true;
+      }
+      syncLegacyLoopStatusFromMultitrack();
       encoder.switchIgnoreUntilMs = millis() + 120;
       ui.dirty = true;
       markActivity();
@@ -6295,6 +6453,15 @@ void activateClickAction() {
       fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
       fourButtonUiCursor = 0;
       fourButtonLearnActive = false;
+    }
+    if (ui.selectedSetting == SET_NOTE_CC) {
+      noteCcUiStage = NOTE_CC_UI_LIST;
+      noteCcCursor = 0;
+      noteCcLearnActive = false;
+    }
+    if (ui.selectedSetting == SET_MUTE_SOLO) {
+      muteSoloCursor = 0;
+      muteSoloModeSolo = false;
     }
     ui.menuMode = MENU_EDIT;
   }
@@ -6870,6 +7037,19 @@ bool captureFourButtonCcAssignment(uint8_t channel, uint8_t cc) {
   return true;
 }
 
+bool captureNoteCcOutputAssignment(uint8_t channel, uint8_t cc) {
+  if (ui.selectedSetting != SET_NOTE_CC || ui.menuMode != MENU_EDIT ||
+      noteCcUiStage != NOTE_CC_UI_OUTPUT_CC || !noteCcLearnActive ||
+      noteCcCursor >= NOTE_CC_SLOT_COUNT) return false;
+  NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
+  entry.outputChannel = channel;
+  entry.outputCc = cc;
+  noteCcLearnActive = false;
+  ui.dirty = true;
+  markActivity(false);
+  return true;
+}
+
 bool captureFeatureNoteAssignment(uint8_t channel, uint8_t note, bool pressed) {
   if (!pressed || ui.selectedSetting != SET_MAP_CC || ui.menuMode != MENU_EDIT ||
       !featuresLearnActive || featuresUiStage != FEATURES_UI_BUTTONS ||
@@ -6891,6 +7071,19 @@ bool captureFourButtonNoteAssignment(uint8_t channel, uint8_t note, bool pressed
   button.number = note;
   button.kind = TRIGGER_BINDING_NOTE;
   fourButtonLearnActive = false;
+  ui.dirty = true;
+  markActivity(false);
+  return true;
+}
+
+bool captureNoteCcInputAssignment(uint8_t channel, uint8_t note, bool pressed) {
+  if (!pressed || ui.selectedSetting != SET_NOTE_CC || ui.menuMode != MENU_EDIT ||
+      noteCcUiStage != NOTE_CC_UI_INPUT_NOTE || !noteCcLearnActive ||
+      noteCcCursor >= NOTE_CC_SLOT_COUNT) return false;
+  NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
+  entry.inputChannel = channel;
+  entry.inputNote = note;
+  noteCcLearnActive = false;
   ui.dirty = true;
   markActivity(false);
   return true;
@@ -6920,6 +7113,27 @@ bool processFeatureNote(uint8_t channel, uint8_t note, bool pressed) {
   return matched;
 }
 
+bool processNoteCcMap(uint8_t sourcePort, uint8_t channel, uint8_t note,
+                      bool pressed) {
+  bool matched = false;
+  for (uint8_t slot = 0; slot < NOTE_CC_SLOT_COUNT; ++slot) {
+    const NoteCcMapEntry &entry = featureControls.noteCcMaps[slot];
+    if (entry.inputChannel != channel || entry.inputNote != note) continue;
+    if (entry.behavior == NOTE_CC_TOGGLE) {
+      if (pressed) {
+        noteCcToggleState[slot] = !noteCcToggleState[slot];
+        sendFanout(sourcePort, static_cast<uint8_t>(0xB0 | (entry.outputChannel - 1U)),
+                   entry.outputCc, noteCcToggleState[slot] ? 127 : 0);
+      }
+    } else {
+      sendFanout(sourcePort, static_cast<uint8_t>(0xB0 | (entry.outputChannel - 1U)),
+                 entry.outputCc, pressed ? 127 : 0);
+    }
+    matched = true;
+  }
+  return matched;
+}
+
 bool applyCcRemap(uint8_t sourcePort, uint8_t channel, uint8_t cc, uint8_t value) {
   if (channel != settings.inputChannel) return false;
   bool matched = false;
@@ -6933,6 +7147,7 @@ bool applyCcRemap(uint8_t sourcePort, uint8_t channel, uint8_t cc, uint8_t value
 }
 
 void routeControlChange(uint8_t sourcePort, byte channel, byte control, byte value) {
+  if (captureNoteCcOutputAssignment(channel, control)) return;
   if (captureFourButtonCcAssignment(channel, control)) return;
   if (captureFeatureCcAssignment(channel, control)) return;
   if (captureCcRemapInput(channel, control)) return;
@@ -7048,9 +7263,13 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
     status = type | ((channel - 1) & 0x0F);
   }
   if ((type == 0x90 || type == 0x80) &&
+      captureNoteCcInputAssignment(channel, data1, type == 0x90 && data2 > 0)) return;
+  if ((type == 0x90 || type == 0x80) &&
       captureFourButtonNoteAssignment(channel, data1, type == 0x90 && data2 > 0)) return;
   if ((type == 0x90 || type == 0x80) &&
       captureFeatureNoteAssignment(channel, data1, type == 0x90 && data2 > 0)) return;
+  if ((type == 0x90 || type == 0x80) &&
+      processNoteCcMap(sourcePort, channel, data1, type == 0x90 && data2 > 0)) return;
   if ((type == 0x90 || type == 0x80) &&
       processFeatureNote(channel, data1, type == 0x90 && data2 > 0)) return;
   if (type == 0x90) {
@@ -7857,8 +8076,12 @@ String settingValueString(uint8_t id) {
       return "FEATURES";
     case SET_CC_MAP:
       return "CC MAP";
+    case SET_NOTE_CC:
+      return "NOTE>CC";
     case SET_FOUR_BUTTON:
       return "4BUTTON";
+    case SET_MUTE_SOLO:
+      return "MUTE/SOLO";
     case SET_LEGATO_CH: return midiChannelLabel(v, true);
     case SET_CC_OUT_CH: return ccChannelLabel(v);
     case SET_REMOTE_CH: return midiChannelLabel(v);
@@ -8544,6 +8767,48 @@ void drawCcRemapScreen() {
   }
 }
 
+void drawNoteCcScreen() {
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(F("NOTE>CC"));
+  if (noteCcUiStage == NOTE_CC_UI_LIST) {
+    if (noteCcCursor == NOTE_CC_SLOT_COUNT) {
+      display.setTextSize(3); display.setCursor(0, 20); display.print(F("CLEAR")); return;
+    }
+    if (noteCcCursor > NOTE_CC_SLOT_COUNT) {
+      display.setTextSize(3); display.setCursor(0, 20); display.print(F("BACK")); return;
+    }
+    const NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
+    display.setTextSize(1); display.setCursor(0, 18);
+    display.print(F("SLOT ")); display.print(noteCcCursor + 1U);
+    display.setCursor(0, 31);
+    if (entry.inputChannel == 0 || entry.inputNote > 127) display.print(F("UNMAPPED"));
+    else {
+      display.print(F("CH ")); display.print(entry.inputChannel);
+      display.print(F(" N ")); display.print(entry.inputNote);
+      display.print(F(" > ")); display.print(entry.outputChannel);
+      display.print(F(":")); display.print(entry.outputCc);
+    }
+    return;
+  }
+  const NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
+  display.setTextSize(1); display.setCursor(0, 20);
+  if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
+    display.print(F("INPUT CHANNEL: ")); display.print(max<uint8_t>(1, entry.inputChannel));
+  } else if (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE) {
+    display.print(F("INPUT NOTE: ")); display.print(entry.inputNote <= 127 ? entry.inputNote : 0);
+    display.setCursor(0, 34); display.print(noteCcLearnActive ? F("PLAY NOTE TO LEARN") : F("TURN OR PUSH"));
+  } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) {
+    display.print(F("OUTPUT CHANNEL: ")); display.print(entry.outputChannel);
+  } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) {
+    display.print(F("OUTPUT CC: ")); display.print(entry.outputCc);
+    display.setCursor(0, 34); display.print(noteCcLearnActive ? F("MOVE CC TO LEARN") : F("TURN OR PUSH"));
+  } else {
+    display.print(F("BEHAVIOR")); display.setCursor(0, 34); display.setTextSize(2);
+    display.print(entry.behavior == NOTE_CC_TOGGLE ? F("TOGGLE") : F("MOMENTARY"));
+  }
+}
+
 void drawFourButtonScreen() {
   display.setTextSize(2);
   display.setCursor(0, 0);
@@ -8612,6 +8877,32 @@ void drawFourButtonScreen() {
       (chordClearArmed && fourButtonUiCursor == 1)) {
     display.setTextSize(1); display.setCursor(0, 39); display.print(F("PRESS BUTTON 1-4"));
   }
+}
+
+void drawMuteSoloScreen() {
+  display.setTextSize(1);
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    const int y = 2 + track * 10;
+    const arpnmidi3::LoopTrackState &state = multitrackLooper.track(track);
+    display.drawRect(4, y, 40, 8, SSD1306_WHITE);
+    if (state.solo) {
+      display.fillRect(5, y + 1, 38, 6, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else if (state.muted) {
+      for (uint8_t x = 6; x < 42; x += 4) display.drawPixel(x, y + 3, SSD1306_WHITE);
+    }
+    display.setCursor(8, y);
+    display.print(F("TRACK ")); display.print(track + 1U);
+    display.setTextColor(SSD1306_WHITE);
+    if (muteSoloCursor == track) display.drawRect(1, y - 1, 46, 10, SSD1306_WHITE);
+  }
+  display.setCursor(72, 3);
+  display.print(muteSoloModeSolo ? F("SOLO") : F("MUTE"));
+  if (muteSoloCursor == 4) display.drawRect(68, 0, 56, 11, SSD1306_WHITE);
+  display.setCursor(72, 18); display.print(F("CLEAR"));
+  if (muteSoloCursor == 5) display.drawRect(68, 15, 56, 11, SSD1306_WHITE);
+  display.setCursor(72, 33); display.print(F("BACK"));
+  if (muteSoloCursor == 6) display.drawRect(68, 30, 56, 11, SSD1306_WHITE);
 }
 
 void drawMapCcScreen(uint8_t cursor) {
@@ -8732,6 +9023,9 @@ void renderMainTop() {
     case SET_CC_MAP:
       drawCcRemapScreen();
       break;
+    case SET_NOTE_CC:
+      drawNoteCcScreen();
+      break;
     case SET_LEGATO_CH:
       drawChannelScreen(F("MONO RETRIG"), v, true);
       break;
@@ -8743,6 +9037,9 @@ void renderMainTop() {
       break;
     case SET_FOUR_BUTTON:
       drawFourButtonScreen();
+      break;
+    case SET_MUTE_SOLO:
+      drawMuteSoloScreen();
       break;
     case SET_SENSOR_CH:
       drawChannelScreen(F("SENSORS"), v);
