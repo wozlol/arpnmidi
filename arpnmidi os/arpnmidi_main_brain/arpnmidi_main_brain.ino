@@ -150,16 +150,10 @@ constexpr uint32_t LOOP_STOP_DELETE_DEBOUNCE_MS = 300;
 constexpr uint32_t LOOP_REC_PLAY_DOUBLE_SWIPE_MS = 1000UL;
 constexpr uint32_t ARP_KEY_SYNC_CAPTURE_MS = 6UL;
 constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
-constexpr uint16_t EEPROM_MAGIC_V1 = 0x4D43;
-constexpr uint16_t EEPROM_MAGIC_V2 = 0x4D44;
-constexpr uint16_t EEPROM_MAGIC_V3 = 0x4D45;
-constexpr uint16_t EEPROM_MAGIC_V4 = 0x4D46;
-constexpr uint16_t EEPROM_MAGIC_V5 = 0x4D47;
-constexpr uint16_t EEPROM_MAGIC_V6 = 0x4D48;
-constexpr uint16_t EEPROM_MAGIC_V7 = 0x4D49;
-constexpr uint16_t EEPROM_MAGIC_V8 = 0x4D4A;
-constexpr uint16_t EEPROM_MAGIC_V9 = 0x4D4D;
-constexpr uint16_t EEPROM_MAGIC = 0x4D4E;
+// Firmware 3 is still prototype firmware, so an incompatible preset-map change deliberately
+// receives a new schema identity instead of carrying migration code. A mismatch installs all
+// factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
+constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF300;
 constexpr uint16_t LOOP_EEPROM_MAGIC = 0x4C32;
 constexpr size_t EEPROM_BYTES = 4096;
 constexpr uint8_t ARP_CH_1_PLUS_10 = 17;
@@ -3890,7 +3884,7 @@ bool loadPersistedUiSetting(uint8_t &settingId) {
 }
 
 void saveStorage() {
-  storage.magic = EEPROM_MAGIC;
+  storage.magic = PRESET_SCHEMA_MAGIC;
   syncMapCcRuntimeToSettings();
   storage.presets[storage.currentPreset] = settings;
   storage.firmware3[storage.currentPreset] = firmware3Settings;
@@ -4225,131 +4219,29 @@ void initStorageIfNeeded() {
   uint16_t storedMagic = 0;
   EEPROM.get(0, storedMagic);
 
-  if (storedMagic == EEPROM_MAGIC) {
+  if (storedMagic == PRESET_SCHEMA_MAGIC) {
     EEPROM.get(0, storage);
-  } else if (storedMagic == EEPROM_MAGIC_V9) {
-    StorageImageV9 legacy{};
-    EEPROM.get(0, legacy);
-    storage.magic = EEPROM_MAGIC;
-    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
-    memcpy(storage.presets, legacy.presets, sizeof(storage.presets));
-  } else if (storedMagic == EEPROM_MAGIC_V8) {
-    StorageImageV8 legacy{};
-    EEPROM.get(0, legacy);
-    storage.magic = EEPROM_MAGIC;
-    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
-    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-      storage.presets[i] = migrateSettingsV8(legacy.presets[i]);
-      storage.presets[i].loadPreset = i;
-      storage.presets[i].savePreset = i;
-    }
-    EEPROM.put(0, storage);
-    EEPROM.commit();
-  } else if (storedMagic == EEPROM_MAGIC_V7) {
-    StorageImageV7 legacy{};
-    EEPROM.get(0, legacy);
-    storage.magic = EEPROM_MAGIC;
-    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
-    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-      storage.presets[i] = migrateSettingsV7(legacy.presets[i]);
-      storage.presets[i].loadPreset = i;
-      storage.presets[i].savePreset = i;
-    }
-    EEPROM.put(0, storage);
-    EEPROM.commit();
-  } else if (storedMagic == EEPROM_MAGIC_V6) {
-    StorageImageV6 legacy{};
-    EEPROM.get(0, legacy);
-    storage.magic = EEPROM_MAGIC;
-    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
-    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-      storage.presets[i] = migrateSettingsV6(legacy.presets[i]);
-      storage.presets[i].loadPreset = i;
-      storage.presets[i].savePreset = i;
-    }
-    EEPROM.put(0, storage);
-    EEPROM.commit();
-  } else if (storedMagic == EEPROM_MAGIC_V5) {
-    StorageImageV5 legacy{};
-    EEPROM.get(0, legacy);
-    storage.magic = EEPROM_MAGIC;
-    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
-    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-      storage.presets[i] = migrateSettingsV5(legacy.presets[i]);
-      storage.presets[i].loadPreset = i;
-      storage.presets[i].savePreset = i;
-    }
-    EEPROM.put(0, storage);
-    EEPROM.commit();
-  } else if (storedMagic == EEPROM_MAGIC_V4) {
-    StorageImageV4 legacy{};
-    EEPROM.get(0, legacy);
-    storage.magic = EEPROM_MAGIC;
-    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
-    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-      storage.presets[i] = migrateSettingsV4(legacy.presets[i]);
-      storage.presets[i].loadPreset = i;
-      storage.presets[i].savePreset = i;
-    }
-    EEPROM.put(0, storage);
-    EEPROM.commit();
-  } else if (storedMagic == EEPROM_MAGIC_V3) {
-    StorageImageV4 legacy{};
-    EEPROM.get(0, legacy);
-    storage.magic = EEPROM_MAGIC;
-    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
-    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-      storage.presets[i] = migrateSettingsV3(legacy.presets[i]);
-      storage.presets[i].loadPreset = i;
-      storage.presets[i].savePreset = i;
-    }
-    EEPROM.put(0, storage);
-    EEPROM.commit();
-  } else if (storedMagic == EEPROM_MAGIC_V2) {
-    StorageImageV2 legacy{};
-    EEPROM.get(0, legacy);
-    storage.magic = EEPROM_MAGIC;
-    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
-    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-      storage.presets[i] = migrateSettingsV2(legacy.presets[i]);
-      storage.presets[i].loadPreset = i;
-      storage.presets[i].savePreset = i;
-    }
-    EEPROM.put(0, storage);
-    EEPROM.commit();
-  } else if (storedMagic == EEPROM_MAGIC_V1) {
-    StorageImageV1 legacy{};
-    EEPROM.get(0, legacy);
-    storage.magic = EEPROM_MAGIC;
-    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
-    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-      storage.presets[i] = migrateSettingsV1(legacy.presets[i]);
-      storage.presets[i].loadPreset = i;
-      storage.presets[i].savePreset = i;
-    }
-    EEPROM.put(0, storage);
-    EEPROM.commit();
   } else {
-    storage.magic = EEPROM_MAGIC;
+    storage = StorageImage{};
+    storage.magic = PRESET_SCHEMA_MAGIC;
     storage.currentPreset = 0;
     for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
       storage.presets[i] = defaultSettings();
       storage.presets[i].loadPreset = i;
       storage.presets[i].savePreset = i;
+      storage.firmware3[i] = defaultFirmware3Settings();
     }
+    storage.autoSave = 1;
+    EEPROM.write(UI_SCREEN_STORAGE_OFFSET, 0xFF);
+    EEPROM.write(UI_SCREEN_STORAGE_OFFSET + 1, 0xFF);
     EEPROM.put(0, storage);
     EEPROM.commit();
   }
-  if (storedMagic != EEPROM_MAGIC) {
-    initializeFirmware3PresetExtensions();
-    storage.magic = EEPROM_MAGIC;
-    EEPROM.put(0, storage);
-    EEPROM.commit();
-  } else {
-    storage.autoSave = storage.autoSave ? 1 : 0;
-    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-      sanitizeFirmware3Settings(storage.firmware3[i]);
-    }
+  storage.currentPreset = clampU8(storage.currentPreset, 0, PRESET_COUNT - 1);
+  storage.autoSave = storage.autoSave ? 1 : 0;
+  for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
+    sanitizeSettings(storage.presets[i]);
+    sanitizeFirmware3Settings(storage.firmware3[i]);
   }
   loadCurrentPreset();
   loadSavedLoopStorage();

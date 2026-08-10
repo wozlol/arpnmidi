@@ -364,7 +364,10 @@ Global options include:
 - Reset Preset
 - Back
 
-Preset schema migration preserves settings where meanings remain compatible.
+Firmware 3 intentionally does not migrate prototype-era presets. The preset
+schema has an explicit identity; when it changes, all preset slots receive the
+current factory defaults. This keeps storage handling lean while the product is
+still in prototype development.
 The four global loop tracks are stored separately from presets.
 
 ## Panic screen
