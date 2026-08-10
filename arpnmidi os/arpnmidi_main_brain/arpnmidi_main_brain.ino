@@ -1530,7 +1530,10 @@ void drainSecondaryMidiTx() {
   while (secondaryTxTail != secondaryTxHead) {
     const uint16_t tail = secondaryTxTail;
     const SecondaryMidiTxMessage message = secondaryTxQueue[tail];
-    if (DinSerial.availableForWrite() < message.length) return;
+    // Arduino-Pico's SerialUART::availableForWrite() is a writable flag
+    // (0/1), not a byte-count. Do not compare it with the MIDI message
+    // length or every 2/3-byte message will remain queued forever.
+    if (DinSerial.availableForWrite() == 0) return;
     DinSerial.write(message.status);
     if (message.length > 1) DinSerial.write(message.data1);
     if (message.length > 2) DinSerial.write(message.data2);

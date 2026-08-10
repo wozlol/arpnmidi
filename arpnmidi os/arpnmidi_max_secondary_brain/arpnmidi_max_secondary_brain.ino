@@ -427,7 +427,9 @@ void pumpQueuedMaxInputToMainBrain() {
   while (true) {
     if (!hasPending) hasPending = maxToIoQueue.pop(pending);
     if (!hasPending) return;
-    if (Serial2.availableForWrite() < pending.len) return;
+    // Arduino-Pico reports SerialUART::availableForWrite() as a writable
+    // flag (0/1), not the number of free bytes in the UART FIFO.
+    if (Serial2.availableForWrite() == 0) return;
     writeSerialMidi(Serial2, pending.status, pending.data1, pending.data2, pending.len);
     hasPending = false;
   }
