@@ -1108,7 +1108,7 @@ const int8_t kEncoderTransitionTable[16] = {
 
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 SWING", "3 ARP", "4 VELOCITY", "5 NOTELENGT", "6 STUTTER", "7 ECHO",
-  "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 ARP OUT", "11 DRUM ROLL",
+  "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 ARP OUT", "11 DRUMROLL",
   "12 DRUMDIV", "13 BASS", "14 THRU OUT", "15 RNDRBN", "16 ROUTER", "17 FEATURES",
   "18 CC MAP", "19 NOTE>CC", "20 IN CC >", "21 MONO RETRIG", "22 SCRNSVR",
   "23 EYE/PUSH", "24 EYE MODE", "25 PUSH", "26 4BUTTON", "27 LOOPER",
