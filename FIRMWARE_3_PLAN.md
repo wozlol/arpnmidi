@@ -300,7 +300,13 @@ Eye/Push looper actions, stutter divisions, Quick Jump On/Off, and the four
 physical-button actions.
 
 The new `CC MAP` remaps a CC arriving on Main Input to a chosen output channel
-and CC number.
+and CC number. Sixteen fixed remap slots are stored per preset.
+
+The runtime action catalog contains separate per-target controls for Velocity,
+Note Length, Stutter, Echo Wet/Length/Delay/Drift, linked Arp and Drum divisions,
+Quick Jump, looper transport, track selection, mute/solo, safe clear/undo, and
+straight Stutter trigger divisions. Feature mappings and CC Map records live in
+the fixed per-preset filesystem record.
 
 ## Note-to-CC mapping and physical buttons
 
@@ -322,6 +328,11 @@ Four-button modes include:
 Learned chords capture the result after key, scale, and chord processing. Chord
 memory playback occurs after those processors so stored chords are not processed
 again.
+
+The current prototype button order is GPIO 9, 12, 10, and 13. Custom mode stores
+an independent channel, Note/CC number, and behavior for each button. Looper
+mode applies any selected combination to the corresponding track; Solo is
+exclusive. The four chord memories persist with their preset.
 
 ## Parameter locks
 

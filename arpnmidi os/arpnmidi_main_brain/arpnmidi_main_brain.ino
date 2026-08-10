@@ -15,8 +15,8 @@
   8   Encoder push
   9   Local button 1
   12  Local button 2
-  10  Local button 3 (reserved; action not implemented yet)
-  13  Local button 4 (reserved; action not implemented yet)
+  10  Local button 3
+  13  Local button 4
   26  Push/pressure sensor analog in
 
   11 intentionally avoided.
@@ -81,6 +81,8 @@ constexpr uint8_t PIN_ENC_B = 7;
 constexpr uint8_t PIN_ENC_SW = 8;
 constexpr uint8_t PIN_BUTTON_1 = 9;
 constexpr uint8_t PIN_BUTTON_2 = 12;
+constexpr uint8_t PIN_BUTTON_3 = 10;
+constexpr uint8_t PIN_BUTTON_4 = 13;
 constexpr uint8_t PIN_PUSH = 26;
 constexpr uint8_t PIN_RGB_LED = 16;
 constexpr uint8_t USB_DEVICE_SOURCE_PORT = 253;
@@ -162,8 +164,8 @@ constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 // Firmware 3 is still prototype firmware, so an incompatible preset-map change deliberately
 // receives a new schema identity instead of carrying migration code. A mismatch installs all
 // factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
-constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF303;
-constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3030001UL;
+constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF304;
+constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3040001UL;
 constexpr uint8_t MAX_CUSTOM_ARP_EVENTS = 32;
 constexpr uint16_t LOOP_EEPROM_MAGIC = 0x4C32;
 constexpr uint32_t LOOP_FILE_MAGIC = 0x4C503303UL;  // "LP3" schema 3
@@ -231,6 +233,9 @@ void emitNoteLengthEvent(void *context, uint8_t target, uint8_t sourcePort,
                          const arpnmidi3::LoopMidiEvent &event);
 void deactivateStutter(uint8_t target);
 uint8_t currentDivisionSetting();
+void captureChordMemoryOutput(uint8_t sourcePort, uint8_t channel,
+                              uint8_t note, uint8_t velocity);
+void finishChordMemoryLearnIfReady();
 
 enum MenuMode : uint8_t {
   MENU_SELECT = 0,
@@ -241,6 +246,31 @@ enum RouterEditStage : uint8_t {
   ROUTER_STAGE_LIST = 0,
   ROUTER_STAGE_DEST,
   ROUTER_STAGE_TRANSPOSE
+};
+
+enum FeaturesUiStage : uint8_t {
+  FEATURES_UI_GROUPS = 0,
+  FEATURES_UI_KNOBS,
+  FEATURES_UI_BUTTONS
+};
+
+enum CcRemapUiStage : uint8_t {
+  CC_REMAP_UI_LIST = 0,
+  CC_REMAP_UI_INPUT,
+  CC_REMAP_UI_OUTPUT_CHANNEL,
+  CC_REMAP_UI_OUTPUT_CC
+};
+
+enum FourButtonUiStage : uint8_t {
+  FOUR_BUTTON_UI_MAIN = 0,
+  FOUR_BUTTON_UI_MODE,
+  FOUR_BUTTON_UI_CUSTOM_LIST,
+  FOUR_BUTTON_UI_CUSTOM_CHANNEL,
+  FOUR_BUTTON_UI_CUSTOM_KIND,
+  FOUR_BUTTON_UI_CUSTOM_NUMBER,
+  FOUR_BUTTON_UI_CUSTOM_BEHAVIOR,
+  FOUR_BUTTON_UI_LOOPER,
+  FOUR_BUTTON_UI_CHORD
 };
 
 enum SettingId : uint8_t {
@@ -258,6 +288,7 @@ enum SettingId : uint8_t {
   SET_ROUTER,
   SET_DIV_NOTES,
   SET_MAP_CC,
+  SET_CC_MAP,
   SET_CC_OUT_CH,
   SET_LEGATO_CH,
   SET_REMOTE_CH,
@@ -267,6 +298,7 @@ enum SettingId : uint8_t {
   SET_SENSOR_CH,
   SET_SENSOR_MODE,
   SET_PUSH_MODE,
+  SET_FOUR_BUTTON,
   SET_LOOP_BARS,
   SET_FORCE_KEY,
   SET_FORCE_SCALE,
@@ -368,6 +400,109 @@ constexpr uint8_t ARP_DIVISION_FOLLOW_DRUM = DIVISION_COUNT;
 constexpr uint8_t DRUM_DIVISION_FOLLOW_ARP = DIVISION_COUNT;
 constexpr uint8_t DRUM_DIVISION_FREE = DIVISION_COUNT + 1;
 constexpr uint8_t LIVE_TARGET_COUNT = 5;  // Main plus Looper Tracks 1-4.
+constexpr uint8_t STUTTER_BUTTON_DIVISION_COUNT = 6;
+constexpr uint8_t CC_REMAP_SLOT_COUNT = 16;
+
+enum FeatureKnobId : uint8_t {
+  FEATURE_KNOB_VELOCITY_BASE = 0,
+  FEATURE_KNOB_NOTE_LENGTH_BASE = FEATURE_KNOB_VELOCITY_BASE + LIVE_TARGET_COUNT,
+  FEATURE_KNOB_STUTTER_BASE = FEATURE_KNOB_NOTE_LENGTH_BASE + LIVE_TARGET_COUNT,
+  FEATURE_KNOB_ECHO_WET_BASE = FEATURE_KNOB_STUTTER_BASE + LIVE_TARGET_COUNT,
+  FEATURE_KNOB_ECHO_LENGTH_BASE = FEATURE_KNOB_ECHO_WET_BASE + LIVE_TARGET_COUNT,
+  FEATURE_KNOB_ECHO_DELAY_BASE = FEATURE_KNOB_ECHO_LENGTH_BASE + LIVE_TARGET_COUNT,
+  FEATURE_KNOB_ECHO_DRIFT_BASE = FEATURE_KNOB_ECHO_DELAY_BASE + LIVE_TARGET_COUNT,
+  FEATURE_KNOB_ARP_DIVISION = FEATURE_KNOB_ECHO_DRIFT_BASE + LIVE_TARGET_COUNT,
+  FEATURE_KNOB_DRUM_DIVISION,
+  FEATURE_KNOB_QUICK_JUMP_INPUT,
+  FEATURE_KNOB_QUICK_JUMP_OUTPUT,
+  FEATURE_KNOB_COUNT
+};
+
+enum FeatureButtonId : uint8_t {
+  FEATURE_BUTTON_VELOCITY_BASE = 0,
+  FEATURE_BUTTON_NOTE_LENGTH_BASE = FEATURE_BUTTON_VELOCITY_BASE + LIVE_TARGET_COUNT,
+  FEATURE_BUTTON_STUTTER_BASE = FEATURE_BUTTON_NOTE_LENGTH_BASE + LIVE_TARGET_COUNT,
+  FEATURE_BUTTON_ECHO_BASE = FEATURE_BUTTON_STUTTER_BASE + LIVE_TARGET_COUNT,
+  FEATURE_BUTTON_LOOP_RECORD = FEATURE_BUTTON_ECHO_BASE + LIVE_TARGET_COUNT,
+  FEATURE_BUTTON_LOOP_PLAY_STOP,
+  FEATURE_BUTTON_LOOP_CLEAR_UNDO,
+  FEATURE_BUTTON_LOOP_COMBO,
+  FEATURE_BUTTON_TRACK_SELECT_BASE,
+  FEATURE_BUTTON_TRACK_MUTE_BASE = FEATURE_BUTTON_TRACK_SELECT_BASE + LIVE_TARGET_COUNT - 1,
+  FEATURE_BUTTON_TRACK_SOLO_BASE = FEATURE_BUTTON_TRACK_MUTE_BASE + LIVE_TARGET_COUNT - 1,
+  FEATURE_BUTTON_QUICK_JUMP = FEATURE_BUTTON_TRACK_SOLO_BASE + LIVE_TARGET_COUNT - 1,
+  FEATURE_BUTTON_STUTTER_DIV_BASE,
+  FEATURE_BUTTON_COUNT = FEATURE_BUTTON_STUTTER_DIV_BASE +
+      LIVE_TARGET_COUNT * STUTTER_BUTTON_DIVISION_COUNT
+};
+
+enum TriggerBindingKind : uint8_t {
+  TRIGGER_BINDING_OFF = 0,
+  TRIGGER_BINDING_CC,
+  TRIGGER_BINDING_NOTE
+};
+
+enum FourButtonMode : uint8_t {
+  FOUR_BUTTON_CUSTOM = 0,
+  FOUR_BUTTON_LOOPER,
+  FOUR_BUTTON_CHORD_MEMORY,
+  FOUR_BUTTON_MODE_COUNT
+};
+
+enum CustomButtonBehavior : uint8_t {
+  CUSTOM_BUTTON_MOMENTARY = 0,
+  CUSTOM_BUTTON_LATCH,
+  CUSTOM_BUTTON_FLAPPY,
+  CUSTOM_BUTTON_BEHAVIOR_COUNT
+};
+
+constexpr uint8_t LOOPER_BUTTON_SELECT = 0x01;
+constexpr uint8_t LOOPER_BUTTON_MUTE = 0x02;
+constexpr uint8_t LOOPER_BUTTON_SOLO = 0x04;
+constexpr uint8_t LOOPER_BUTTON_DELETE = 0x08;
+constexpr uint8_t LOOPER_BUTTON_UNDO = 0x10;
+
+struct FeatureKnobBinding {
+  uint8_t channel = 0;
+  uint8_t cc = 0xFF;
+};
+
+struct FeatureButtonBinding {
+  uint8_t channel = 0;
+  uint8_t number = 0xFF;
+  uint8_t kind = TRIGGER_BINDING_OFF;
+};
+
+struct CcRemapEntry {
+  uint8_t inputCc = 0xFF;
+  uint8_t outputChannel = 1;
+  uint8_t outputCc = 0;
+};
+
+struct CustomButtonConfig {
+  uint8_t channel = 1;
+  uint8_t number = 60;
+  uint8_t kind = TRIGGER_BINDING_NOTE;
+  uint8_t behavior = CUSTOM_BUTTON_MOMENTARY;
+};
+
+struct ChordMemorySlot {
+  uint8_t count = 0;
+  uint8_t channels[16]{};
+  uint8_t notes[16]{};
+  uint8_t velocities[16]{};
+};
+
+struct FeatureControlSettings {
+  FeatureKnobBinding knobs[FEATURE_KNOB_COUNT];
+  FeatureButtonBinding buttons[FEATURE_BUTTON_COUNT];
+  CcRemapEntry ccRemaps[CC_REMAP_SLOT_COUNT];
+  uint8_t drumRollKinds[DIV_NOTE_SLOT_COUNT];
+  uint8_t fourButtonMode = FOUR_BUTTON_CUSTOM;
+  uint8_t looperButtonActions = LOOPER_BUTTON_SELECT;
+  CustomButtonConfig customButtons[4];
+  ChordMemorySlot chordMemories[4];
+};
 
 struct LiveTargetSettings {
   uint8_t velocityEnabled;
@@ -980,6 +1115,7 @@ struct CustomArpVoice {
 
 struct ExtendedPresetRecord {
   Firmware3Settings firmware3;
+  FeatureControlSettings featureControls;
   CustomArpPattern customArp;
   uint16_t parameterLockCount = 0;
   ParameterLockEntry parameterLocks[MAX_PARAMETER_LOCKS];
@@ -1045,6 +1181,7 @@ struct UiState {
 StorageImage storage;
 Settings settings;
 Firmware3Settings firmware3Settings;
+FeatureControlSettings featureControls;
 arpnmidi3::ClockEngine musicalClock;
 ClockTracker clockTracker;
 EncoderState encoder;
@@ -1084,6 +1221,7 @@ bool stutterSettingWasEnabled[LIVE_TARGET_COUNT];
 bool stutterTimedOut[LIVE_TARGET_COUNT];
 bool noteLengthSettingWasEnabled[LIVE_TARGET_COUNT];
 bool echoSettingWasEnabled[LIVE_TARGET_COUNT];
+bool featureButtonCcHeld[FEATURE_BUTTON_COUNT];
 uint8_t activeStutterDivision[LIVE_TARGET_COUNT];
 uint64_t stutterStopUs[LIVE_TARGET_COUNT];
 uint8_t multitrackPlaybackHeld[arpnmidi3::kLoopTrackCount][16][16];
@@ -1179,6 +1317,28 @@ bool loopDivNoteHeld[DIV_NOTE_SLOT_COUNT];
 uint32_t divNoteHeldStamp[DIV_NOTE_SLOT_COUNT];
 uint32_t divNotePressCounter = 0;
 uint8_t mapCcCursor = 0;
+uint8_t featuresUiStage = FEATURES_UI_GROUPS;
+uint8_t featuresGroupCursor = 0;
+uint8_t featuresItemCursor = 0;
+bool featuresLearnActive = false;
+uint8_t ccRemapUiStage = CC_REMAP_UI_LIST;
+uint8_t ccRemapCursor = 0;
+bool ccRemapLearnActive = false;
+uint8_t fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+uint8_t fourButtonUiCursor = 0;
+uint8_t fourButtonEditButton = 0;
+bool fourButtonLearnActive = false;
+bool physicalButtonState[4];
+uint32_t physicalButtonChangeMs[4];
+bool customButtonLatch[4];
+uint8_t customButtonFlappyValue[4];
+uint32_t customButtonFlappyMs[4];
+bool chordButtonPlaying[4];
+bool chordLearnArmed = false;
+bool chordClearArmed = false;
+bool chordLearnActive = false;
+uint8_t chordLearnSlot = 0;
+bool chordMemoryDirty = false;
 CcMapSlot mapCcSlots[MAPCC_PARAM_COUNT];
 bool mapCcChannelAll = false;
 bool mapCcTouchedSetting[SETTING_COUNT];
@@ -1240,9 +1400,10 @@ const int8_t kEncoderTransitionTable[16] = {
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 ARP MODE", "3 DIVISION", "4 VELOCITY", "5 LENGTH", "",
   "6 INPUT CH", "7 ARP CH", "8 BASS CH", "9 THRU OUT", "10 RNDRBN", "11 ROUTER",
-  "12 DRUM ROLL", "13 MAP CC", "14 IN CC >", "15 MONO RETRIG", "16 REMOTE", "17 REMOTE 1",
-  "18 REMOTE 2", "19 SCRNSVR", "20 EYE/PUSH", "21 EYE MODE", "22 PUSH",
-  "23 LOOP", "24 KEY", "25 SCALE", "26 GIT/KEYS", "27 LOAD", "28 SAVE", "29 PANIC"
+  "12 DRUM ROLL", "13 FEATURES", "14 CC MAP", "15 IN CC >", "16 MONO RETRIG",
+  "17 REMOTE", "18 REMOTE 1", "19 REMOTE 2", "20 SCRNSVR", "21 EYE/PUSH",
+  "22 EYE MODE", "23 PUSH", "24 4BUTTON", "25 LOOP", "26 KEY", "27 SCALE",
+  "28 GIT/KEYS", "29 LOAD", "30 SAVE", "31 PANIC"
 };
 
 const char *const kArpModeNames[ARP_MODE_COUNT] = {
@@ -4388,6 +4549,12 @@ void pollLoopStoragePersistence() {
   saveLoopStorageIfAny();
 }
 
+void pollChordMemoryPersistence() {
+  if (!chordMemoryDirty || chordLearnActive || anyPhysicalInputNotesHeld() ||
+      multitrackLooper.recording() || multitrackLooper.recordingArmed()) return;
+  if (saveExtendedPreset(storage.currentPreset)) chordMemoryDirty = false;
+}
+
 void clearSavedLoopStorage() {
   if (littleFsReady) LittleFS.remove("/loops.f3");
   loopStorageDirty = false;
@@ -4508,6 +4675,7 @@ void loadSavedLoopStorage() {
 void thruOutputRefOn(uint8_t sourcePort, uint8_t outNote, uint8_t velocity) {
   const uint8_t outCh = effectiveThruChannel();
   if (!channelEnabled(outCh) || outNote > 127) return;
+  captureChordMemoryOutput(sourcePort, outCh, outNote, velocity);
   if (thruOutputRefCount[outNote]++ == 0) {
     sendFanout(sourcePort, 0x90 | ((outCh - 1) & 0x0F), outNote, velocity);
   }
@@ -4777,13 +4945,31 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (routerEditStage == ROUTER_STAGE_TRANSPOSE) return ROUTER_TRANSPOSE_MAX - ROUTER_TRANSPOSE_MIN;
       return ROUTER_BACK_SLOT;
     case SET_DIV_NOTES: return DIV_NOTE_BACK_SLOT;
-    case SET_MAP_CC: return MAP_CC_CHMODE_SLOT;
+    case SET_MAP_CC:
+      if (featuresUiStage == FEATURES_UI_KNOBS) return FEATURE_KNOB_COUNT;
+      if (featuresUiStage == FEATURES_UI_BUTTONS) return FEATURE_BUTTON_COUNT;
+      return 3;
+    case SET_CC_MAP:
+      if (ccRemapUiStage == CC_REMAP_UI_LIST) return CC_REMAP_SLOT_COUNT + 1;
+      if (ccRemapUiStage == CC_REMAP_UI_INPUT) return 128;
+      if (ccRemapUiStage == CC_REMAP_UI_OUTPUT_CHANNEL) return 16;
+      return 127;
     case SET_LEGATO_CH: return 16;
     case SET_CC_OUT_CH: return 17;
     case SET_REMOTE_CH: return 16;
     case SET_SENSOR_CH: return 16;
     case SET_SENSOR_MODE: return SENSOR_MODE_COUNT - 1;
     case SET_PUSH_MODE: return SENSOR_MODE_COUNT - 1;
+    case SET_FOUR_BUTTON:
+      if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) return 4;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) return FOUR_BUTTON_MODE_COUNT - 1;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) return 4;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) return 16;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) return 1;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) return 127;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_BEHAVIOR) return CUSTOM_BUTTON_BEHAVIOR_COUNT - 1;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) return 5;
+      return 2;
     case SET_LOOP_BARS: return LOOP_BARS_COUNT - 1;
     case SET_FORCE_KEY: return 24;
     case SET_FORCE_SCALE: return FORCE_SCALE_COUNT - 1;
@@ -4815,13 +5001,41 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       if (routerEditStage == ROUTER_STAGE_TRANSPOSE) return settings.routerTranspose[routerEditChannel] - ROUTER_TRANSPOSE_MIN;
       return routerMenuCursor;
     case SET_DIV_NOTES: return divNotesCursor;
-    case SET_MAP_CC: return mapCcCursor;
+    case SET_MAP_CC:
+      return featuresUiStage == FEATURES_UI_GROUPS ? featuresGroupCursor : featuresItemCursor;
+    case SET_CC_MAP:
+      if (ccRemapUiStage == CC_REMAP_UI_LIST) return ccRemapCursor;
+      if (ccRemapCursor >= CC_REMAP_SLOT_COUNT) return 0;
+      if (ccRemapUiStage == CC_REMAP_UI_INPUT) {
+        return featureControls.ccRemaps[ccRemapCursor].inputCc <= 127
+            ? featureControls.ccRemaps[ccRemapCursor].inputCc : 128;
+      }
+      if (ccRemapUiStage == CC_REMAP_UI_OUTPUT_CHANNEL) {
+        return featureControls.ccRemaps[ccRemapCursor].outputChannel;
+      }
+      return featureControls.ccRemaps[ccRemapCursor].outputCc;
     case SET_LEGATO_CH: return settings.legatoChannel;
     case SET_CC_OUT_CH: return settings.ccOutChannel;
     case SET_REMOTE_CH: return settings.remoteChannel;
     case SET_SENSOR_CH: return settings.sensorChannel;
     case SET_SENSOR_MODE: return settings.sensorMode;
     case SET_PUSH_MODE: return settings.pushMode;
+    case SET_FOUR_BUTTON:
+      if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN ||
+          fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST ||
+          fourButtonUiStage == FOUR_BUTTON_UI_LOOPER ||
+          fourButtonUiStage == FOUR_BUTTON_UI_CHORD) return fourButtonUiCursor;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) return featureControls.fourButtonMode;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
+        return featureControls.customButtons[fourButtonEditButton].channel;
+      }
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) {
+        return featureControls.customButtons[fourButtonEditButton].kind == TRIGGER_BINDING_NOTE ? 1 : 0;
+      }
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
+        return featureControls.customButtons[fourButtonEditButton].number;
+      }
+      return featureControls.customButtons[fourButtonEditButton].behavior;
     case SET_LOOP_BARS: return settings.loopBars;
     case SET_FORCE_KEY: return settings.forceKey;
     case SET_FORCE_SCALE: return settings.forceScale;
@@ -4876,7 +5090,28 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       }
       break;
     case SET_DIV_NOTES: divNotesCursor = clampU8(value, 0, DIV_NOTE_BACK_SLOT); break;
-    case SET_MAP_CC: mapCcCursor = clampU8(value, 0, MAP_CC_CHMODE_SLOT); break;
+    case SET_MAP_CC:
+      if (featuresUiStage == FEATURES_UI_GROUPS) featuresGroupCursor = clampU8(value, 0, 3);
+      else if (featuresUiStage == FEATURES_UI_KNOBS) {
+        featuresItemCursor = clampU8(value, 0, FEATURE_KNOB_COUNT);
+      } else {
+        featuresItemCursor = clampU8(value, 0, FEATURE_BUTTON_COUNT);
+      }
+      break;
+    case SET_CC_MAP:
+      if (ccRemapUiStage == CC_REMAP_UI_LIST) {
+        ccRemapCursor = clampU8(value, 0, CC_REMAP_SLOT_COUNT + 1);
+      } else if (ccRemapCursor < CC_REMAP_SLOT_COUNT) {
+        CcRemapEntry &entry = featureControls.ccRemaps[ccRemapCursor];
+        if (ccRemapUiStage == CC_REMAP_UI_INPUT) {
+          entry.inputCc = value > 127 ? 0xFF : clampU8(value, 0, 127);
+        } else if (ccRemapUiStage == CC_REMAP_UI_OUTPUT_CHANNEL) {
+          entry.outputChannel = clampU8(value, 1, 16);
+        } else {
+          entry.outputCc = clampU8(value, 0, 127);
+        }
+      }
+      break;
     case SET_LEGATO_CH: {
       const uint8_t previous = settings.legatoChannel;
       settings.legatoChannel = clampU8(value, 0, 16);
@@ -4919,6 +5154,26 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       }
       rebuildArpHeldSorted();
       updateBassVoice();
+      break;
+    case SET_FOUR_BUTTON:
+      if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN ||
+          fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST ||
+          fourButtonUiStage == FOUR_BUTTON_UI_LOOPER ||
+          fourButtonUiStage == FOUR_BUTTON_UI_CHORD) {
+        fourButtonUiCursor = clampU8(value, 0, settingRangeMax(SET_FOUR_BUTTON));
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) {
+        featureControls.fourButtonMode = clampU8(value, 0, FOUR_BUTTON_MODE_COUNT - 1);
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
+        featureControls.customButtons[fourButtonEditButton].channel = clampU8(value, 1, 16);
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) {
+        featureControls.customButtons[fourButtonEditButton].kind = value
+            ? TRIGGER_BINDING_NOTE : TRIGGER_BINDING_CC;
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
+        featureControls.customButtons[fourButtonEditButton].number = clampU8(value, 0, 127);
+      } else {
+        featureControls.customButtons[fourButtonEditButton].behavior =
+            clampU8(value, 0, CUSTOM_BUTTON_BEHAVIOR_COUNT - 1);
+      }
       break;
     case SET_LOOP_BARS:
       settings.loopBars = clampU8(value, 0, LOOP_BARS_COUNT - 1);
@@ -5102,6 +5357,19 @@ Firmware3Settings defaultFirmware3Settings() {
   return s;
 }
 
+FeatureControlSettings defaultFeatureControlSettings() {
+  FeatureControlSettings controls{};
+  controls.fourButtonMode = FOUR_BUTTON_CUSTOM;
+  controls.looperButtonActions = LOOPER_BUTTON_SELECT;
+  for (uint8_t button = 0; button < 4; ++button) {
+    controls.customButtons[button].channel = 1;
+    controls.customButtons[button].number = 60 + button;
+    controls.customButtons[button].kind = TRIGGER_BINDING_NOTE;
+    controls.customButtons[button].behavior = CUSTOM_BUTTON_MOMENTARY;
+  }
+  return controls;
+}
+
 void sanitizeFirmware3Settings(Firmware3Settings &s) {
   s.clockInFollow = s.clockInFollow ? 1 : 0;
   s.clockOutSend = s.clockOutSend ? 1 : 0;
@@ -5165,6 +5433,7 @@ constexpr const char *EXTENDED_PRESET_PATH = "/presets.f3";
 ExtendedPresetRecord currentExtendedPresetRecord() {
   ExtendedPresetRecord record{};
   record.firmware3 = firmware3Settings;
+  record.featureControls = featureControls;
   record.customArp = customArpPattern;
   record.parameterLockCount = min<uint16_t>(parameterLockCount, MAX_PARAMETER_LOCKS);
   memcpy(record.parameterLocks, parameterLocks,
@@ -5198,6 +5467,7 @@ bool initializeExtendedPresetStorage(bool forceFactoryDefaults) {
   for (uint8_t slot = 0; slot < PRESET_COUNT; ++slot) {
     ExtendedPresetRecord record{};
     record.firmware3 = defaultFirmware3Settings();
+    record.featureControls = defaultFeatureControlSettings();
     record.customArp.lengthSelection = record.firmware3.customArpLength;
     if (file.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record)) != sizeof(record)) {
       file.close();
@@ -5210,6 +5480,7 @@ bool initializeExtendedPresetStorage(bool forceFactoryDefaults) {
 
 bool loadExtendedPreset(uint8_t slot) {
   firmware3Settings = defaultFirmware3Settings();
+  featureControls = defaultFeatureControlSettings();
   customArpPattern = CustomArpPattern{};
   customArpPattern.lengthSelection = firmware3Settings.customArpLength;
   parameterLockCount = 0;
@@ -5225,6 +5496,46 @@ bool loadExtendedPreset(uint8_t slot) {
       record.parameterLockCount > MAX_PARAMETER_LOCKS) return false;
   firmware3Settings = record.firmware3;
   sanitizeFirmware3Settings(firmware3Settings);
+  featureControls = record.featureControls;
+  for (FeatureKnobBinding &binding : featureControls.knobs) {
+    if (binding.channel > 16 || binding.cc > 127) binding = FeatureKnobBinding{};
+  }
+  for (FeatureButtonBinding &binding : featureControls.buttons) {
+    if (binding.channel > 16 || binding.number > 127 ||
+        binding.kind > TRIGGER_BINDING_NOTE) binding = FeatureButtonBinding{};
+  }
+  for (CcRemapEntry &entry : featureControls.ccRemaps) {
+    if (entry.inputCc > 127) entry = CcRemapEntry{};
+    entry.outputChannel = clampU8(entry.outputChannel, 1, 16);
+    entry.outputCc = clampU8(entry.outputCc, 0, 127);
+  }
+  for (uint8_t &kind : featureControls.drumRollKinds) {
+    if (kind > TRIGGER_BINDING_NOTE) kind = TRIGGER_BINDING_OFF;
+  }
+  featureControls.fourButtonMode = clampU8(featureControls.fourButtonMode, 0,
+      FOUR_BUTTON_MODE_COUNT - 1);
+  featureControls.looperButtonActions &= LOOPER_BUTTON_SELECT | LOOPER_BUTTON_MUTE |
+      LOOPER_BUTTON_SOLO | LOOPER_BUTTON_DELETE | LOOPER_BUTTON_UNDO;
+  if (featureControls.looperButtonActions == 0) {
+    featureControls.looperButtonActions = LOOPER_BUTTON_SELECT;
+  }
+  for (CustomButtonConfig &button : featureControls.customButtons) {
+    button.channel = clampU8(button.channel, 1, 16);
+    button.number = clampU8(button.number, 0, 127);
+    if (button.kind != TRIGGER_BINDING_CC && button.kind != TRIGGER_BINDING_NOTE) {
+      button.kind = TRIGGER_BINDING_NOTE;
+    }
+    button.behavior = clampU8(button.behavior, 0, CUSTOM_BUTTON_BEHAVIOR_COUNT - 1);
+  }
+  for (ChordMemorySlot &chord : featureControls.chordMemories) {
+    chord.count = clampU8(chord.count, 0, 16);
+    for (uint8_t note = 0; note < chord.count; ++note) {
+      chord.channels[note] = clampU8(chord.channels[note], 1, 16);
+      chord.notes[note] = clampU8(chord.notes[note], 0, 127);
+      chord.velocities[note] = clampU8(chord.velocities[note], 1, 127);
+    }
+  }
+  memset(featureButtonCcHeld, 0, sizeof(featureButtonCcHeld));
   customArpPattern = record.customArp;
   customArpPattern.lengthSelection = clampU8(customArpPattern.lengthSelection, 0, 5);
   parameterLockCount = record.parameterLockCount;
@@ -5258,6 +5569,24 @@ void loadCurrentPreset() {
   syncMusicalClockConfig(false);
   divNotesCursor = 0;
   mapCcCursor = 0;
+  featuresUiStage = FEATURES_UI_GROUPS;
+  featuresGroupCursor = 0;
+  featuresItemCursor = 0;
+  featuresLearnActive = false;
+  ccRemapUiStage = CC_REMAP_UI_LIST;
+  ccRemapCursor = 0;
+  ccRemapLearnActive = false;
+  fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+  fourButtonUiCursor = 0;
+  fourButtonEditButton = 0;
+  fourButtonLearnActive = false;
+  memset(customButtonLatch, 0, sizeof(customButtonLatch));
+  memset(customButtonFlappyValue, 0, sizeof(customButtonFlappyValue));
+  memset(chordButtonPlaying, 0, sizeof(chordButtonPlaying));
+  chordLearnArmed = false;
+  chordClearArmed = false;
+  chordLearnActive = false;
+  chordMemoryDirty = false;
   syncMapCcRuntimeFromSettings();
   mapCcPreviewActive = false;
   mapCcUiPending = false;
@@ -5652,6 +5981,11 @@ void initStorageIfNeeded() {
 void applySettingDelta(int delta, bool fastStep) {
   const uint8_t id = ui.selectedSetting;
   if (id == SET_PANIC) return;
+  if (id == SET_MAP_CC) featuresLearnActive = false;
+  if (id == SET_CC_MAP && ccRemapUiStage == CC_REMAP_UI_INPUT) ccRemapLearnActive = false;
+  if (id == SET_FOUR_BUTTON && fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
+    fourButtonLearnActive = false;
+  }
   const int fast = fastStep ? 10 : 1;
   const int step = delta * fast;
   const int oldValue = (ui.hasPendingEdit && ui.pendingSetting == id) ? ui.pendingValue : getSettingValueRaw(id);
@@ -5664,6 +5998,12 @@ void applySettingDelta(int delta, bool fastStep) {
   else if (id == SET_ROUTER && routerEditStage == ROUTER_STAGE_DEST) next = wrapIndex(next - 1, 16) + 1;
   else if (id == SET_ROUTER && routerEditStage == ROUTER_STAGE_TRANSPOSE) {
     next = constrain(next, 0, ROUTER_TRANSPOSE_MAX - ROUTER_TRANSPOSE_MIN);
+  }
+  else if (id == SET_CC_MAP && ccRemapUiStage == CC_REMAP_UI_OUTPUT_CHANNEL) {
+    next = wrapIndex(next - 1, 16) + 1;
+  }
+  else if (id == SET_FOUR_BUTTON && fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
+    next = wrapIndex(next - 1, 16) + 1;
   }
   else if (id == SET_VELOCITY) next = constrain(next, 1, 127);
   else if (id == SET_LENGTH) next = constrain(next, 1, 100);
@@ -5720,8 +6060,139 @@ void activateClickAction() {
     return;
   }
   if (ui.menuMode == MENU_EDIT) {
-    if (ui.selectedSetting == SET_MAP_CC && mapCcCursor == MAP_CC_CHMODE_SLOT) {
-      mapCcChannelAll = !mapCcChannelAll;
+    if (ui.selectedSetting == SET_MAP_CC) {
+      if (featuresUiStage == FEATURES_UI_GROUPS) {
+        if (featuresGroupCursor == 0) {
+          featuresUiStage = FEATURES_UI_KNOBS;
+          featuresItemCursor = 0;
+        } else if (featuresGroupCursor == 1) {
+          featuresUiStage = FEATURES_UI_BUTTONS;
+          featuresItemCursor = 0;
+        } else if (featuresGroupCursor == 2) {
+          for (FeatureKnobBinding &binding : featureControls.knobs) {
+            binding = FeatureKnobBinding{};
+          }
+          for (FeatureButtonBinding &binding : featureControls.buttons) {
+            binding = FeatureButtonBinding{};
+          }
+          memset(featureButtonCcHeld, 0, sizeof(featureButtonCcHeld));
+          saveStorage();
+        } else {
+          // Back exits through the common edit completion below.
+          featuresLearnActive = false;
+          ui.menuMode = MENU_SELECT;
+          ui.deferredExitWork = true;
+        }
+      } else {
+        const uint8_t count = featuresUiStage == FEATURES_UI_KNOBS
+            ? static_cast<uint8_t>(FEATURE_KNOB_COUNT)
+            : static_cast<uint8_t>(FEATURE_BUTTON_COUNT);
+        if (featuresItemCursor >= count) {
+          featuresUiStage = FEATURES_UI_GROUPS;
+          featuresGroupCursor = 0;
+          featuresLearnActive = false;
+        } else {
+          featuresLearnActive = !featuresLearnActive;
+        }
+      }
+      encoder.switchIgnoreUntilMs = millis() + 120;
+      ui.dirty = true;
+      markActivity();
+      return;
+    } else if (ui.selectedSetting == SET_CC_MAP) {
+      if (ccRemapUiStage == CC_REMAP_UI_LIST) {
+        if (ccRemapCursor < CC_REMAP_SLOT_COUNT) {
+          ccRemapUiStage = CC_REMAP_UI_INPUT;
+          ccRemapLearnActive = true;
+        } else if (ccRemapCursor == CC_REMAP_SLOT_COUNT) {
+          for (CcRemapEntry &entry : featureControls.ccRemaps) entry = CcRemapEntry{};
+          saveStorage();
+        } else {
+          ui.menuMode = MENU_SELECT;
+          ui.deferredExitWork = true;
+        }
+      } else if (ccRemapUiStage == CC_REMAP_UI_INPUT) {
+        ccRemapLearnActive = false;
+        ccRemapUiStage = CC_REMAP_UI_OUTPUT_CHANNEL;
+      } else if (ccRemapUiStage == CC_REMAP_UI_OUTPUT_CHANNEL) {
+        ccRemapUiStage = CC_REMAP_UI_OUTPUT_CC;
+      } else {
+        ccRemapUiStage = CC_REMAP_UI_LIST;
+        saveStorage();
+      }
+      encoder.switchIgnoreUntilMs = millis() + 120;
+      ui.dirty = true;
+      markActivity();
+      return;
+    } else if (ui.selectedSetting == SET_FOUR_BUTTON) {
+      if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) {
+        if (fourButtonUiCursor == 0) fourButtonUiStage = FOUR_BUTTON_UI_MODE;
+        else if (fourButtonUiCursor == 1) {
+          fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_LIST;
+          fourButtonUiCursor = 0;
+        } else if (fourButtonUiCursor == 2) {
+          fourButtonUiStage = FOUR_BUTTON_UI_LOOPER;
+          fourButtonUiCursor = 0;
+        } else if (fourButtonUiCursor == 3) {
+          fourButtonUiStage = FOUR_BUTTON_UI_CHORD;
+          fourButtonUiCursor = 0;
+        } else {
+          ui.menuMode = MENU_SELECT;
+          ui.deferredExitWork = true;
+        }
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) {
+        fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+        fourButtonUiCursor = 0;
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) {
+        if (fourButtonUiCursor < 4) {
+          fourButtonEditButton = fourButtonUiCursor;
+          fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_CHANNEL;
+        } else {
+          fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+          fourButtonUiCursor = 0;
+        }
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
+        fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_KIND;
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) {
+        fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_NUMBER;
+        fourButtonLearnActive = true;
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
+        fourButtonLearnActive = false;
+        fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_BEHAVIOR;
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_BEHAVIOR) {
+        fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_LIST;
+        fourButtonUiCursor = fourButtonEditButton;
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) {
+        if (fourButtonUiCursor < 5) {
+          static constexpr uint8_t masks[5] = {
+            LOOPER_BUTTON_SELECT, LOOPER_BUTTON_MUTE, LOOPER_BUTTON_SOLO,
+            LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
+          };
+          featureControls.looperButtonActions ^= masks[fourButtonUiCursor];
+        } else {
+          fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+          fourButtonUiCursor = 0;
+        }
+      } else {
+        if (fourButtonUiCursor == 0) {
+          featureControls.fourButtonMode = FOUR_BUTTON_CHORD_MEMORY;
+          chordLearnArmed = true;
+          chordClearArmed = false;
+        } else if (fourButtonUiCursor == 1) {
+          featureControls.fourButtonMode = FOUR_BUTTON_CHORD_MEMORY;
+          chordClearArmed = true;
+          chordLearnArmed = false;
+        } else {
+          chordLearnArmed = false;
+          chordClearArmed = false;
+          fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+          fourButtonUiCursor = 0;
+        }
+      }
+      encoder.switchIgnoreUntilMs = millis() + 120;
+      ui.dirty = true;
+      markActivity();
+      return;
     } else if (ui.selectedSetting == SET_RND_RBN) {
       if (roundRobinMenuCursor < 16) {
         settings.roundRobinMask ^= channelBit(roundRobinMenuCursor + 1);
@@ -5810,6 +6281,21 @@ void activateClickAction() {
     ui.menuMode = MENU_EDIT;
   } else {
     if (ui.selectedSetting == SET_ROUTER) routerEditStage = ROUTER_STAGE_LIST;
+    if (ui.selectedSetting == SET_MAP_CC) {
+      featuresUiStage = FEATURES_UI_GROUPS;
+      featuresGroupCursor = 0;
+      featuresLearnActive = false;
+    }
+    if (ui.selectedSetting == SET_CC_MAP) {
+      ccRemapUiStage = CC_REMAP_UI_LIST;
+      ccRemapCursor = 0;
+      ccRemapLearnActive = false;
+    }
+    if (ui.selectedSetting == SET_FOUR_BUTTON) {
+      fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+      fourButtonUiCursor = 0;
+      fourButtonLearnActive = false;
+    }
     ui.menuMode = MENU_EDIT;
   }
   encoder.switchIgnoreUntilMs = millis() + 120;
@@ -5930,6 +6416,7 @@ bool captureDivNoteAssignment(uint8_t channel1, uint8_t note, bool on) {
   if (divNotesCursor < DIV_NOTE_SLOT_COUNT) {
     settings.divNoteChannels[divNotesCursor] = channel1;
     settings.divNoteNotes[divNotesCursor] = note;
+    featureControls.drumRollKinds[divNotesCursor] = TRIGGER_BINDING_NOTE;
   } else if (divNotesCursor == DIV_NOTE_PLUS_SLOT) {
     settings.divNotePlusNote = note;
   }
@@ -5941,7 +6428,8 @@ bool captureDivNoteAssignment(uint8_t channel1, uint8_t note, bool on) {
 uint8_t handleDivNoteOverride(uint8_t sourcePort, uint8_t channel1, uint8_t &note,
                               uint8_t velocity, bool on) {
   for (uint8_t i = 0; i < DIV_NOTE_SLOT_COUNT; ++i) {
-    if (settings.divNoteChannels[i] == channel1 && settings.divNoteNotes[i] == note) {
+    if (featureControls.drumRollKinds[i] == TRIGGER_BINDING_NOTE &&
+        settings.divNoteChannels[i] == channel1 && settings.divNoteNotes[i] == note) {
       const uint8_t previousDivision = currentDivisionSetting();
       recordLoopNote(sourcePort, channel1, note, velocity, on);
       if (loopOwnsInput(sourcePort)) loopDivNoteHeld[i] = on;
@@ -6044,6 +6532,7 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
     }
   }
   updateBassVoice();
+  finishChordMemoryLearnIfReady();
 }
 
 void handleDinNoteOn(byte channel, byte pitch, byte velocity) {
@@ -6085,9 +6574,374 @@ void captureParameterLockCc(uint8_t channel, uint8_t cc, uint8_t value) {
   }
 }
 
+uint8_t featureBipolarPercent(uint8_t value, bool allowZero) {
+  uint16_t result;
+  if (value <= 64) result = (static_cast<uint16_t>(value) * 100U + 32U) / 64U;
+  else result = 100U + (static_cast<uint16_t>(value - 64U) * 100U + 31U) / 63U;
+  if (!allowZero && result == 0) result = 1;
+  return static_cast<uint8_t>(min<uint16_t>(200, result));
+}
+
+uint8_t featureTargetFromBlock(uint8_t id, uint8_t base) {
+  return id >= base && id < base + LIVE_TARGET_COUNT ? id - base : 0xFF;
+}
+
+void requestStutterState(uint8_t target, bool enabled, int16_t division = -1) {
+  if (target >= LIVE_TARGET_COUNT) return;
+  if (stutterRepeaters[target].active()) deactivateStutter(target);
+  if (division >= 0) {
+    firmware3Settings.liveTargets[target].stutterDivision =
+        clampU8(division, DIV_1_2, DIVISION_COUNT - 1);
+  }
+  firmware3Settings.liveTargets[target].stutterEnabled = enabled ? 1 : 0;
+  stutterTimedOut[target] = false;
+  stutterSettingWasEnabled[target] = false;
+  ui.dirty = true;
+}
+
+void applyFeatureKnob(uint8_t id, uint8_t value) {
+  uint8_t target = featureTargetFromBlock(id, FEATURE_KNOB_VELOCITY_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    LiveTargetSettings &live = firmware3Settings.liveTargets[target];
+    live.velocityPercent = featureBipolarPercent(value, true);
+    live.velocityEnabled = 1;
+    ui.dirty = true;
+    return;
+  }
+  target = featureTargetFromBlock(id, FEATURE_KNOB_NOTE_LENGTH_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    LiveTargetSettings &live = firmware3Settings.liveTargets[target];
+    live.noteLengthPercent = featureBipolarPercent(value, false);
+    live.noteLengthEnabled = 1;
+    ui.dirty = true;
+    return;
+  }
+  target = featureTargetFromBlock(id, FEATURE_KNOB_STUTTER_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    if (value == 0) {
+      requestStutterState(target, false);
+    } else {
+      const uint8_t division = DIV_1_2 + static_cast<uint8_t>(
+          (static_cast<uint16_t>(value - 1U) * (DIVISION_COUNT - 1U - DIV_1_2) + 63U) / 126U);
+      requestStutterState(target, true, division);
+    }
+    return;
+  }
+  target = featureTargetFromBlock(id, FEATURE_KNOB_ECHO_WET_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    firmware3Settings.liveTargets[target].echoWet =
+        static_cast<uint8_t>((static_cast<uint16_t>(value) * 100U + 63U) / 127U);
+    firmware3Settings.liveTargets[target].echoEnabled = 1;
+    ui.dirty = true;
+    return;
+  }
+  target = featureTargetFromBlock(id, FEATURE_KNOB_ECHO_LENGTH_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    firmware3Settings.liveTargets[target].echoLength =
+        static_cast<uint8_t>((static_cast<uint16_t>(value) * (DIVISION_COUNT - 1U) + 63U) / 127U);
+    ui.dirty = true;
+    return;
+  }
+  target = featureTargetFromBlock(id, FEATURE_KNOB_ECHO_DELAY_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    firmware3Settings.liveTargets[target].echoDelay =
+        static_cast<uint8_t>((static_cast<uint16_t>(value) * (DIVISION_COUNT - 1U) + 63U) / 127U);
+    ui.dirty = true;
+    return;
+  }
+  target = featureTargetFromBlock(id, FEATURE_KNOB_ECHO_DRIFT_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    firmware3Settings.liveTargets[target].echoDrift = value <= 64
+        ? -static_cast<int8_t>((static_cast<uint16_t>(64U - value) * 16U + 32U) / 64U)
+        : static_cast<int8_t>((static_cast<uint16_t>(value - 64U) * 16U + 31U) / 63U);
+    ui.dirty = true;
+    return;
+  }
+  if (id == FEATURE_KNOB_ARP_DIVISION) {
+    const uint8_t next = static_cast<uint8_t>(
+        (static_cast<uint16_t>(value) * ARP_DIVISION_FOLLOW_DRUM + 63U) / 127U);
+    setSettingValueRaw(SET_DIVISION, next);
+    syncArpDivisionToGrid();
+  } else if (id == FEATURE_KNOB_DRUM_DIVISION) {
+    firmware3Settings.drumDivision = static_cast<uint8_t>(
+        (static_cast<uint16_t>(value) * DRUM_DIVISION_FREE + 63U) / 127U);
+    if (firmware3Settings.drumDivision == DRUM_DIVISION_FOLLOW_ARP &&
+        settings.division == ARP_DIVISION_FOLLOW_DRUM) settings.division = DIV_1_16;
+    syncArpDivisionToGrid();
+  } else if (id == FEATURE_KNOB_QUICK_JUMP_INPUT) {
+    firmware3Settings.quickJumpInputChannel = 1U +
+        static_cast<uint8_t>((static_cast<uint16_t>(value) * 15U + 63U) / 127U);
+  } else if (id == FEATURE_KNOB_QUICK_JUMP_OUTPUT) {
+    firmware3Settings.quickJumpOutputChannel = 1U +
+        static_cast<uint8_t>((static_cast<uint16_t>(value) * 15U + 63U) / 127U);
+  }
+  ui.dirty = true;
+}
+
+void featureLoopClearUndo() {
+  const uint8_t selected = multitrackLooper.selectedTrack();
+  if (multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers) {
+    bool hidden = false;
+    for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+      hidden |= multitrackLooper.track(track).hidden;
+    }
+    for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+      if (hidden) multitrackLooper.undoClear(track);
+      else multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
+    }
+  } else if (multitrackLooper.track(selected).hidden) {
+    multitrackLooper.undoClear(selected);
+  } else {
+    multitrackLooper.safeClear(selected, releaseMultitrackOutput, nullptr);
+  }
+  loopStorageDirty = true;
+  syncLegacyLoopStatusFromMultitrack();
+  ui.dirty = true;
+}
+
+void triggerFeatureButton(uint8_t id, bool pressed) {
+  uint8_t target = featureTargetFromBlock(id, FEATURE_BUTTON_VELOCITY_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    if (pressed) firmware3Settings.liveTargets[target].velocityEnabled ^= 1U;
+    ui.dirty = true;
+    return;
+  }
+  target = featureTargetFromBlock(id, FEATURE_BUTTON_NOTE_LENGTH_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    if (pressed) firmware3Settings.liveTargets[target].noteLengthEnabled ^= 1U;
+    ui.dirty = true;
+    return;
+  }
+  target = featureTargetFromBlock(id, FEATURE_BUTTON_STUTTER_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    requestStutterState(target, pressed);
+    return;
+  }
+  target = featureTargetFromBlock(id, FEATURE_BUTTON_ECHO_BASE);
+  if (target < LIVE_TARGET_COUNT) {
+    if (pressed) firmware3Settings.liveTargets[target].echoEnabled ^= 1U;
+    ui.dirty = true;
+    return;
+  }
+  if (id >= FEATURE_BUTTON_STUTTER_DIV_BASE && id < FEATURE_BUTTON_COUNT) {
+    static constexpr uint8_t divisions[STUTTER_BUTTON_DIVISION_COUNT] = {
+      DIV_1_2, DIV_1_4, DIV_1_8, DIV_1_16, DIV_1_32, DIV_1_64
+    };
+    const uint8_t offset = id - FEATURE_BUTTON_STUTTER_DIV_BASE;
+    target = offset / STUTTER_BUTTON_DIVISION_COUNT;
+    const uint8_t division = divisions[offset % STUTTER_BUTTON_DIVISION_COUNT];
+    requestStutterState(target, pressed, pressed ? division : -1);
+    return;
+  }
+  if (!pressed) return;
+  if (id == FEATURE_BUTTON_LOOP_RECORD) {
+    if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
+      loopStorageDirty |= multitrackLooper.finishRecording(time_us_64());
+    } else {
+      const uint8_t track = multitrackLooper.selectedTrack();
+      armSelectedMultitrack(multitrackLooper.track(track).count > 0);
+    }
+  } else if (id == FEATURE_BUTTON_LOOP_PLAY_STOP) {
+    if (multitrackLooper.playing()) multitrackLooper.stop(releaseMultitrackOutput, nullptr);
+    else multitrackLooper.start(time_us_64());
+  } else if (id == FEATURE_BUTTON_LOOP_CLEAR_UNDO) {
+    featureLoopClearUndo();
+  } else if (id == FEATURE_BUTTON_LOOP_COMBO) {
+    handleMultitrackRecPlay();
+  } else if (id >= FEATURE_BUTTON_TRACK_SELECT_BASE &&
+             id < FEATURE_BUTTON_TRACK_SELECT_BASE + arpnmidi3::kLoopTrackCount) {
+    multitrackLooper.selectTrack(id - FEATURE_BUTTON_TRACK_SELECT_BASE);
+  } else if (id >= FEATURE_BUTTON_TRACK_MUTE_BASE &&
+             id < FEATURE_BUTTON_TRACK_MUTE_BASE + arpnmidi3::kLoopTrackCount) {
+    const uint8_t track = id - FEATURE_BUTTON_TRACK_MUTE_BASE;
+    multitrackLooper.setMuted(track, !multitrackLooper.track(track).muted,
+                              releaseMultitrackOutput, nullptr);
+    loopStorageDirty = true;
+  } else if (id >= FEATURE_BUTTON_TRACK_SOLO_BASE &&
+             id < FEATURE_BUTTON_TRACK_SOLO_BASE + arpnmidi3::kLoopTrackCount) {
+    const uint8_t selected = id - FEATURE_BUTTON_TRACK_SOLO_BASE;
+    const bool enable = !multitrackLooper.track(selected).solo;
+    for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+      multitrackLooper.setSolo(track, enable && track == selected,
+                               releaseMultitrackOutput, nullptr);
+    }
+    loopStorageDirty = true;
+  } else if (id == FEATURE_BUTTON_QUICK_JUMP) {
+    firmware3Settings.quickJumpEnabled ^= 1U;
+  }
+  syncLegacyLoopStatusFromMultitrack();
+  ui.dirty = true;
+}
+
+bool processFeatureCc(uint8_t channel, uint8_t cc, uint8_t value) {
+  bool matched = false;
+  for (uint8_t id = 0; id < FEATURE_KNOB_COUNT; ++id) {
+    const FeatureKnobBinding &binding = featureControls.knobs[id];
+    if (binding.channel == channel && binding.cc == cc) {
+      applyFeatureKnob(id, value);
+      matched = true;
+    }
+  }
+  for (uint8_t id = 0; id < FEATURE_BUTTON_COUNT; ++id) {
+    const FeatureButtonBinding &binding = featureControls.buttons[id];
+    if (binding.kind != TRIGGER_BINDING_CC || binding.channel != channel ||
+        binding.number != cc) continue;
+    const bool pressed = value >= 64;
+    if (featureButtonCcHeld[id] != pressed) {
+      featureButtonCcHeld[id] = pressed;
+      triggerFeatureButton(id, pressed);
+    }
+    matched = true;
+  }
+  return matched;
+}
+
+bool processDrumRollCc(uint8_t sourcePort, uint8_t channel, uint8_t cc,
+                       uint8_t value) {
+  bool matched = false;
+  bool recordedControl = false;
+  const bool pressed = value >= 64;
+  for (uint8_t slot = 0; slot < DIV_NOTE_SLOT_COUNT; ++slot) {
+    if (featureControls.drumRollKinds[slot] != TRIGGER_BINDING_CC ||
+        settings.divNoteChannels[slot] != channel ||
+        settings.divNoteNotes[slot] != cc) continue;
+    if (!recordedControl && !loopOwnsInput(sourcePort) &&
+        !firmware3Settings.looperRecordCc && multitrackLooper.recording()) {
+      const arpnmidi3::LoopMidiEvent event{0,
+          static_cast<uint8_t>(0xB0 | ((channel - 1U) & 0x0F)), cc, value};
+      loopStorageDirty |= multitrackLooper.capture(time_us_64(), event);
+      recordedControl = true;
+    }
+    const uint8_t previousDivision = currentDivisionSetting();
+    if (loopOwnsInput(sourcePort)) loopDivNoteHeld[slot] = pressed;
+    else physicalDivNoteHeld[slot] = pressed;
+    divNoteHeld[slot] = physicalDivNoteHeld[slot] || loopDivNoteHeld[slot];
+    if (pressed) divNoteHeldStamp[slot] = ++divNotePressCounter;
+    if (currentDivisionSetting() != previousDivision) syncArpDivisionToGrid();
+    matched = true;
+  }
+  if (matched) {
+    markActivity(false);
+    ui.dirty = true;
+  }
+  return matched;
+}
+
+bool captureDrumRollCcAssignment(uint8_t channel, uint8_t cc) {
+  if (ui.selectedSetting != SET_DIV_NOTES || ui.menuMode != MENU_EDIT ||
+      divNotesCursor >= DIV_NOTE_SLOT_COUNT) return false;
+  settings.divNoteChannels[divNotesCursor] = channel;
+  settings.divNoteNotes[divNotesCursor] = cc;
+  featureControls.drumRollKinds[divNotesCursor] = TRIGGER_BINDING_CC;
+  markActivity(false);
+  ui.dirty = true;
+  return true;
+}
+
+bool captureFeatureCcAssignment(uint8_t channel, uint8_t cc) {
+  if (ui.selectedSetting != SET_MAP_CC || ui.menuMode != MENU_EDIT ||
+      !featuresLearnActive) return false;
+  if (featuresUiStage == FEATURES_UI_KNOBS && featuresItemCursor < FEATURE_KNOB_COUNT) {
+    featureControls.knobs[featuresItemCursor] = FeatureKnobBinding{channel, cc};
+  } else if (featuresUiStage == FEATURES_UI_BUTTONS &&
+             featuresItemCursor < FEATURE_BUTTON_COUNT) {
+    featureControls.buttons[featuresItemCursor] =
+        FeatureButtonBinding{channel, cc, TRIGGER_BINDING_CC};
+  } else {
+    return false;
+  }
+  featuresLearnActive = false;
+  markActivity(false);
+  ui.dirty = true;
+  return true;
+}
+
+bool captureFourButtonCcAssignment(uint8_t channel, uint8_t cc) {
+  if (ui.selectedSetting != SET_FOUR_BUTTON || ui.menuMode != MENU_EDIT ||
+      fourButtonUiStage != FOUR_BUTTON_UI_CUSTOM_NUMBER || !fourButtonLearnActive ||
+      fourButtonEditButton >= 4) return false;
+  CustomButtonConfig &button = featureControls.customButtons[fourButtonEditButton];
+  button.channel = channel;
+  button.number = cc;
+  button.kind = TRIGGER_BINDING_CC;
+  fourButtonLearnActive = false;
+  ui.dirty = true;
+  markActivity(false);
+  return true;
+}
+
+bool captureFeatureNoteAssignment(uint8_t channel, uint8_t note, bool pressed) {
+  if (!pressed || ui.selectedSetting != SET_MAP_CC || ui.menuMode != MENU_EDIT ||
+      !featuresLearnActive || featuresUiStage != FEATURES_UI_BUTTONS ||
+      featuresItemCursor >= FEATURE_BUTTON_COUNT) return false;
+  featureControls.buttons[featuresItemCursor] =
+      FeatureButtonBinding{channel, note, TRIGGER_BINDING_NOTE};
+  featuresLearnActive = false;
+  markActivity(false);
+  ui.dirty = true;
+  return true;
+}
+
+bool captureFourButtonNoteAssignment(uint8_t channel, uint8_t note, bool pressed) {
+  if (!pressed || ui.selectedSetting != SET_FOUR_BUTTON || ui.menuMode != MENU_EDIT ||
+      fourButtonUiStage != FOUR_BUTTON_UI_CUSTOM_NUMBER || !fourButtonLearnActive ||
+      fourButtonEditButton >= 4) return false;
+  CustomButtonConfig &button = featureControls.customButtons[fourButtonEditButton];
+  button.channel = channel;
+  button.number = note;
+  button.kind = TRIGGER_BINDING_NOTE;
+  fourButtonLearnActive = false;
+  ui.dirty = true;
+  markActivity(false);
+  return true;
+}
+
+bool captureCcRemapInput(uint8_t channel, uint8_t cc) {
+  if (ui.selectedSetting != SET_CC_MAP || ui.menuMode != MENU_EDIT ||
+      ccRemapUiStage != CC_REMAP_UI_INPUT || !ccRemapLearnActive ||
+      ccRemapCursor >= CC_REMAP_SLOT_COUNT || channel != settings.inputChannel) return false;
+  featureControls.ccRemaps[ccRemapCursor].inputCc = cc;
+  ccRemapLearnActive = false;
+  markActivity(false);
+  ui.dirty = true;
+  return true;
+}
+
+bool processFeatureNote(uint8_t channel, uint8_t note, bool pressed) {
+  bool matched = false;
+  for (uint8_t id = 0; id < FEATURE_BUTTON_COUNT; ++id) {
+    const FeatureButtonBinding &binding = featureControls.buttons[id];
+    if (binding.kind == TRIGGER_BINDING_NOTE && binding.channel == channel &&
+        binding.number == note) {
+      triggerFeatureButton(id, pressed);
+      matched = true;
+    }
+  }
+  return matched;
+}
+
+bool applyCcRemap(uint8_t sourcePort, uint8_t channel, uint8_t cc, uint8_t value) {
+  if (channel != settings.inputChannel) return false;
+  bool matched = false;
+  for (const CcRemapEntry &entry : featureControls.ccRemaps) {
+    if (entry.inputCc != cc) continue;
+    sendFanout(sourcePort, static_cast<uint8_t>(0xB0 | (entry.outputChannel - 1U)),
+               entry.outputCc, value);
+    matched = true;
+  }
+  return matched;
+}
+
 void routeControlChange(uint8_t sourcePort, byte channel, byte control, byte value) {
+  if (captureFourButtonCcAssignment(channel, control)) return;
+  if (captureFeatureCcAssignment(channel, control)) return;
+  if (captureCcRemapInput(channel, control)) return;
+  if (captureDrumRollCcAssignment(channel, control)) return;
   recordLoopCc(sourcePort, channel, control, value);
   captureParameterLockCc(channel, control, value);
+  if (processDrumRollCc(sourcePort, channel, control, value)) return;
+  if (processFeatureCc(channel, control, value)) return;
+  if (applyCcRemap(sourcePort, channel, control, value)) return;
   if (captureMapCcAssignment(channel, control)) return;
   applyMappedCcAssignments(channel, control, value);
   if (control != 0 && control != 32) markActivity(false);
@@ -6193,6 +7047,12 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
     channel = firmware3Settings.quickJumpOutputChannel;
     status = type | ((channel - 1) & 0x0F);
   }
+  if ((type == 0x90 || type == 0x80) &&
+      captureFourButtonNoteAssignment(channel, data1, type == 0x90 && data2 > 0)) return;
+  if ((type == 0x90 || type == 0x80) &&
+      captureFeatureNoteAssignment(channel, data1, type == 0x90 && data2 > 0)) return;
+  if ((type == 0x90 || type == 0x80) &&
+      processFeatureNote(channel, data1, type == 0x90 && data2 > 0)) return;
   if (type == 0x90) {
     if (channel == settings.inputChannel) {
       captureCustomArpNote(data1, data2, data2 > 0, time_us_64());
@@ -6475,45 +7335,160 @@ void triggerRemoteAction(uint8_t action, ButtonPulse &pulse) {
   }
 }
 
-ButtonPulse button1Pulse;
-ButtonPulse button2Pulse;
-bool button1State = false;
-bool button2State = false;
-uint32_t button1ChangeMs = 0;
-uint32_t button2ChangeMs = 0;
+constexpr uint8_t kButtonPins[4] = {
+  PIN_BUTTON_1, PIN_BUTTON_2, PIN_BUTTON_3, PIN_BUTTON_4
+};
 
-void tickButtonPulse(ButtonPulse &pulse) {
-  if (!pulse.active || millis() < pulse.offAtMs) return;
-  const uint8_t ch = settings.remoteChannel;
-  if (pulse.isCc) sendFanout(254, 0xB0 | ((ch - 1) & 0x0F), pulse.number, 0);
-  else sendFanout(254, 0x80 | ((ch - 1) & 0x0F), pulse.number, 0);
-  pulse.active = false;
+void sendCustomButtonValue(uint8_t button, bool on, uint8_t ccValue = 127) {
+  if (button >= 4) return;
+  const CustomButtonConfig &config = featureControls.customButtons[button];
+  if (config.kind == TRIGGER_BINDING_CC) {
+    sendFanout(254, static_cast<uint8_t>(0xB0 | (config.channel - 1U)),
+               config.number, on ? ccValue : 0);
+  } else {
+    sendFanout(254, static_cast<uint8_t>((on ? 0x90 : 0x80) | (config.channel - 1U)),
+               config.number, on ? 127 : 0);
+  }
+}
+
+void handleCustomButton(uint8_t button, bool pressed) {
+  const CustomButtonConfig &config = featureControls.customButtons[button];
+  if (config.behavior == CUSTOM_BUTTON_LATCH) {
+    if (!pressed) return;
+    customButtonLatch[button] = !customButtonLatch[button];
+    sendCustomButtonValue(button, customButtonLatch[button]);
+  } else if (config.behavior == CUSTOM_BUTTON_FLAPPY &&
+             config.kind == TRIGGER_BINDING_CC) {
+    customButtonFlappyMs[button] = millis();
+  } else {
+    sendCustomButtonValue(button, pressed);
+  }
+}
+
+void handleLooperButton(uint8_t button) {
+  const uint8_t actions = featureControls.looperButtonActions;
+  if (actions & LOOPER_BUTTON_SELECT) multitrackLooper.selectTrack(button);
+  if (actions & LOOPER_BUTTON_MUTE) {
+    multitrackLooper.setMuted(button, !multitrackLooper.track(button).muted,
+                              releaseMultitrackOutput, nullptr);
+  }
+  if (actions & LOOPER_BUTTON_SOLO) {
+    const bool enable = !multitrackLooper.track(button).solo;
+    for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+      multitrackLooper.setSolo(track, enable && track == button,
+                               releaseMultitrackOutput, nullptr);
+    }
+  }
+  const bool deleteAction = (actions & LOOPER_BUTTON_DELETE) != 0;
+  const bool undoAction = (actions & LOOPER_BUTTON_UNDO) != 0;
+  if (deleteAction && undoAction) {
+    if (multitrackLooper.track(button).hidden) multitrackLooper.undoClear(button);
+    else multitrackLooper.safeClear(button, releaseMultitrackOutput, nullptr);
+  } else if (deleteAction) {
+    multitrackLooper.safeClear(button, releaseMultitrackOutput, nullptr);
+  } else if (undoAction) {
+    multitrackLooper.undoClear(button);
+  }
+  loopStorageDirty = true;
+  syncLegacyLoopStatusFromMultitrack();
+  ui.dirty = true;
+}
+
+void sendChordMemorySlot(uint8_t slot, bool on) {
+  if (slot >= 4) return;
+  ChordMemorySlot &chord = featureControls.chordMemories[slot];
+  for (uint8_t i = 0; i < chord.count; ++i) {
+    sendFanout(254, static_cast<uint8_t>((on ? 0x90 : 0x80) |
+        ((chord.channels[i] - 1U) & 0x0F)), chord.notes[i], on ? chord.velocities[i] : 0);
+  }
+  chordButtonPlaying[slot] = on;
+}
+
+void handleChordMemoryButton(uint8_t button, bool pressed) {
+  if (pressed && chordClearArmed) {
+    if (chordButtonPlaying[button]) sendChordMemorySlot(button, false);
+    featureControls.chordMemories[button] = ChordMemorySlot{};
+    chordClearArmed = false;
+    chordMemoryDirty = true;
+    ui.dirty = true;
+    return;
+  }
+  if (pressed && chordLearnArmed) {
+    if (chordButtonPlaying[button]) sendChordMemorySlot(button, false);
+    featureControls.chordMemories[button] = ChordMemorySlot{};
+    chordLearnSlot = button;
+    chordLearnActive = true;
+    chordLearnArmed = false;
+    ui.dirty = true;
+    return;
+  }
+  sendChordMemorySlot(button, pressed);
+}
+
+void captureChordMemoryOutput(uint8_t sourcePort, uint8_t channel,
+                              uint8_t note, uint8_t velocity) {
+  if (!chordLearnActive || loopOwnsInput(sourcePort) || generatedLiveEffectSource(sourcePort) ||
+      chordLearnSlot >= 4 || !channelEnabled(channel)) return;
+  ChordMemorySlot &chord = featureControls.chordMemories[chordLearnSlot];
+  for (uint8_t i = 0; i < chord.count; ++i) {
+    if (chord.channels[i] == channel && chord.notes[i] == note) {
+      chord.velocities[i] = max<uint8_t>(1, velocity);
+      return;
+    }
+  }
+  if (chord.count >= 16) return;
+  const uint8_t index = chord.count++;
+  chord.channels[index] = channel;
+  chord.notes[index] = note;
+  chord.velocities[index] = max<uint8_t>(1, velocity);
+  chordMemoryDirty = true;
+}
+
+void finishChordMemoryLearnIfReady() {
+  if (!chordLearnActive || anyPhysicalInputNotesHeld()) return;
+  chordLearnActive = false;
+  chordMemoryDirty = true;
+  ui.dirty = true;
+}
+
+void tickFlappyButtons() {
+  const uint32_t now = millis();
+  for (uint8_t button = 0; button < 4; ++button) {
+    const CustomButtonConfig &config = featureControls.customButtons[button];
+    if (featureControls.fourButtonMode != FOUR_BUTTON_CUSTOM ||
+        config.behavior != CUSTOM_BUTTON_FLAPPY || config.kind != TRIGGER_BINDING_CC ||
+        now - customButtonFlappyMs[button] < 12) continue;
+    customButtonFlappyMs[button] = now;
+    const uint8_t previous = customButtonFlappyValue[button];
+    if (physicalButtonState[button]) {
+      customButtonFlappyValue[button] = min<uint8_t>(127, previous + 4U);
+    } else {
+      customButtonFlappyValue[button] = previous > 2U ? previous - 2U : 0;
+    }
+    if (customButtonFlappyValue[button] != previous) {
+      sendCustomButtonValue(button, true, customButtonFlappyValue[button]);
+    }
+  }
 }
 
 void pollButtons() {
   const uint32_t now = millis();
-  const bool b1 = digitalRead(PIN_BUTTON_1);
-  const bool b2 = digitalRead(PIN_BUTTON_2);
-
-  if (b1 != button1State && (now - button1ChangeMs) > BUTTON_DEBOUNCE_MS) {
-    button1ChangeMs = now;
-    button1State = b1;
-    if (b1) {
-      markActivity(false);
-      triggerRemoteAction(settings.remote1Action, button1Pulse);
+  for (uint8_t button = 0; button < 4; ++button) {
+    const bool pressed = digitalRead(kButtonPins[button]);
+    if (pressed == physicalButtonState[button] ||
+        now - physicalButtonChangeMs[button] <= BUTTON_DEBOUNCE_MS) continue;
+    physicalButtonChangeMs[button] = now;
+    physicalButtonState[button] = pressed;
+    markActivity(false);
+    if (featureControls.fourButtonMode == FOUR_BUTTON_CUSTOM) {
+      handleCustomButton(button, pressed);
+    } else if (featureControls.fourButtonMode == FOUR_BUTTON_LOOPER) {
+      if (pressed) handleLooperButton(button);
+    } else {
+      handleChordMemoryButton(button, pressed);
     }
   }
-  if (b2 != button2State && (now - button2ChangeMs) > BUTTON_DEBOUNCE_MS) {
-    button2ChangeMs = now;
-    button2State = b2;
-    if (b2) {
-      markActivity(false);
-      triggerRemoteAction(settings.remote2Action, button2Pulse);
-    }
-  }
-
-  tickButtonPulse(button1Pulse);
-  tickButtonPulse(button2Pulse);
+  tickFlappyButtons();
 }
 
 void applyArpFreezeSnapshot(bool plusMode) {
@@ -6879,9 +7854,11 @@ String settingValueString(uint8_t id) {
       if (v == DIV_NOTE_BACK_SLOT) return "BACK";
       return kDivisionNames[divNoteSlotToDivision(v)];
     case SET_MAP_CC:
-      if (v == MAP_CC_CLEAR_SLOT) return "CLEAR";
-      if (v == MAP_CC_CHMODE_SLOT) return mapCcChannelAll ? "CH:ALL" : "CH:SET";
-      return kMapCcParamNames[v];
+      return "FEATURES";
+    case SET_CC_MAP:
+      return "CC MAP";
+    case SET_FOUR_BUTTON:
+      return "4BUTTON";
     case SET_LEGATO_CH: return midiChannelLabel(v, true);
     case SET_CC_OUT_CH: return ccChannelLabel(v);
     case SET_REMOTE_CH: return midiChannelLabel(v);
@@ -7361,7 +8338,7 @@ void drawLoopBarsScreen(uint8_t value) {
 void drawDivNotesScreen(uint8_t cursor) {
   display.setTextSize(2);
   display.setCursor(0, 0);
-  display.print(F("DIV NOTES"));
+  display.print(F("DRUM ROLL"));
   if (cursor == DIV_NOTE_PLUS_SLOT) {
     display.setTextSize(2);
     display.setCursor(0, 18);
@@ -7398,8 +8375,14 @@ void drawDivNotesScreen(uint8_t cursor) {
   display.setCursor(0, 38);
   const uint8_t mapCh = settings.divNoteChannels[cursor];
   const uint8_t mapNote = settings.divNoteNotes[cursor];
-  if (mapCh == 0 || mapNote == 0xFF) {
-    display.print(F("LEARN NOTE"));
+  const uint8_t bindingKind = featureControls.drumRollKinds[cursor];
+  if (bindingKind == TRIGGER_BINDING_OFF || mapCh == 0 || mapNote == 0xFF) {
+    display.print(F("LEARN NOTE/CC"));
+  } else if (bindingKind == TRIGGER_BINDING_CC) {
+    display.print(F("CH "));
+    display.print(mapCh);
+    display.print(F(" CC "));
+    display.print(mapNote);
   } else {
     display.print(F("CH "));
     display.print(mapCh);
@@ -7408,6 +8391,226 @@ void drawDivNotesScreen(uint8_t cursor) {
     display.print(mapNote / 12);
     display.print(F(" "));
     display.print(mapNote);
+  }
+}
+
+String liveTargetName(uint8_t target) {
+  return target == 0 ? String("MAIN") : String("LOOP ") + String(target);
+}
+
+String featureKnobName(uint8_t id) {
+  struct BlockName { uint8_t base; const char *name; };
+  static const BlockName blocks[] = {
+    {FEATURE_KNOB_VELOCITY_BASE, "VELOCITY"},
+    {FEATURE_KNOB_NOTE_LENGTH_BASE, "NOTE LENGTH"},
+    {FEATURE_KNOB_STUTTER_BASE, "STUTTER"},
+    {FEATURE_KNOB_ECHO_WET_BASE, "ECHO WET"},
+    {FEATURE_KNOB_ECHO_LENGTH_BASE, "ECHO LENGTH"},
+    {FEATURE_KNOB_ECHO_DELAY_BASE, "ECHO DELAY"},
+    {FEATURE_KNOB_ECHO_DRIFT_BASE, "ECHO DRIFT"}
+  };
+  for (const BlockName &block : blocks) {
+    if (id >= block.base && id < block.base + LIVE_TARGET_COUNT) {
+      return liveTargetName(id - block.base) + " " + block.name;
+    }
+  }
+  if (id == FEATURE_KNOB_ARP_DIVISION) return "ARP DIVISION";
+  if (id == FEATURE_KNOB_DRUM_DIVISION) return "DRUM DIVISION";
+  if (id == FEATURE_KNOB_QUICK_JUMP_INPUT) return "QJ INPUT CH";
+  if (id == FEATURE_KNOB_QUICK_JUMP_OUTPUT) return "QJ OUTPUT CH";
+  return "KNOB";
+}
+
+String featureButtonName(uint8_t id) {
+  uint8_t target = featureTargetFromBlock(id, FEATURE_BUTTON_VELOCITY_BASE);
+  if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " VELOCITY";
+  target = featureTargetFromBlock(id, FEATURE_BUTTON_NOTE_LENGTH_BASE);
+  if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " NOTE LENGTH";
+  target = featureTargetFromBlock(id, FEATURE_BUTTON_STUTTER_BASE);
+  if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " STUTTER";
+  target = featureTargetFromBlock(id, FEATURE_BUTTON_ECHO_BASE);
+  if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " ECHO";
+  if (id == FEATURE_BUTTON_LOOP_RECORD) return "LOOP RECORD/ARM";
+  if (id == FEATURE_BUTTON_LOOP_PLAY_STOP) return "LOOP PLAY/STOP";
+  if (id == FEATURE_BUTTON_LOOP_CLEAR_UNDO) return "LOOP CLEAR/UNDO";
+  if (id == FEATURE_BUTTON_LOOP_COMBO) return "LOOP COMBO";
+  if (id >= FEATURE_BUTTON_TRACK_SELECT_BASE &&
+      id < FEATURE_BUTTON_TRACK_SELECT_BASE + arpnmidi3::kLoopTrackCount) {
+    return String("SELECT TRACK ") + String(id - FEATURE_BUTTON_TRACK_SELECT_BASE + 1U);
+  }
+  if (id >= FEATURE_BUTTON_TRACK_MUTE_BASE &&
+      id < FEATURE_BUTTON_TRACK_MUTE_BASE + arpnmidi3::kLoopTrackCount) {
+    return String("MUTE TRACK ") + String(id - FEATURE_BUTTON_TRACK_MUTE_BASE + 1U);
+  }
+  if (id >= FEATURE_BUTTON_TRACK_SOLO_BASE &&
+      id < FEATURE_BUTTON_TRACK_SOLO_BASE + arpnmidi3::kLoopTrackCount) {
+    return String("SOLO TRACK ") + String(id - FEATURE_BUTTON_TRACK_SOLO_BASE + 1U);
+  }
+  if (id == FEATURE_BUTTON_QUICK_JUMP) return "QUICK JUMP";
+  if (id >= FEATURE_BUTTON_STUTTER_DIV_BASE && id < FEATURE_BUTTON_COUNT) {
+    static const char *const divisions[STUTTER_BUTTON_DIVISION_COUNT] = {
+      "1/2", "1/4", "1/8", "1/16", "1/32", "1/64"
+    };
+    const uint8_t offset = id - FEATURE_BUTTON_STUTTER_DIV_BASE;
+    return liveTargetName(offset / STUTTER_BUTTON_DIVISION_COUNT) + " STUT " +
+        divisions[offset % STUTTER_BUTTON_DIVISION_COUNT];
+  }
+  return "BUTTON";
+}
+
+void drawFeaturesScreen() {
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(F("FEATURES"));
+  if (featuresUiStage == FEATURES_UI_GROUPS) {
+    static const char *const groups[] = {"CC KNOBS", "CC BUTTONS", "CLEAR", "BACK"};
+    display.setTextSize(featuresGroupCursor < 2 ? 2 : 3);
+    display.setCursor(0, 20);
+    display.print(groups[featuresGroupCursor]);
+    return;
+  }
+  const uint8_t count = featuresUiStage == FEATURES_UI_KNOBS
+      ? static_cast<uint8_t>(FEATURE_KNOB_COUNT)
+      : static_cast<uint8_t>(FEATURE_BUTTON_COUNT);
+  if (featuresItemCursor >= count) {
+    display.setTextSize(3);
+    display.setCursor(0, 20);
+    display.print(F("BACK"));
+    return;
+  }
+  const String name = featuresUiStage == FEATURES_UI_KNOBS
+      ? featureKnobName(featuresItemCursor) : featureButtonName(featuresItemCursor);
+  display.setTextSize(1);
+  display.setCursor(0, 18);
+  display.println(name);
+  display.setCursor(0, 31);
+  if (featuresLearnActive) {
+    display.print(featuresUiStage == FEATURES_UI_KNOBS ? F("MOVE A CC") : F("MOVE CC / PLAY NOTE"));
+    return;
+  }
+  if (featuresUiStage == FEATURES_UI_KNOBS) {
+    const FeatureKnobBinding &binding = featureControls.knobs[featuresItemCursor];
+    if (binding.channel == 0 || binding.cc > 127) display.print(F("UNMAPPED (PUSH)"));
+    else {
+      display.print(F("CH ")); display.print(binding.channel);
+      display.print(F(" CC ")); display.print(binding.cc);
+    }
+  } else {
+    const FeatureButtonBinding &binding = featureControls.buttons[featuresItemCursor];
+    if (binding.kind == TRIGGER_BINDING_OFF || binding.channel == 0) {
+      display.print(F("UNMAPPED (PUSH)"));
+    } else {
+      display.print(F("CH ")); display.print(binding.channel);
+      display.print(binding.kind == TRIGGER_BINDING_CC ? F(" CC ") : F(" NOTE "));
+      display.print(binding.number);
+    }
+  }
+}
+
+void drawCcRemapScreen() {
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(F("CC MAP"));
+  if (ccRemapUiStage == CC_REMAP_UI_LIST) {
+    if (ccRemapCursor == CC_REMAP_SLOT_COUNT) {
+      display.setTextSize(3); display.setCursor(0, 20); display.print(F("CLEAR")); return;
+    }
+    if (ccRemapCursor > CC_REMAP_SLOT_COUNT) {
+      display.setTextSize(3); display.setCursor(0, 20); display.print(F("BACK")); return;
+    }
+    const CcRemapEntry &entry = featureControls.ccRemaps[ccRemapCursor];
+    display.setTextSize(1); display.setCursor(0, 18);
+    display.print(F("SLOT ")); display.print(ccRemapCursor + 1U);
+    display.setCursor(0, 31);
+    if (entry.inputCc > 127) display.print(F("UNMAPPED"));
+    else {
+      display.print(F("CC ")); display.print(entry.inputCc);
+      display.print(F(" > CH ")); display.print(entry.outputChannel);
+      display.print(F(" CC ")); display.print(entry.outputCc);
+    }
+    return;
+  }
+  const CcRemapEntry &entry = featureControls.ccRemaps[ccRemapCursor];
+  display.setTextSize(1); display.setCursor(0, 20);
+  if (ccRemapUiStage == CC_REMAP_UI_INPUT) {
+    display.print(F("INPUT CC: "));
+    if (entry.inputCc > 127) display.print(F("OFF")); else display.print(entry.inputCc);
+    display.setCursor(0, 34);
+    display.print(ccRemapLearnActive ? F("MOVE MAIN CC") : F("TURN OR PUSH"));
+  } else if (ccRemapUiStage == CC_REMAP_UI_OUTPUT_CHANNEL) {
+    display.print(F("OUTPUT CH: ")); display.print(entry.outputChannel);
+  } else {
+    display.print(F("OUTPUT CC: ")); display.print(entry.outputCc);
+  }
+}
+
+void drawFourButtonScreen() {
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(F("4BUTTON"));
+  display.setTextSize(1);
+  display.setCursor(0, 20);
+  if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) {
+    static const char *const items[] = {"MODE", "CUSTOM", "LOOPER", "CHORD MEMORY", "BACK"};
+    display.setTextSize(2);
+    display.print(items[fourButtonUiCursor]);
+    return;
+  }
+  if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) {
+    static const char *const modes[] = {"CUSTOM", "LOOPER", "CHORD MEMORY"};
+    display.print(F("MODE"));
+    display.setTextSize(2); display.setCursor(0, 31);
+    display.print(modes[featureControls.fourButtonMode]);
+    return;
+  }
+  if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) {
+    if (fourButtonUiCursor >= 4) {
+      display.setTextSize(3); display.print(F("BACK"));
+    } else {
+      display.setTextSize(2); display.print(F("BUTTON ")); display.print(fourButtonUiCursor + 1U);
+    }
+    return;
+  }
+  if (fourButtonUiStage >= FOUR_BUTTON_UI_CUSTOM_CHANNEL &&
+      fourButtonUiStage <= FOUR_BUTTON_UI_CUSTOM_BEHAVIOR) {
+    const CustomButtonConfig &button = featureControls.customButtons[fourButtonEditButton];
+    display.print(F("BUTTON ")); display.print(fourButtonEditButton + 1U); display.print(F("  "));
+    if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
+      display.print(F("CHANNEL")); display.setCursor(0, 34); display.setTextSize(2); display.print(button.channel);
+    } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) {
+      display.print(F("TYPE")); display.setCursor(0, 34); display.setTextSize(2);
+      display.print(button.kind == TRIGGER_BINDING_CC ? F("CC") : F("NOTE"));
+    } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
+      display.print(button.kind == TRIGGER_BINDING_CC ? F("CC NUMBER") : F("NOTE NUMBER"));
+      display.setCursor(0, 34);
+      if (fourButtonLearnActive) display.print(F("MOVE/PLAY TO LEARN"));
+      else { display.setTextSize(2); display.print(button.number); }
+    } else {
+      static const char *const behaviors[] = {"MOMENTARY", "LATCH", "FLAPPY BIRD"};
+      display.print(F("BEHAVIOR")); display.setCursor(0, 34); display.setTextSize(2);
+      display.print(behaviors[button.behavior]);
+    }
+    return;
+  }
+  if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) {
+    static const char *const names[] = {"SELECT TRACK", "MUTE", "SOLO", "DELETE", "UNDO", "BACK"};
+    static constexpr uint8_t masks[] = {
+      LOOPER_BUTTON_SELECT, LOOPER_BUTTON_MUTE, LOOPER_BUTTON_SOLO,
+      LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
+    };
+    display.setTextSize(2); display.print(names[fourButtonUiCursor]);
+    if (fourButtonUiCursor < 5) {
+      display.setTextSize(1); display.setCursor(0, 39);
+      display.print((featureControls.looperButtonActions & masks[fourButtonUiCursor])
+          ? F("ON") : F("OFF"));
+    }
+    return;
+  }
+  static const char *const chordItems[] = {"LEARN", "CLEAR", "BACK"};
+  display.setTextSize(2); display.print(chordItems[fourButtonUiCursor]);
+  if ((chordLearnArmed && fourButtonUiCursor == 0) ||
+      (chordClearArmed && fourButtonUiCursor == 1)) {
+    display.setTextSize(1); display.setCursor(0, 39); display.print(F("PRESS BUTTON 1-4"));
   }
 }
 
@@ -7524,7 +8727,10 @@ void renderMainTop() {
       drawDivNotesScreen(v);
       break;
     case SET_MAP_CC:
-      drawMapCcScreen(v);
+      drawFeaturesScreen();
+      break;
+    case SET_CC_MAP:
+      drawCcRemapScreen();
       break;
     case SET_LEGATO_CH:
       drawChannelScreen(F("MONO RETRIG"), v, true);
@@ -7534,6 +8740,9 @@ void renderMainTop() {
       break;
     case SET_REMOTE_CH:
       drawChannelScreen(F("REMOTE"), v);
+      break;
+    case SET_FOUR_BUTTON:
+      drawFourButtonScreen();
       break;
     case SET_SENSOR_CH:
       drawChannelScreen(F("SENSORS"), v);
@@ -7648,6 +8857,7 @@ void processDeferredUiActions() {
       for (uint8_t i = 0; i < DIV_NOTE_SLOT_COUNT; ++i) {
         settings.divNoteChannels[i] = 0;
         settings.divNoteNotes[i] = 0xFF;
+        featureControls.drumRollKinds[i] = TRIGGER_BINDING_OFF;
         divNoteHeld[i] = false;
         physicalDivNoteHeld[i] = false;
         loopDivNoteHeld[i] = false;
@@ -7655,10 +8865,6 @@ void processDeferredUiActions() {
       }
       settings.divNotePlusNote = 0xFF;
       divNotePressCounter = 0;
-      ui.dirty = true;
-    }
-    if (ui.selectedSetting == SET_MAP_CC && mapCcCursor == MAP_CC_CLEAR_SLOT) {
-      clearMapCcMappings();
       ui.dirty = true;
     }
     if (ui.selectedSetting == SET_ROUTER) {
@@ -7796,11 +9002,14 @@ void setupPins() {
   pinMode(PIN_ENC_SW, INPUT_PULLUP);
   pinMode(PIN_BUTTON_1, INPUT_PULLDOWN);
   pinMode(PIN_BUTTON_2, INPUT_PULLDOWN);
+  pinMode(PIN_BUTTON_3, INPUT_PULLDOWN);
+  pinMode(PIN_BUTTON_4, INPUT_PULLDOWN);
   pinMode(PIN_PUSH, INPUT);
   encoder.lastAB = (digitalRead(PIN_ENC_A) << 1) | digitalRead(PIN_ENC_B);
   encoder.lastSwitch = digitalRead(PIN_ENC_SW);
-  button1State = digitalRead(PIN_BUTTON_1);
-  button2State = digitalRead(PIN_BUTTON_2);
+  for (uint8_t button = 0; button < 4; ++button) {
+    physicalButtonState[button] = digitalRead(kButtonPins[button]);
+  }
 #if ARPNMIDI_ENABLE_RGB_LED
   onboardRgb.begin();
   onboardRgb.setBrightness(80);
@@ -7894,4 +9103,5 @@ void loop() {
   processDeferredUiActions();
   pollUiScreenPersistence();
   pollLoopStoragePersistence();
+  pollChordMemoryPersistence();
 }
