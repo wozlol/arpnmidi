@@ -294,11 +294,11 @@ enum SettingId : uint8_t {
   SET_INPUT_CH,
   SET_ARP_OUT_CH,
   SET_DRUM_MAGIC,
+  SET_DIV_NOTES,
   SET_BASS_CH,
   SET_THRU_OUT_CH,
   SET_RND_RBN,
   SET_ROUTER,
-  SET_DIV_NOTES,
   SET_MAP_CC,
   SET_CC_MAP,
   SET_NOTE_CC,
@@ -1108,8 +1108,8 @@ const int8_t kEncoderTransitionTable[16] = {
 
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 SWING", "3 ARP", "4 VELOCITY", "5 NOTELENGT", "6 STUTTER", "7 ECHO",
-  "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 ARP OUT", "11 DRUM MAGIC",
-  "12 BASS", "13 THRU OUT", "14 RNDRBN", "15 ROUTER", "16 DRUM ROLL", "17 FEATURES",
+  "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 ARP OUT", "11 DRUM ROLL",
+  "12 DRUMDIV", "13 BASS", "14 THRU OUT", "15 RNDRBN", "16 ROUTER", "17 FEATURES",
   "18 CC MAP", "19 NOTE>CC", "20 IN CC >", "21 MONO RETRIG", "22 SCRNSVR",
   "23 EYE/PUSH", "24 EYE MODE", "25 PUSH", "26 4BUTTON", "27 LOOPER",
   "28 MUTE/SOLO", "29 PARAM LOCK", "30 CHORD", "31 KEY", "32 SCALE",
@@ -7328,7 +7328,7 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
       index = echoUi.cursor; label = names[index]; return true;
     }
     case SET_QUICK_JUMP: {
-      static const char *const names[] = {"INPUT CH", "OUTPUT CH", "ON/OFF", "HOLD", "BACK"};
+      static const char *const names[] = {"INPUT", "OUTPUT", "ON/OFF", "HOLD", "BACK"};
       index = quickJumpUi.cursor; label = names[index]; return true;
     }
     case SET_BASS_CH: {
@@ -7337,7 +7337,7 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
     }
     case SET_DRUM_MAGIC: {
       static const char *const names[] = {
-        "ON/OFF", "INPUT", "OUTPUT CH", "SPLIT START", "MAP START", "AT>VEL", "DIVISION", "BACK"
+        "ON/OFF", "INPUT", "OUTPUT", "SPLIT", "MAP START", "AT>VEL", "DIVISION", "BACK"
       };
       index = drumMagicUi.cursor; label = names[index]; return true;
     }
@@ -7984,7 +7984,7 @@ String featureButtonName(uint8_t id) {
   }
   if (id == FEATURE_BUTTON_ARP_RETRIGGER) return "ARP RETRIGGER SYNC";
   if (id == FEATURE_BUTTON_ARP_NOTE_ORDER) return "ARP AS-PLAYED";
-  if (id == FEATURE_BUTTON_DRUM_MAGIC) return "DRUM MAGIC";
+  if (id == FEATURE_BUTTON_DRUM_MAGIC) return "DRUMROLL";
   if (id == FEATURE_BUTTON_DRUM_AFTERTOUCH_VELOCITY) return "DRUM AT>VELOCITY";
   if (id == FEATURE_BUTTON_CHORD) return "CHORD";
   if (id == FEATURE_BUTTON_LOOP_AUTO_REC) return "LOOP AUTO REC";
@@ -8342,7 +8342,7 @@ void drawEchoScreen() {
 }
 
 void drawQuickJumpScreen() {
-  static const char *const names[] = {"INPUT CH", "OUTPUT CH", "ON/OFF", "HOLD", "BACK"};
+  static const char *const names[] = {"INPUT", "OUTPUT", "ON/OFF", "HOLD", "BACK"};
   if (ui.menuMode == MENU_SELECT) {
     drawSubmenuField("", firmware3Settings.quickJumpEnabled
         ? String(firmware3Settings.quickJumpInputChannel) + " > " + String(firmware3Settings.quickJumpOutputChannel)
@@ -8454,7 +8454,7 @@ void drawPanicScreen() {
 
 void drawDrumMagicScreen() {
   static const char *const names[] = {
-    "ON/OFF", "INPUT", "OUTPUT CH", "SPLIT START", "MAP START",
+    "ON/OFF", "INPUT", "OUTPUT", "SPLIT", "MAP START",
     "AT>VEL", "DIVISION", "BACK"
   };
   String division;
@@ -8468,7 +8468,8 @@ void drawDrumMagicScreen() {
   }
   String value;
   if (drumMagicUi.cursor == 0) value = onOff(firmware3Settings.drumEnabled);
-  else if (drumMagicUi.cursor == 1) value = firmware3Settings.drumInputMode ? "KEY SPLIT" : "CHANNEL 10";
+  else if (drumMagicUi.cursor == 1) value = firmware3Settings.drumInputMode
+      ? "KEY SPLIT" : "CH 10";
   else if (drumMagicUi.cursor == 2) value = String("CH ") + String(firmware3Settings.drumOutputChannel);
   else if (drumMagicUi.cursor == 3) value = String(firmware3Settings.drumSplitNote);
   else if (drumMagicUi.cursor == 4) value = String(firmware3Settings.drumMappedStart);
