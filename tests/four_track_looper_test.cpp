@@ -40,13 +40,22 @@ int main() {
   assert(looper.track(0).lengthUs == 1000000);
 
   looper.start(2000000);
+  looper.setMuted(0, true, release, &probe);
+  looper.tick(2100000, emit, release, &probe);
+  assert(probe.emitted == 0);
+  looper.setMuted(0, false, release, &probe);
+  looper.tick(2100001, emit, release, &probe);
+  assert(probe.emitted == 0);  // unmuting does not replay stale events
+  looper.stop(release, &probe);
+  looper.start(2000000);
   looper.tick(2000000, emit, release, &probe);
   assert(probe.emitted == 1 && probe.last.status == 0x90);
   looper.tick(2500100, emit, release, &probe);
   assert(probe.emitted == 2 && probe.last.status == 0x80);
 
+  const uint16_t releasesBeforeMute = probe.released;
   looper.setMuted(0, true, release, &probe);
-  assert(probe.released == 1);
+  assert(probe.released == releasesBeforeMute + 1);
   looper.setMuted(0, false, release, &probe);
   looper.safeClear(0, release, &probe);
   assert(!looper.hasAnyData());
@@ -68,6 +77,78 @@ int main() {
   assert(looper.finishRecording(4000000));
   assert(looper.track(1).count == 2);  // boundary Note Off is synthesized
   assert(looper.usedEvents() == 4);
+
+  // A fixed-length take closes and starts playback at its boundary without a
+  // UI action. Any still-held note is repaired with a boundary Note Off.
+  looper.armRecord(2, 250000, false);
+  assert(looper.capture(5000000, LoopMidiEvent{0, 0x90, 69, 100}));
+  looper.tick(5250000, emit, release, &probe);
+  assert(!looper.recording());
+  assert(looper.playing());
+  assert(looper.track(2).lengthUs == 250000);
+  assert(looper.track(2).count == 2);
+
+  // Ending an overdub closes its held note at the current loop phase, not at
+  // the far end of the loop.
+  looper.armRecord(2, 250000, true);
+  assert(looper.capture(5300000, LoopMidiEvent{0, 0x90, 72, 100}));
+  assert(looper.finishRecording(5350000));
+  bool foundPhaseNoteOff = false;
+  struct VisitContext {
+    bool *found;
+  } visitContext{&foundPhaseNoteOff};
+  assert(looper.visitEvents([](void *context, uint8_t track, const LoopMidiEvent &event) {
+    auto &visit = *static_cast<VisitContext *>(context);
+    if (track == 2 && event.status == 0x80 && event.data1 == 72 && event.atUs == 100000) {
+      *visit.found = true;
+    }
+    return true;
+  }, &visitContext));
+  assert(foundPhaseNoteOff);
+
+  // Extending repeats the entire stored take. Shrinking changes only the
+  // playback window, so extending again restores the already-built copies.
+  FourTrackLooper resizeLooper;
+  Probe resizeProbe;
+  resizeLooper.armRecord(0, 250000, false);
+  assert(resizeLooper.capture(1000000, LoopMidiEvent{0, 0x90, 60, 100}));
+  assert(resizeLooper.capture(1100000, LoopMidiEvent{0, 0xB0, 74, 80}));
+  assert(resizeLooper.capture(1125000, LoopMidiEvent{0, 0x80, 60, 0}));
+  assert(resizeLooper.finishRecording(1250000));
+  assert(resizeLooper.track(0).count == 3);
+  assert(resizeLooper.track(0).storedLengthUs == 250000);
+  assert(resizeLooper.resizeTrack(0, 500000, 1300000, release, &resizeProbe));
+  assert(resizeLooper.track(0).count == 6);
+  assert(resizeLooper.track(0).lengthUs == 500000);
+  assert(resizeLooper.track(0).storedLengthUs == 500000);
+  assert(resizeLooper.resizeTrack(0, 250000, 1400000, release, &resizeProbe));
+  assert(resizeLooper.track(0).count == 6);
+  assert(resizeLooper.track(0).storedLengthUs == 500000);
+  assert(resizeLooper.resizeTrack(0, 500000, 1500000, release, &resizeProbe));
+  assert(resizeLooper.track(0).count == 6);  // preserved copy, no duplicate copy
+  assert(resizeLooper.resizeTrack(0, 1000000, 1600000, release, &resizeProbe));
+  assert(resizeLooper.track(0).count == 12);
+
+  bool foundCopiedCc = false;
+  VisitContext copiedCcContext{&foundCopiedCc};
+  assert(resizeLooper.visitEvents([](void *context, uint8_t track,
+                                     const LoopMidiEvent &event) {
+    auto &visit = *static_cast<VisitContext *>(context);
+    if (track == 0 && event.status == 0xB0 && event.data1 == 74 &&
+        event.data2 == 80 && event.atUs == 350000) {
+      *visit.found = true;
+    }
+    return true;
+  }, &copiedCcContext));
+  assert(foundCopiedCc);
+
+  // A replacement take clears both the sounding window and retained copies.
+  resizeLooper.armRecord(0, 250000, false);
+  assert(resizeLooper.capture(2000000, LoopMidiEvent{0, 0x90, 67, 100}));
+  assert(resizeLooper.capture(2100000, LoopMidiEvent{0, 0x80, 67, 0}));
+  assert(resizeLooper.finishRecording(2250000));
+  assert(resizeLooper.track(0).count == 2);
+  assert(resizeLooper.track(0).storedLengthUs == 250000);
 
   looper.clearAll(release, &probe);
   assert(looper.usedEvents() == 0);

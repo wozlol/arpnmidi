@@ -113,7 +113,7 @@ bool FourTrackLooper::capture(uint64_t nowUs, const LoopMidiEvent &input) {
   LoopTrackState &track = tracks_[recordingTrack_];
   uint32_t atUs = 0;
   if (overdubbing_ && playing_ && track.lengthUs > 0) {
-    atUs = static_cast<uint32_t>((nowUs - transportStartUs_) % track.lengthUs);
+    atUs = static_cast<uint32_t>((nowUs - track.cycleStartUs) % track.lengthUs);
   } else {
     const uint64_t elapsed = nowUs - recordStartUs_;
     if (recordFixedLengthUs_ > 0 && elapsed >= recordFixedLengthUs_) return false;
@@ -159,9 +159,18 @@ bool FourTrackLooper::finishRecording(uint64_t nowUs) {
     const uint64_t elapsed = nowUs - recordStartUs_;
     track.lengthUs = recordFixedLengthUs_ ? recordFixedLengthUs_ :
         static_cast<uint32_t>(elapsed > UINT32_MAX ? UINT32_MAX : elapsed);
+    if (playing_) {
+      track.cycleStartUs = nowUs;
+      track.playCursor = track.head;
+    }
   }
   if (track.lengthUs == 0) track.lengthUs = 1;
-  closeHeldRecordingNotes(track.lengthUs - 1U);
+  if (!overdubbing_) track.storedLengthUs = track.lengthUs;
+  uint32_t closeAtUs = track.lengthUs - 1U;
+  if (overdubbing_ && playing_) {
+    closeAtUs = static_cast<uint32_t>((nowUs - track.cycleStartUs) % track.lengthUs);
+  }
+  closeHeldRecordingNotes(closeAtUs);
   recording_ = false;
   overdubbing_ = false;
   memset(recordHeld_, 0, sizeof(recordHeld_));
@@ -197,6 +206,70 @@ void FourTrackLooper::stop(ReleaseFn release, void *context) {
   for (LoopTrackState &track : tracks_) track.playCursor = track.head;
 }
 
+bool FourTrackLooper::resizeTrack(uint8_t trackIndex, uint32_t lengthUs,
+                                  uint64_t nowUs, ReleaseFn release,
+                                  void *context) {
+  if (trackIndex >= kLoopTrackCount || lengthUs == 0) return false;
+  if ((recording_ || recordingArmed_) && recordingTrack_ == trackIndex) return false;
+  LoopTrackState &track = tracks_[trackIndex];
+  if (track.count == 0 || track.lengthUs == 0) return true;
+
+  const uint32_t storedLength = track.storedLengthUs > 0
+      ? track.storedLengthUs : track.lengthUs;
+  if (lengthUs > storedLength) {
+    uint32_t required = 0;
+    for (uint64_t offset = storedLength; offset < lengthUs; offset += storedLength) {
+      uint16_t slot = track.head;
+      for (uint16_t visited = 0; visited < track.count && slot != kNoLoopEvent;
+           ++visited, slot = slots_[slot].next) {
+        if (static_cast<uint64_t>(slots_[slot].event.atUs) + offset < lengthUs) {
+          ++required;
+        }
+      }
+    }
+    if (required > freeEvents()) {
+      ++overflowCount_;
+      return false;
+    }
+
+    const uint16_t sourceCount = track.count;
+    for (uint64_t offset = storedLength; offset < lengthUs; offset += storedLength) {
+      uint16_t slot = track.head;
+      for (uint16_t visited = 0; visited < sourceCount && slot != kNoLoopEvent;
+           ++visited) {
+        const uint16_t next = slots_[slot].next;
+        LoopMidiEvent copy = slots_[slot].event;
+        const uint64_t copyTime = static_cast<uint64_t>(copy.atUs) + offset;
+        if (copyTime < lengthUs) {
+          copy.atUs = static_cast<uint32_t>(copyTime);
+          if (!insertEvent(trackIndex, copy)) return false;
+        }
+        slot = next;
+      }
+    }
+    track.storedLengthUs = lengthUs;
+  }
+
+  const bool wasAudible = playing_ && audible(trackIndex);
+  const uint32_t oldLengthUs = track.lengthUs;
+  track.lengthUs = lengthUs;
+  if (playing_) {
+    uint64_t positionUs = oldLengthUs > 0
+        ? (nowUs - track.cycleStartUs) % oldLengthUs : 0;
+    positionUs %= lengthUs;
+    if (wasAudible && release) release(context, trackIndex);
+    track.cycleStartUs = nowUs - positionUs;
+    track.playCursor = track.head;
+    while (track.playCursor != kNoLoopEvent &&
+           slots_[track.playCursor].event.atUs <= positionUs) {
+      track.playCursor = slots_[track.playCursor].next;
+    }
+  } else {
+    track.playCursor = track.head;
+  }
+  return true;
+}
+
 bool FourTrackLooper::audible(uint8_t trackIndex) const {
   if (trackIndex >= kLoopTrackCount) return false;
   bool anySolo = false;
@@ -213,7 +286,7 @@ void FourTrackLooper::tick(uint64_t nowUs, EmitFn emit, ReleaseFn release,
     if (!playing_) start(recordStartUs_ + recordFixedLengthUs_);
   }
   if (!playing_) return;
-  uint16_t emitted = 0;
+  uint16_t processed = 0;
   for (uint8_t trackIndex = 0; trackIndex < kLoopTrackCount; ++trackIndex) {
     LoopTrackState &track = tracks_[trackIndex];
     if (track.count == 0 || track.lengthUs == 0) continue;
@@ -223,16 +296,16 @@ void FourTrackLooper::tick(uint64_t nowUs, EmitFn emit, ReleaseFn release,
       track.cycleStartUs += cycles * track.lengthUs;
       track.playCursor = track.head;
     }
-    if (!audible(trackIndex)) continue;
+    const bool canEmit = audible(trackIndex);
     const uint32_t elapsed = static_cast<uint32_t>(nowUs - track.cycleStartUs);
-    while (track.playCursor != kNoLoopEvent && emitted < maxEvents) {
+    while (track.playCursor != kNoLoopEvent && processed < maxEvents) {
       const EventSlot &slot = slots_[track.playCursor];
       if (slot.event.atUs > elapsed) break;
-      if (emit) emit(context, trackIndex, slot.event);
+      if (canEmit && emit) emit(context, trackIndex, slot.event);
       track.playCursor = slot.next;
-      ++emitted;
+      ++processed;
     }
-    if (emitted >= maxEvents) break;
+    if (processed >= maxEvents) break;
   }
 }
 
@@ -323,10 +396,13 @@ bool FourTrackLooper::restoreEvent(uint8_t track, const LoopMidiEvent &event) {
 }
 
 void FourTrackLooper::setRestoredTrackState(uint8_t track, uint32_t lengthUs,
+                                            uint32_t storedLengthUs,
                                             uint32_t generation, bool muted,
                                             bool solo, bool hidden) {
   if (track >= kLoopTrackCount) return;
   tracks_[track].lengthUs = lengthUs;
+  tracks_[track].storedLengthUs = storedLengthUs >= lengthUs
+      ? storedLengthUs : lengthUs;
   tracks_[track].generation = generation;
   tracks_[track].muted = muted;
   tracks_[track].solo = solo;
@@ -342,6 +418,7 @@ void FourTrackLooper::beginImport(uint8_t track, uint32_t lengthUs,
   permanentlyClear(track);
   selectedTrack_ = track;
   tracks_[track].lengthUs = lengthUs;
+  tracks_[track].storedLengthUs = lengthUs;
   tracks_[track].generation = ++generationCounter_;
   importing_[track] = true;
 }

@@ -27,6 +27,7 @@ struct LoopTrackState {
   uint16_t playCursor = kNoLoopEvent;
   uint16_t count = 0;
   uint32_t lengthUs = 0;
+  uint32_t storedLengthUs = 0;
   uint32_t generation = 0;
   uint64_t cycleStartUs = 0;
   bool muted = false;
@@ -60,6 +61,8 @@ class FourTrackLooper {
 
   void start(uint64_t nowUs);
   void stop(ReleaseFn release, void *context);
+  bool resizeTrack(uint8_t track, uint32_t lengthUs, uint64_t nowUs,
+                   ReleaseFn release, void *context);
   void tick(uint64_t nowUs, EmitFn emit, ReleaseFn release, void *context,
             uint16_t maxEvents = 96);
   bool playing() const { return playing_; }
@@ -80,7 +83,8 @@ class FourTrackLooper {
   uint8_t oldestPopulatedTrack() const;
   bool visitEvents(VisitFn visitor, void *context) const;
   bool restoreEvent(uint8_t track, const LoopMidiEvent &event);
-  void setRestoredTrackState(uint8_t track, uint32_t lengthUs, uint32_t generation,
+  void setRestoredTrackState(uint8_t track, uint32_t lengthUs,
+                             uint32_t storedLengthUs, uint32_t generation,
                              bool muted, bool solo, bool hidden);
   void beginImport(uint8_t track, uint32_t lengthUs, ReleaseFn release, void *context);
   bool importEvent(uint8_t track, const LoopMidiEvent &event);
