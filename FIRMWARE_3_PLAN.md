@@ -242,6 +242,14 @@ Velocity ranges from 0 through 200 percent with 100 percent neutral. Note Length
 ranges from 1 through 200 percent with 100 percent neutral. A continuous MIDI CC
 value of approximately 64 selects neutral.
 
+Velocity and Note Length are applied after the looper record point. Shortening a
+live note is necessarily predictive because its future physical Note Off is not
+known yet: the engine uses the last observed duration for that target, channel,
+and note, with the current master division as the first-note fallback. It learns
+the real duration when the Note Off arrives. Lengthening is exact because the
+known Note Off can be delayed. The scheduler is fixed-size, and changing or
+disabling the effect closes its owned notes.
+
 ### Stutter
 
 - Works as a note-safe beat-repeat/loop-slicer effect.
@@ -252,6 +260,9 @@ value of approximately 64 selects neutral.
   to a fixed number of measures. After timeout, the controlling CC must move
   again before stutter can reactivate.
 - Stutter and Time Travel may share the rolling capture infrastructure.
+- Stutter snapshots the post-routing, post-Velocity/Note-Length stream for its
+  target. The underlying target is suppressed while the frozen slice repeats;
+  generated repeats are not fed back into history or the looper.
 
 ### Echo
 
@@ -267,7 +278,9 @@ Echo Length uses musical durations. Drift zero keeps constant spacing. Positive
 Drift accelerates and negative Drift slows. Its magnitude is the number of
 repeats over which spacing reaches half or double the initial Delay. Spacing
 changes exponentially to create a bouncing-marble effect. Echo occurs after the
-looper record point so generated repeats are not printed into the loop.
+looper and Stutter, so generated repeats are not printed into the loop. Wet sets
+the first repeat level and the remaining repeats fade across Length. All queues,
+repeat counts, and per-tick work are bounded.
 
 ## Features and CC Map
 

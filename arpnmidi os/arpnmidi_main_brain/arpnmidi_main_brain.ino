@@ -43,7 +43,9 @@
 #include <Fonts/FreeSans9pt7b.h>
 #include <VL53L0X.h>
 #include "src/clock_engine.h"
+#include "src/echo_engine.h"
 #include "src/four_track_looper.h"
+#include "src/note_length_engine.h"
 #include "src/rolling_history.h"
 
 #ifndef ARPNMIDI_ENABLE_USB_DEVICE_MIDI
@@ -151,6 +153,8 @@ constexpr uint32_t MAP_CC_UI_SETTLE_MS = 260UL;
 constexpr uint32_t MAP_CC_DEFER_COMMIT_MS = 500UL;
 constexpr uint8_t LOOP_SOURCE_PORT = 251;
 constexpr uint8_t LOOP_TRACK_SOURCE_BASE = 240;
+constexpr uint8_t STUTTER_SOURCE_BASE = 224;
+constexpr uint8_t HISTORY_OUTPUT_TARGET_BASE = 16;
 constexpr uint32_t LOOP_STOP_DELETE_DEBOUNCE_MS = 300;
 constexpr uint32_t LOOP_REC_PLAY_DOUBLE_SWIPE_MS = 1000UL;
 constexpr uint32_t ARP_KEY_SYNC_CAPTURE_MS = 6UL;
@@ -220,6 +224,13 @@ void releaseMultitrackOutput(void *context, uint8_t track);
 void emitMultitrackEvent(void *context, uint8_t track, const arpnmidi3::LoopMidiEvent &event);
 void syncLegacyLoopStatusFromMultitrack();
 void tickTimeTravelImport();
+void emitEchoEvent(void *context, uint8_t target, const arpnmidi3::LoopMidiEvent &event);
+void emitStutterEvent(void *context, uint8_t historyTarget,
+                      const arpnmidi3::LoopMidiEvent &event);
+void emitNoteLengthEvent(void *context, uint8_t target, uint8_t sourcePort,
+                         const arpnmidi3::LoopMidiEvent &event);
+void deactivateStutter(uint8_t target);
+uint8_t currentDivisionSetting();
 
 enum MenuMode : uint8_t {
   MENU_SELECT = 0,
@@ -1064,7 +1075,17 @@ uint8_t customArpPlayIndex = 0;
 bool littleFsReady = false;
 arpnmidi3::FourTrackLooper multitrackLooper;
 arpnmidi3::RollingHistory rollingHistory;
+arpnmidi3::EchoEngine echoEngine;
+arpnmidi3::NoteLengthEngine noteLengthEngine;
+arpnmidi3::HistoryRepeater stutterRepeaters[LIVE_TARGET_COUNT];
 TimeTravelImportJob timeTravelImport;
+uint8_t finalOutputNoteRefs[LIVE_TARGET_COUNT][16][128];
+bool stutterSettingWasEnabled[LIVE_TARGET_COUNT];
+bool stutterTimedOut[LIVE_TARGET_COUNT];
+bool noteLengthSettingWasEnabled[LIVE_TARGET_COUNT];
+bool echoSettingWasEnabled[LIVE_TARGET_COUNT];
+uint8_t activeStutterDivision[LIVE_TARGET_COUNT];
+uint64_t stutterStopUs[LIVE_TARGET_COUNT];
 uint8_t multitrackPlaybackHeld[arpnmidi3::kLoopTrackCount][16][16];
 bool loopStorageDirty = false;
 bool loopStorageError = false;
@@ -2165,6 +2186,124 @@ void sendDinPitchBend(uint8_t channel1, int bend) {
   DinMIDI.sendPitchBend(bend, channel1);
 }
 
+uint8_t liveTargetForSource(uint8_t sourcePort) {
+  if (sourcePort >= LOOP_TRACK_SOURCE_BASE &&
+      sourcePort < LOOP_TRACK_SOURCE_BASE + arpnmidi3::kLoopTrackCount) {
+    return sourcePort - LOOP_TRACK_SOURCE_BASE + 1U;
+  }
+  if (sourcePort >= STUTTER_SOURCE_BASE && sourcePort < STUTTER_SOURCE_BASE + LIVE_TARGET_COUNT) {
+    return sourcePort - STUTTER_SOURCE_BASE;
+  }
+  return 0;
+}
+
+bool generatedLiveEffectSource(uint8_t sourcePort) {
+  return sourcePort >= STUTTER_SOURCE_BASE && sourcePort < STUTTER_SOURCE_BASE + LIVE_TARGET_COUNT;
+}
+
+void sendFinalMidi(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
+  const uint8_t type = status & 0xF0;
+  const uint8_t ch1 = (status & 0x0F) + 1;
+  if (type == 0x90) {
+    if (data2 == 0) sendDinNoteOff(ch1, data1, 0);
+    else sendDinNoteOn(ch1, data1, data2);
+  } else if (type == 0x80) {
+    sendDinNoteOff(ch1, data1, data2);
+  } else if (type == 0xB0) {
+    sendDinCc(ch1, data1, data2);
+  } else if (type == 0xC0) {
+    DinMIDI.sendProgramChange(data1, ch1);
+  } else if (type == 0xD0) {
+    DinMIDI.sendAfterTouch(data1, ch1);
+  } else if (type == 0xA0) {
+    sendDinRaw2(status, data1);
+    DinSerial.write(data2);
+  } else if (type == 0xE0) {
+    const int bend = static_cast<int>(data1) | (static_cast<int>(data2) << 7);
+    sendDinPitchBend(ch1, bend - 8192);
+  } else if (status >= 0xF8) {
+    sendDinRaw1(status);
+  }
+  sendMidiToUsbDevice(sourcePort, status, data1, data2);
+}
+
+void sendTargetFinal(uint8_t target, uint8_t sourcePort,
+                     uint8_t status, uint8_t data1, uint8_t data2) {
+  if (target >= LIVE_TARGET_COUNT) return;
+  const uint8_t type = status & 0xF0;
+  if ((type == 0x90 || type == 0x80) && data1 <= 127) {
+    uint8_t &refs = finalOutputNoteRefs[target][status & 0x0F][data1];
+    const bool on = type == 0x90 && data2 > 0;
+    if (on) {
+      if (refs < 0xFF) ++refs;
+    } else {
+      if (refs == 0) return;
+      --refs;
+      if (refs > 0) return;
+      status = static_cast<uint8_t>(0x80 | (status & 0x0F));
+      data2 = 0;
+    }
+  }
+  sendFinalMidi(sourcePort, status, data1, data2);
+}
+
+void releaseFinalTarget(uint8_t target) {
+  if (target >= LIVE_TARGET_COUNT) return;
+  for (uint8_t channel = 0; channel < 16; ++channel) {
+    for (uint8_t note = 0; note < 128; ++note) {
+      uint8_t &refs = finalOutputNoteRefs[target][channel][note];
+      if (refs == 0) continue;
+      refs = 0;
+      sendFinalMidi(255, static_cast<uint8_t>(0x80 | channel), note, 0);
+    }
+  }
+}
+
+arpnmidi3::EchoConfig echoConfigForTarget(uint8_t target) {
+  const LiveTargetSettings &settings = firmware3Settings.liveTargets[target];
+  arpnmidi3::EchoConfig config;
+  config.lengthUs = static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
+      musicalDurationUs(kDivisionPulseSteps[settings.echoLength])));
+  config.delayUs = static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
+      musicalDurationUs(kDivisionPulseSteps[settings.echoDelay])));
+  config.wetPercent = settings.echoWet;
+  config.drift = settings.echoDrift;
+  return config;
+}
+
+void emitEchoEvent(void *, uint8_t target, const arpnmidi3::LoopMidiEvent &event) {
+  sendTargetFinal(target, 255, event.status, event.data1, event.data2);
+}
+
+void processPostStutterEvent(uint8_t target, uint8_t sourcePort,
+                             const arpnmidi3::LoopMidiEvent &event) {
+  const uint8_t type = event.status & 0xF0;
+  const LiveTargetSettings &targetSettings = firmware3Settings.liveTargets[target];
+  if (targetSettings.echoEnabled && (type == 0x90 || type == 0x80)) {
+    if (type == 0x90 && event.data2 > 0) {
+      echoEngine.noteOn(time_us_64(), target, event.status, event.data1, event.data2,
+                        echoConfigForTarget(target));
+    } else {
+      echoEngine.noteOff(time_us_64(), target, event.status, event.data1);
+    }
+  }
+  sendTargetFinal(target, sourcePort, event.status, event.data1, event.data2);
+}
+
+void emitStutterEvent(void *, uint8_t historyTarget,
+                      const arpnmidi3::LoopMidiEvent &event) {
+  if (historyTarget < HISTORY_OUTPUT_TARGET_BASE) return;
+  const uint8_t target = historyTarget - HISTORY_OUTPUT_TARGET_BASE;
+  if (target < LIVE_TARGET_COUNT) processPostStutterEvent(target, 255, event);
+}
+
+void emitNoteLengthEvent(void *, uint8_t target, uint8_t sourcePort,
+                         const arpnmidi3::LoopMidiEvent &event) {
+  rollingHistory.push(time_us_64(), HISTORY_OUTPUT_TARGET_BASE + target, event);
+  if (stutterRepeaters[target].active()) return;
+  processPostStutterEvent(target, sourcePort, event);
+}
+
 void sendFanout(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
   uint8_t type = status & 0xF0;
   uint8_t ch1 = (status & 0x0F) + 1;
@@ -2187,28 +2326,29 @@ void sendFanout(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2
   }
   if (!applyRouterToChannelMessage(status, data1)) return;
   type = status & 0xF0;
-  ch1 = (status & 0x0F) + 1;
-  if (type == 0x90) {
-    if (data2 == 0) sendDinNoteOff(ch1, data1, 0);
-    else sendDinNoteOn(ch1, data1, data2);
-  } else if (type == 0x80) {
-    sendDinNoteOff(ch1, data1, data2);
-  } else if (type == 0xB0) {
-    sendDinCc(ch1, data1, data2);
-  } else if (type == 0xC0) {
-    DinMIDI.sendProgramChange(data1, ch1);
-  } else if (type == 0xD0) {
-    DinMIDI.sendAfterTouch(data1, ch1);
-  } else if (type == 0xA0) {
-    sendDinRaw2(status, data1);
-    DinSerial.write(data2);
-  } else if (type == 0xE0) {
-    int bend = static_cast<int>(data1) | (static_cast<int>(data2) << 7);
-    sendDinPitchBend(ch1, bend - 8192);
-  } else if (status >= 0xF8) {
-    sendDinRaw1(status);
+  const uint8_t target = liveTargetForSource(sourcePort);
+  const bool generatedEffect = generatedLiveEffectSource(sourcePort);
+  const LiveTargetSettings &targetSettings = firmware3Settings.liveTargets[target];
+  if (!generatedEffect && type == 0x90 && data2 > 0 && targetSettings.velocityEnabled) {
+    const uint16_t scaled = (static_cast<uint16_t>(data2) * targetSettings.velocityPercent + 50U) / 100U;
+    data2 = static_cast<uint8_t>(min<uint16_t>(127, scaled));
+    if (data2 == 0) return;
   }
-  sendMidiToUsbDevice(sourcePort, status, data1, data2);
+  const arpnmidi3::LoopMidiEvent finalEvent{0, status, data1, data2};
+  if (!generatedEffect && type < 0xF0 &&
+      targetSettings.noteLengthEnabled && (type == 0x90 || type == 0x80)) {
+    const uint32_t fallbackUs = static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
+        musicalDurationUs(kDivisionPulseSteps[currentDivisionSetting()])));
+    noteLengthEngine.process(time_us_64(), target, sourcePort, finalEvent,
+                             targetSettings.noteLengthPercent, fallbackUs,
+                             emitNoteLengthEvent, nullptr);
+    return;
+  }
+  if (!generatedEffect && status < 0xF0) {
+    emitNoteLengthEvent(nullptr, target, sourcePort, finalEvent);
+    return;
+  }
+  processPostStutterEvent(target, sourcePort, finalEvent);
 }
 
 void sendAllNoteOffChannel(uint8_t ch1) {
@@ -2322,9 +2462,22 @@ void panicMappedRelevantOnly(uint8_t settingId, int16_t nextValue) {
   pushRt.lastPitch = 0;
   sensorRt.lastCcValue = -1;
   pushRt.lastCcValue = -1;
+  echoEngine.reset(emitEchoEvent, nullptr);
 }
 
 void panicMidiOnly() {
+  for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
+    deactivateStutter(target);
+  }
+  noteLengthEngine.reset(emitNoteLengthEvent, nullptr);
+  echoEngine.reset(emitEchoEvent, nullptr);
+  for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
+    releaseFinalTarget(target);
+  }
+  memset(stutterSettingWasEnabled, 0, sizeof(stutterSettingWasEnabled));
+  memset(stutterTimedOut, 0, sizeof(stutterTimedOut));
+  memset(noteLengthSettingWasEnabled, 0, sizeof(noteLengthSettingWasEnabled));
+  memset(echoSettingWasEnabled, 0, sizeof(echoSettingWasEnabled));
   if (loopPlaying) loopAllOff();
   const uint8_t panicArpCh = mainArpOutChannel();
   if (channelEnabled(panicArpCh)) sendAllNoteOffChannel(panicArpCh);
@@ -4148,6 +4301,83 @@ void tickLooper() {
   if (wasRecording && !multitrackLooper.recording()) {
     loopStorageDirty = true;
     if (multitrackLooper.recordingTrack() == 0) adoptFreeTrackOneTempo();
+  }
+}
+
+void tickEcho() {
+  for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
+    const bool enabled = firmware3Settings.liveTargets[target].echoEnabled != 0;
+    if (!enabled && echoSettingWasEnabled[target]) {
+      echoEngine.stopTarget(target, emitEchoEvent, nullptr);
+    }
+    echoSettingWasEnabled[target] = enabled;
+  }
+  echoEngine.tick(time_us_64(), emitEchoEvent, nullptr);
+}
+
+void tickNoteLength() {
+  for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
+    const bool enabled = firmware3Settings.liveTargets[target].noteLengthEnabled != 0;
+    if (!enabled && noteLengthSettingWasEnabled[target]) {
+      noteLengthEngine.stopTarget(target, emitNoteLengthEvent, nullptr);
+    }
+    noteLengthSettingWasEnabled[target] = enabled;
+  }
+  noteLengthEngine.tick(time_us_64(), emitNoteLengthEvent, nullptr);
+}
+
+uint32_t stutterLengthUs(uint8_t target) {
+  const uint8_t division = clampU8(firmware3Settings.liveTargets[target].stutterDivision,
+                                   DIV_1_2, DIVISION_COUNT - 1);
+  return static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
+      musicalDurationUs(kDivisionPulseSteps[division])));
+}
+
+bool activateStutter(uint8_t target, uint64_t nowUs) {
+  if (target >= LIVE_TARGET_COUNT) return false;
+  const uint32_t lengthUs = stutterLengthUs(target);
+  if (!stutterRepeaters[target].activate(rollingHistory, nowUs, lengthUs,
+                                        HISTORY_OUTPUT_TARGET_BASE + target)) return false;
+  echoEngine.stopTarget(target, emitEchoEvent, nullptr);
+  releaseFinalTarget(target);
+  activeStutterDivision[target] = firmware3Settings.liveTargets[target].stutterDivision;
+  const uint64_t barPulses = static_cast<uint64_t>(MUSICAL_PPQN) *
+      (firmware3Settings.timeSignature ? 3ULL : 4ULL);
+  stutterStopUs[target] = nowUs + musicalDurationUs(barPulses) *
+      firmware3Settings.stutterTimeoutBars;
+  stutterTimedOut[target] = false;
+  return true;
+}
+
+void deactivateStutter(uint8_t target) {
+  if (target >= LIVE_TARGET_COUNT) return;
+  stutterRepeaters[target].deactivate(emitStutterEvent, nullptr);
+}
+
+void tickStutter() {
+  const uint64_t nowUs = time_us_64();
+  for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
+    const bool enabled = firmware3Settings.liveTargets[target].stutterEnabled != 0;
+    if (!enabled) {
+      if (stutterRepeaters[target].active()) deactivateStutter(target);
+      stutterSettingWasEnabled[target] = false;
+      stutterTimedOut[target] = false;
+      continue;
+    }
+    if (!stutterSettingWasEnabled[target]) {
+      if (!stutterTimedOut[target]) activateStutter(target, nowUs);
+      stutterSettingWasEnabled[target] = true;
+    } else if (stutterRepeaters[target].active() &&
+               activeStutterDivision[target] !=
+                   firmware3Settings.liveTargets[target].stutterDivision) {
+      deactivateStutter(target);
+      activateStutter(target, nowUs);
+    }
+    if (stutterRepeaters[target].active() && nowUs >= stutterStopUs[target]) {
+      deactivateStutter(target);
+      stutterTimedOut[target] = true;
+    }
+    stutterRepeaters[target].tick(nowUs, rollingHistory, emitStutterEvent, nullptr);
   }
 }
 
@@ -7656,6 +7886,9 @@ void loop() {
   pollPush();
   tickLooper();
   tickArp();
+  tickNoteLength();
+  tickStutter();
+  tickEcho();
   pollMapCcUiFocus();
   renderDisplayIfNeeded();
   processDeferredUiActions();
