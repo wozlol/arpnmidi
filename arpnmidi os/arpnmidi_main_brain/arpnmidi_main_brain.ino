@@ -125,7 +125,7 @@ constexpr uint8_t MAX_ARP_OUTPUT_NOTES = 8;
 constexpr uint16_t MAX_LOOP_EVENTS = 672;
 constexpr uint8_t LOOP_BOUNDARY_OFF_RESERVE = 64;
 constexpr uint8_t PRESET_COUNT = 16;
-constexpr uint8_t DIV_NOTE_SLOT_COUNT = 9;
+constexpr uint8_t DIV_NOTE_SLOT_COUNT = 15;
 constexpr uint8_t DIV_NOTE_PLUS_SLOT = DIV_NOTE_SLOT_COUNT;
 constexpr uint8_t DIV_NOTE_RESET_SLOT = DIV_NOTE_SLOT_COUNT + 1;
 constexpr uint8_t DIV_NOTE_BACK_SLOT = DIV_NOTE_SLOT_COUNT + 2;
@@ -153,7 +153,7 @@ constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 // Firmware 3 is still prototype firmware, so an incompatible preset-map change deliberately
 // receives a new schema identity instead of carrying migration code. A mismatch installs all
 // factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
-constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF300;
+constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF301;
 constexpr uint16_t LOOP_EEPROM_MAGIC = 0x4C32;
 constexpr size_t EEPROM_BYTES = 4096;
 constexpr uint8_t ARP_CH_1_PLUS_10 = 17;
@@ -313,19 +313,30 @@ enum ArpSelection : uint8_t {
 
 enum DivisionId : uint8_t {
   DIV_1_1 = 0,
+  DIV_1_2D,
   DIV_1_2,
+  DIV_1_4D,
   DIV_1_2T,
   DIV_1_4,
+  DIV_1_8D,
   DIV_1_4T,
   DIV_1_8,
+  DIV_1_16D,
   DIV_1_8T,
   DIV_1_16,
+  DIV_1_32D,
   DIV_1_16T,
   DIV_1_32,
+  DIV_1_64D,
   DIV_1_32T,
   DIV_1_64,
+  DIV_1_64T,
   DIVISION_COUNT
 };
+
+constexpr uint8_t ARP_DIVISION_FOLLOW_DRUM = DIVISION_COUNT;
+constexpr uint8_t DRUM_DIVISION_FOLLOW_ARP = DIVISION_COUNT;
+constexpr uint8_t DRUM_DIVISION_FREE = DIVISION_COUNT + 1;
 
 enum PatternId : uint8_t {
   PAT_MODE = 0,
@@ -464,7 +475,27 @@ struct Firmware3Settings {
   uint8_t timeSignature;
   uint8_t swing;
   uint8_t looperMidiTransport;
-  uint8_t reserved[3];
+  uint8_t arpOctaves;
+  uint8_t arpRetriggerSync;
+  uint8_t arpNoteOrder;
+  uint8_t customArpLength;
+  uint8_t drumEnabled;
+  uint8_t drumInputMode;
+  uint8_t drumOutputChannel;
+  uint8_t drumSplitNote;
+  uint8_t drumMappedStart;
+  uint8_t drumAftertouchVelocity;
+  uint8_t drumDivision;
+  uint8_t quickJumpEnabled;
+  uint8_t quickJumpInputChannel;
+  uint8_t quickJumpOutputChannel;
+  uint8_t bassHighestNote;
+  uint8_t parameterLockChannel;
+  uint8_t chordEnabled;
+  int8_t chordPositions[4];
+  uint16_t userScaleMask;
+  uint8_t routerLowNotes[16];
+  uint8_t routerHighNotes[16];
 };
 
 struct SettingsV8 {
@@ -881,6 +912,8 @@ uint8_t drumAftertouchPressure = 127;
 
 bool heldInputNotes[128];
 uint8_t heldVelocities[128];
+uint32_t heldNoteOrder[128];
+uint32_t heldNoteOrderCounter = 0;
 bool physicalHeldInputNotes[128];
 uint8_t physicalHeldVelocities[128];
 bool loopHeldInputNotes[128];
@@ -932,6 +965,9 @@ uint8_t activeDrumArpCount = 0;
 uint64_t arpNextStepUs = 0;
 uint32_t arpGateOffMs = 0;
 uint64_t arpGridOriginUs = 0;
+uint64_t drumNextStepUs = 0;
+uint32_t drumGateOffMs = 0;
+uint64_t drumGridOriginUs = 0;
 uint32_t arpGlobalStep = 0;
 uint8_t arpPatternStep = 0;
 bool arpHadKeys = false;
@@ -1013,7 +1049,7 @@ const int8_t kEncoderTransitionTable[16] = {
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 ARP MODE", "3 DIVISION", "4 VELOCITY", "5 LENGTH", "",
   "6 INPUT CH", "7 ARP CH", "8 BASS CH", "9 THRU OUT", "10 RNDRBN", "11 ROUTER",
-  "12 DIV NOTE", "13 MAP CC", "14 IN CC >", "15 MONO RETRIG", "16 REMOTE", "17 REMOTE 1",
+  "12 DRUM ROLL", "13 MAP CC", "14 IN CC >", "15 MONO RETRIG", "16 REMOTE", "17 REMOTE 1",
   "18 REMOTE 2", "19 SCRNSVR", "20 EYE/PUSH", "21 EYE MODE", "22 PUSH",
   "23 LOOP", "24 KEY", "25 SCALE", "26 GIT/KEYS", "27 LOAD", "28 SAVE", "29 PANIC"
 };
@@ -1029,18 +1065,21 @@ const char *const kArpSelectionNames[ARP_SELECTION_COUNT] = {
 };
 
 const char *const kDivisionNames[DIVISION_COUNT] = {
-  "1/1", "1/2", "1/2T", "1/4", "1/4T", "1/8", "1/8T",
-  "1/16", "1/16T", "1/32", "1/32T", "1/64"
+  "1/1", "1/2D", "1/2", "1/4D", "1/2T", "1/4", "1/8D",
+  "1/4T", "1/8", "1/16D", "1/8T", "1/16", "1/32D", "1/16T",
+  "1/32", "1/64D", "1/32T", "1/64", "1/64T"
 };
 
 const float kDivisionQuarterSteps[DIVISION_COUNT] = {
-  4.0f, 2.0f, 4.0f / 3.0f, 1.0f, 2.0f / 3.0f, 0.5f, 1.0f / 3.0f,
-  0.25f, 1.0f / 6.0f, 0.125f, 1.0f / 12.0f, 0.0625f
+  4.0f, 3.0f, 2.0f, 1.5f, 4.0f / 3.0f, 1.0f, 0.75f,
+  2.0f / 3.0f, 0.5f, 0.375f, 1.0f / 3.0f, 0.25f, 0.1875f,
+  1.0f / 6.0f, 0.125f, 0.09375f, 1.0f / 12.0f, 0.0625f, 1.0f / 24.0f
 };
 
-constexpr uint16_t MUSICAL_PPQN = 48;
+constexpr uint16_t MUSICAL_PPQN = arpnmidi3::kInternalPpqn;
 const uint16_t kDivisionPulseSteps[DIVISION_COUNT] = {
-  192, 96, 64, 48, 32, 24, 16, 12, 8, 6, 4, 3
+  384, 288, 192, 144, 128, 96, 72, 64, 48, 36,
+  32, 24, 18, 16, 12, 9, 8, 6, 4
 };
 
 const char *const kPatternNames[PATTERN_COUNT] = {
@@ -1252,33 +1291,29 @@ bool applyRouterToChannelMessage(uint8_t &status, uint8_t &data1) {
 }
 
 bool arpChannelSpecialMode() {
-  return settings.arpOutChannel >= ARP_CH_1_PLUS_10;
+  return firmware3Settings.drumEnabled != 0;
 }
 
 bool arpChannelAftertouchMode() {
-  return settings.arpOutChannel == ARP_CH_1_PLUS_10_AFTERTOUCH;
+  return arpChannelSpecialMode() && firmware3Settings.drumAftertouchVelocity != 0;
 }
 
 bool arpChannelSplitMode() {
-  return settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_24 ||
-         settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_36 ||
-         settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_48;
+  return arpChannelSpecialMode() && firmware3Settings.drumInputMode != 0;
 }
 
 uint8_t splitDrumStartNote() {
-  if (settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_24) return 24;
-  if (settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_36) return 36;
-  return 48;
+  return firmware3Settings.drumSplitNote;
 }
 
 uint8_t splitDrumOutputNote(uint8_t note) {
-  if (settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_24) return static_cast<uint8_t>(note + 12);
-  if (settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_48) return static_cast<uint8_t>(note - 12);
-  return note;
+  const int mapped = static_cast<int>(firmware3Settings.drumMappedStart) +
+                     static_cast<int>(note) - splitDrumStartNote();
+  return clampU8(mapped, 0, 127);
 }
 
 uint8_t mainArpOutChannel() {
-  return arpChannelSpecialMode() ? 1 : settings.arpOutChannel;
+  return settings.arpOutChannel;
 }
 
 bool splitDrumInputNote(uint8_t note) {
@@ -1463,7 +1498,14 @@ String ccChannelLabel(uint8_t value) {
 }
 
 uint8_t divNoteSlotToDivision(uint8_t slot) {
-  return DIV_1_4 + slot;
+  static constexpr uint8_t kDrumRollDivisions[DIV_NOTE_SLOT_COUNT] = {
+    DIV_1_4D, DIV_1_4, DIV_1_4T,
+    DIV_1_8D, DIV_1_8, DIV_1_8T,
+    DIV_1_16D, DIV_1_16, DIV_1_16T,
+    DIV_1_32D, DIV_1_32, DIV_1_32T,
+    DIV_1_64D, DIV_1_64, DIV_1_64T
+  };
+  return kDrumRollDivisions[min<uint8_t>(slot, DIV_NOTE_SLOT_COUNT - 1)];
 }
 
 bool isMapCcTargetSetting(uint8_t settingId) {
@@ -2186,6 +2228,8 @@ void panicAll() {
 void resetHeldState() {
   memset(heldInputNotes, 0, sizeof(heldInputNotes));
   memset(heldVelocities, 0, sizeof(heldVelocities));
+  memset(heldNoteOrder, 0, sizeof(heldNoteOrder));
+  heldNoteOrderCounter = 0;
   memset(physicalHeldInputNotes, 0, sizeof(physicalHeldInputNotes));
   memset(physicalHeldVelocities, 0, sizeof(physicalHeldVelocities));
   memset(loopHeldInputNotes, 0, sizeof(loopHeldInputNotes));
@@ -2333,6 +2377,7 @@ bool inputOwnerHeld(uint8_t sourcePort, uint8_t note) {
 void setInputOwnerState(uint8_t sourcePort, uint8_t note, uint8_t velocity, bool on) {
   bool *ownerNotes = loopOwnsInput(sourcePort) ? loopHeldInputNotes : physicalHeldInputNotes;
   uint8_t *ownerVelocities = loopOwnsInput(sourcePort) ? loopHeldVelocities : physicalHeldVelocities;
+  if (on && !ownerNotes[note]) heldNoteOrder[note] = ++heldNoteOrderCounter;
   ownerNotes[note] = on;
   ownerVelocities[note] = on ? velocity : 0;
   heldInputNotes[note] = physicalHeldInputNotes[note] || loopHeldInputNotes[note];
@@ -2366,7 +2411,18 @@ void rebuildArpHeldSorted() {
     if (arpFreezeActive) include = arpFrozenNotes[n] || heldInputNotes[n];
     else if (arpLatchEnabled()) include = arpLatchedNotes[n];
     else include = heldInputNotes[n];
-    if (include) arpHeldSorted[arpHeldCount++] = n;
+    if (!include) continue;
+    if (!firmware3Settings.arpNoteOrder) {
+      arpHeldSorted[arpHeldCount++] = n;
+      continue;
+    }
+    uint8_t insert = arpHeldCount;
+    while (insert > 0 && heldNoteOrder[arpHeldSorted[insert - 1]] > heldNoteOrder[n]) {
+      arpHeldSorted[insert] = arpHeldSorted[insert - 1];
+      --insert;
+    }
+    arpHeldSorted[insert] = n;
+    ++arpHeldCount;
   }
 }
 
@@ -2508,9 +2564,22 @@ int8_t activeDivNoteSlot() {
 }
 
 uint8_t currentDivisionSetting() {
-  const int8_t divSlot = activeDivNoteSlot();
-  if (divSlot >= 0) return divNoteSlotToDivision(static_cast<uint8_t>(divSlot));
-  return constrain(effectiveSettingValue(SET_DIVISION), 0, DIVISION_COUNT - 1);
+  const uint8_t selected = clampU8(effectiveSettingValue(SET_DIVISION), 0, ARP_DIVISION_FOLLOW_DRUM);
+  if (selected != ARP_DIVISION_FOLLOW_DRUM) return selected;
+  const int8_t rollSlot = activeDivNoteSlot();
+  if (rollSlot >= 0) return divNoteSlotToDivision(static_cast<uint8_t>(rollSlot));
+  if (firmware3Settings.drumDivision < DIVISION_COUNT) return firmware3Settings.drumDivision;
+  return DIV_1_16;
+}
+
+int8_t currentDrumDivisionSetting() {
+  const int8_t rollSlot = activeDivNoteSlot();
+  if (rollSlot >= 0) return divNoteSlotToDivision(static_cast<uint8_t>(rollSlot));
+  if (firmware3Settings.drumDivision == DRUM_DIVISION_FREE) return -1;
+  if (firmware3Settings.drumDivision == DRUM_DIVISION_FOLLOW_ARP) {
+    return settings.division < DIVISION_COUNT ? settings.division : DIV_1_16;
+  }
+  return clampU8(firmware3Settings.drumDivision, 0, DIVISION_COUNT - 1);
 }
 
 uint8_t sensorPercent() {
@@ -2588,20 +2657,29 @@ void rebuildHeldDrumCount() {
 }
 
 void restartArpTiming(bool sendNoteOffs = true) {
-  if (sendNoteOffs) arpNoteOffs();
+  if (sendNoteOffs) {
+    arpNoteOffs();
+    drumArpNoteOffs();
+  }
   arpGateOffMs = 0;
+  drumGateOffMs = 0;
   arpGridOriginUs = time_us_64();
+  drumGridOriginUs = arpGridOriginUs;
   arpNextStepUs = arpGridOriginUs;
+  drumNextStepUs = drumGridOriginUs;
   arpGlobalStep = 0;
   arpPatternStep = 0;
 }
 
 void restartArpFromNewKeyPhraseAt(uint64_t phraseStartUs) {
   arpGateOffMs = 0;
+  drumGateOffMs = 0;
   arpGlobalStep = 0;
   arpPatternStep = 0;
   arpGridOriginUs = phraseStartUs + (ARP_KEY_SYNC_CAPTURE_MS * 1000ULL);
   arpNextStepUs = arpGridOriginUs;
+  drumGridOriginUs = arpGridOriginUs;
+  drumNextStepUs = drumGridOriginUs;
 }
 
 void restartArpFromNewKeyPhrase() {
@@ -3554,12 +3632,12 @@ int16_t settingRangeMax(uint8_t settingId) {
   switch (settingId) {
     case SET_BPM: return 300;
     case SET_ARP_MODE: return ARP_SELECTION_COUNT - 1;
-    case SET_DIVISION: return DIVISION_COUNT - 1;
+    case SET_DIVISION: return ARP_DIVISION_FOLLOW_DRUM;
     case SET_VELOCITY: return 127;
     case SET_LENGTH: return 100;
     case SET_PATTERN: return PATTERN_COUNT - 1;
     case SET_INPUT_CH: return 16;
-    case SET_ARP_OUT_CH: return ARP_CH_MAX;
+    case SET_ARP_OUT_CH: return 16;
     case SET_BASS_CH: return 48;
     case SET_THRU_OUT_CH: return 16;
     case SET_RND_RBN: return RND_RBN_BACK_SLOT;
@@ -3637,13 +3715,19 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       syncMusicalClockConfig(false);
       break;
     case SET_ARP_MODE: settings.arpMode = clampU8(value, 0, ARP_SELECTION_COUNT - 1); break;
-    case SET_DIVISION: settings.division = clampU8(value, 0, DIVISION_COUNT - 1); break;
+    case SET_DIVISION:
+      settings.division = clampU8(value, 0, ARP_DIVISION_FOLLOW_DRUM);
+      if (settings.division == ARP_DIVISION_FOLLOW_DRUM &&
+          firmware3Settings.drumDivision == DRUM_DIVISION_FOLLOW_ARP) {
+        firmware3Settings.drumDivision = DIV_1_16;
+      }
+      break;
     case SET_VELOCITY: settings.arpVelocity = clampU8(value, 1, 127); break;
     case SET_LENGTH: settings.arpLengthPct = clampU8(value, 1, 100); break;
     case SET_PATTERN: settings.pattern = clampU8(value, 0, PATTERN_COUNT - 1); break;
     case SET_INPUT_CH: settings.inputChannel = clampU8(value, 1, 16); break;
     case SET_ARP_OUT_CH:
-      settings.arpOutChannel = clampU8(value, 0, ARP_CH_MAX);
+      settings.arpOutChannel = clampU8(value, 0, 16);
       break;
     case SET_BASS_CH: settings.bassMode = clampU8(value, 0, 48); break;
     case SET_THRU_OUT_CH: settings.thruOutChannel = clampU8(value, 0, 16); break;
@@ -3776,11 +3860,11 @@ int16_t effectiveSettingValue(uint8_t settingId) {
 void sanitizeSettings(Settings &s) {
   s.manualBpm = constrain(static_cast<int>(s.manualBpm), 20, 300);
   s.arpMode = clampU8(s.arpMode, 0, ARP_SELECTION_COUNT - 1);
-  s.division = clampU8(s.division, 0, DIVISION_COUNT - 1);
+  s.division = clampU8(s.division, 0, ARP_DIVISION_FOLLOW_DRUM);
   s.arpVelocity = clampU8(s.arpVelocity, 1, 127);
   s.arpLengthPct = clampU8(s.arpLengthPct, 1, 100);
   s.inputChannel = clampU8(s.inputChannel, 1, 16);
-  s.arpOutChannel = clampU8(s.arpOutChannel, 0, ARP_CH_MAX);
+  s.arpOutChannel = clampU8(s.arpOutChannel, 0, 16);
   s.bassMode = clampU8(s.bassMode, 0, 48);
   s.thruOutChannel = clampU8(s.thruOutChannel, 0, 16);
   s.roundRobinMask &= 0xFFFF;
@@ -3828,6 +3912,32 @@ Firmware3Settings defaultFirmware3Settings() {
   s.timeSignature = 0;
   s.swing = 0;
   s.looperMidiTransport = 1;
+  s.arpOctaves = 1;
+  s.arpRetriggerSync = 0;
+  s.arpNoteOrder = 0;
+  s.customArpLength = 2;  // 1 bar
+  s.drumEnabled = 1;
+  s.drumInputMode = 0;  // channel 10
+  s.drumOutputChannel = 10;
+  s.drumSplitNote = 36;
+  s.drumMappedStart = 36;
+  s.drumAftertouchVelocity = 0;
+  s.drumDivision = DIV_1_16;
+  s.quickJumpEnabled = 0;
+  s.quickJumpInputChannel = 1;
+  s.quickJumpOutputChannel = 2;
+  s.bassHighestNote = 127;
+  s.parameterLockChannel = 0;
+  s.chordEnabled = 0;
+  s.chordPositions[0] = 0;
+  s.chordPositions[1] = 2;
+  s.chordPositions[2] = 4;
+  s.chordPositions[3] = 6;
+  s.userScaleMask = 0x0AB5;  // C major pitch classes
+  for (uint8_t ch = 0; ch < 16; ++ch) {
+    s.routerLowNotes[ch] = 0;
+    s.routerHighNotes[ch] = 127;
+  }
   return s;
 }
 
@@ -3837,7 +3947,32 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
   s.timeSignature = s.timeSignature ? 1 : 0;
   s.swing = clampU8(s.swing, 0, 75);
   s.looperMidiTransport = s.looperMidiTransport ? 1 : 0;
-  memset(s.reserved, 0, sizeof(s.reserved));
+  s.arpOctaves = clampU8(s.arpOctaves, 1, 4);
+  s.arpRetriggerSync = s.arpRetriggerSync ? 1 : 0;
+  s.arpNoteOrder = s.arpNoteOrder ? 1 : 0;
+  s.customArpLength = clampU8(s.customArpLength, 0, 5);
+  s.drumEnabled = s.drumEnabled ? 1 : 0;
+  s.drumInputMode = s.drumInputMode ? 1 : 0;
+  s.drumOutputChannel = clampU8(s.drumOutputChannel, 1, 16);
+  s.drumSplitNote = clampU8(s.drumSplitNote, 0, 120);
+  s.drumMappedStart = clampU8(s.drumMappedStart, 0, 120);
+  s.drumAftertouchVelocity = s.drumAftertouchVelocity ? 1 : 0;
+  s.drumDivision = clampU8(s.drumDivision, 0, DRUM_DIVISION_FREE);
+  s.quickJumpEnabled = s.quickJumpEnabled ? 1 : 0;
+  s.quickJumpInputChannel = clampU8(s.quickJumpInputChannel, 1, 16);
+  s.quickJumpOutputChannel = clampU8(s.quickJumpOutputChannel, 1, 16);
+  s.bassHighestNote = clampU8(s.bassHighestNote, 0, 127);
+  s.parameterLockChannel = clampU8(s.parameterLockChannel, 0, 16);
+  s.chordEnabled = s.chordEnabled ? 1 : 0;
+  for (uint8_t i = 0; i < 4; ++i) {
+    s.chordPositions[i] = constrain(static_cast<int>(s.chordPositions[i]), -12, 12);
+  }
+  s.userScaleMask &= 0x0FFF;
+  if (s.userScaleMask == 0) s.userScaleMask = 1;
+  for (uint8_t ch = 0; ch < 16; ++ch) {
+    s.routerLowNotes[ch] = clampU8(s.routerLowNotes[ch], 0, 127);
+    s.routerHighNotes[ch] = clampU8(s.routerHighNotes[ch], s.routerLowNotes[ch], 127);
+  }
 }
 
 void initializeFirmware3PresetExtensions() {
@@ -3853,6 +3988,10 @@ void loadCurrentPreset() {
   sanitizeSettings(settings);
   firmware3Settings = storage.firmware3[storage.currentPreset];
   sanitizeFirmware3Settings(firmware3Settings);
+  if (settings.division == ARP_DIVISION_FOLLOW_DRUM &&
+      firmware3Settings.drumDivision == DRUM_DIVISION_FOLLOW_ARP) {
+    firmware3Settings.drumDivision = DIV_1_16;
+  }
   syncMusicalClockConfig(false);
   divNotesCursor = 0;
   mapCcCursor = 0;
@@ -3905,7 +4044,7 @@ Settings defaultSettings() {
   s.arpLengthPct = 55;
   s.pattern = PAT_MODE;
   s.inputChannel = 1;
-  s.arpOutChannel = ARP_CH_1_PLUS_10;
+  s.arpOutChannel = 1;
   s.bassMode = 0;
   s.thruOutChannel = 2;
   s.roundRobinMask = 0;
@@ -4516,7 +4655,8 @@ bool translateSplitInputToDrum(uint8_t &channel1, uint8_t &note) {
   if (!arpChannelSplitMode()) return false;
   if (!splitDrumInputNote(note)) return false;
 
-  channel1 = 10;
+  // Channel zero is an internal-only marker; MIDI channels remain 1..16.
+  channel1 = 0;
   note = splitDrumOutputNote(note);
   return true;
 }
@@ -4564,12 +4704,17 @@ void releaseDuplicateInputNote(uint8_t sourcePort, uint8_t note) {
 
 void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t velocity, bool on,
                  bool recordForLoop) {
-  if (recordForLoop) recordLoopNote(sourcePort, channel1, note, velocity, on);
-
-  if (arpChannelSpecialMode() && channel1 == 10) {
+  const bool splitDrumInput = channel1 == 0;
+  const bool channel10DrumInput = arpChannelSpecialMode() && !arpChannelSplitMode() && channel1 == 10;
+  if (splitDrumInput || channel10DrumInput) {
+    if (recordForLoop) {
+      recordLoopNote(sourcePort, firmware3Settings.drumOutputChannel, note, velocity, on);
+    }
     handleDrumInputNote(sourcePort, note, velocity, on);
     return;
   }
+
+  if (recordForLoop) recordLoopNote(sourcePort, channel1, note, velocity, on);
 
   if (channel1 != settings.inputChannel) {
     if (channelEnabled(settings.legatoChannel) && channel1 == settings.legatoChannel) {
@@ -4819,7 +4964,8 @@ void drumArpNoteOffs() {
   if (!arpChannelSpecialMode()) return;
   for (uint8_t i = 0; i < activeDrumArpCount; ++i) {
     if (activeDrumArpNotes[i] >= 0) {
-      sendFanout(255, 0x80 | (10 - 1), activeDrumArpNotes[i], 0);
+      const uint8_t outCh = firmware3Settings.drumOutputChannel;
+      sendFanout(255, 0x80 | ((outCh - 1) & 0x0F), activeDrumArpNotes[i], 0);
     }
   }
   activeDrumArpCount = 0;
@@ -4838,7 +4984,8 @@ void drumArpAddOutput(uint8_t note) {
     if (activeDrumArpNotes[i] == static_cast<int8_t>(note)) return;
   }
   activeDrumArpNotes[activeDrumArpCount++] = note;
-  sendFanout(255, 0x90 | (10 - 1), note, drumArpPulseVelocity());
+  const uint8_t outCh = firmware3Settings.drumOutputChannel;
+  sendFanout(255, 0x90 | ((outCh - 1) & 0x0F), note, drumArpPulseVelocity());
 }
 
 void runArpStep() {
@@ -4846,15 +4993,11 @@ void runArpStep() {
   const uint8_t arpPattern = patternFromArpSelection(arpSelection);
   const uint8_t arpMode = classicArpModeFromSelection(arpSelection);
   const bool mainArpEnabled = channelEnabled(mainArpOutChannel()) && arpMode != ARP_OFF && arpHeldCount > 0;
-  const bool drumArpEnabled = arpChannelSpecialMode() && heldDrumCount > 0;
-
-  if (!mainArpEnabled && !drumArpEnabled) {
+  if (!mainArpEnabled) {
     arpNoteOffs();
-    drumArpNoteOffs();
     return;
   }
 
-  drumArpNoteOffs();
   arpNoteOffs();
   const uint8_t step = arpPatternStep % 16;
   const PatternToken token = kPatterns[arpPattern][step];
@@ -4863,26 +5006,15 @@ void runArpStep() {
     arpGateOffMs = 0;
     arpGlobalStep++;
     arpPatternStep = (arpPatternStep + 1) % 16;
-    if (drumArpEnabled) {
-      for (uint8_t note = 0; note < 128; ++note) {
-        if (heldDrumNotes[note]) drumArpAddOutput(note);
-      }
-      arpGateOffMs = millis() + max<uint32_t>(15, (divisionStepMs() * currentArpLengthPctSetting()) / 100);
-    }
     return;
   }
 
-  if (drumArpEnabled) {
-    for (uint8_t note = 0; note < 128; ++note) {
-      if (heldDrumNotes[note]) {
-        drumArpAddOutput(note);
-      }
-    }
-  }
-
   if (mainArpEnabled && (token.noteIndex == TOK_ALL || arpMode == ARP_TRIGGER)) {
-    for (uint8_t i = 0; i < arpHeldCount && i < MAX_ARP_OUTPUT_NOTES; ++i) {
-      arpAddOutput(quantizeUp(arpHeldSorted[i]));
+    for (uint8_t octave = 0; octave < firmware3Settings.arpOctaves; ++octave) {
+      for (uint8_t i = 0; i < arpHeldCount && activeArpCount < MAX_ARP_OUTPUT_NOTES; ++i) {
+        const int note = static_cast<int>(arpHeldSorted[i]) + octave * 12;
+        if (note <= 127) arpAddOutput(quantizeUp(note));
+      }
     }
   } else if (mainArpEnabled) {
     int8_t idx = token.noteIndex;
@@ -4891,7 +5023,9 @@ void runArpStep() {
     }
     if (idx >= 0 && arpHeldCount > 0) {
       const uint8_t base = arpHeldSorted[idx % arpHeldCount];
-      int note = base + token.semitoneOffset + (token.octaveOffset * 12);
+      const uint8_t octave = (arpGlobalStep / max<uint8_t>(1, arpHeldCount)) %
+                             firmware3Settings.arpOctaves;
+      int note = base + token.semitoneOffset + ((token.octaveOffset + octave) * 12);
       note = constrain(note, 0, 127);
       arpAddOutput(quantizeUp(note));
     }
@@ -4903,21 +5037,34 @@ void runArpStep() {
   arpPatternStep = (arpPatternStep + 1) % 16;
 }
 
+void runDrumStep(uint8_t division) {
+  drumArpNoteOffs();
+  if (!arpChannelSpecialMode() || heldDrumCount == 0) return;
+  for (uint8_t note = 0; note < 128; ++note) {
+    if (heldDrumNotes[note]) drumArpAddOutput(note);
+  }
+  const uint64_t stepUs = musicalDurationUs(kDivisionPulseSteps[division]);
+  const uint32_t gateMs = max<uint32_t>(15, static_cast<uint32_t>(stepUs / 2000ULL));
+  drumGateOffMs = millis() + gateMs;
+}
+
 void tickArp() {
   const uint32_t nowMs = millis();
   const uint64_t nowUs = time_us_64();
-  if (arpHeldCount == 0 && heldDrumCount == 0) {
-    drumArpNoteOffs();
+  if (arpHeldCount == 0) {
     arpNoteOffs();
-    return;
   }
   if (arpGateOffMs && nowMs >= arpGateOffMs) {
-    drumArpNoteOffs();
     arpNoteOffs();
     arpGateOffMs = 0;
   }
+  if (heldDrumCount == 0) drumArpNoteOffs();
+  if (drumGateOffMs && nowMs >= drumGateOffMs) {
+    drumArpNoteOffs();
+    drumGateOffMs = 0;
+  }
   if (!musicalClock.synchronizedAdvanceAllowed(nowUs)) return;
-  if (arpNextStepUs == 0 || nowUs >= arpNextStepUs) {
+  if (arpHeldCount > 0 && (arpNextStepUs == 0 || nowUs >= arpNextStepUs)) {
     const uint64_t stepNumerator =
         static_cast<uint64_t>(kDivisionPulseSteps[currentDivisionSetting()]) * 60000000ULL;
     const uint64_t pulseDenominator = static_cast<uint64_t>(currentBpm()) * MUSICAL_PPQN;
@@ -4927,16 +5074,38 @@ void tickArp() {
       arpPatternStep = 0;
       runArpStep();
       arpNextStepUs = arpGridOriginUs + (stepNumerator / pulseDenominator);
-      return;
+    } else {
+      const uint64_t elapsed = nowUs - arpGridOriginUs;
+      const uint32_t gridStep = static_cast<uint32_t>(
+          (elapsed * pulseDenominator) / stepNumerator);
+      arpGlobalStep = gridStep;
+      arpPatternStep = gridStep % 16;
+      runArpStep();
+      arpNextStepUs = arpGridOriginUs +
+                      ((static_cast<uint64_t>(gridStep + 1) * stepNumerator) / pulseDenominator);
     }
-    const uint64_t elapsed = nowUs - arpGridOriginUs;
-    const uint32_t gridStep = static_cast<uint32_t>(
-        (elapsed * pulseDenominator) / stepNumerator);
-    arpGlobalStep = gridStep;
-    arpPatternStep = gridStep % 16;
-    runArpStep();
-    arpNextStepUs = arpGridOriginUs +
-                    ((static_cast<uint64_t>(gridStep + 1) * stepNumerator) / pulseDenominator);
+  }
+
+  const int8_t drumDivision = currentDrumDivisionSetting();
+  if (heldDrumCount == 0 || drumDivision < 0) {
+    drumNextStepUs = 0;
+    return;
+  }
+  if (drumNextStepUs == 0 || nowUs >= drumNextStepUs) {
+    const uint64_t stepNumerator =
+        static_cast<uint64_t>(kDivisionPulseSteps[drumDivision]) * 60000000ULL;
+    const uint64_t pulseDenominator = static_cast<uint64_t>(currentBpm()) * MUSICAL_PPQN;
+    if (drumNextStepUs == 0) {
+      drumGridOriginUs = nowUs;
+      runDrumStep(drumDivision);
+      drumNextStepUs = drumGridOriginUs + (stepNumerator / pulseDenominator);
+    } else {
+      const uint64_t elapsed = nowUs - drumGridOriginUs;
+      const uint32_t gridStep = static_cast<uint32_t>((elapsed * pulseDenominator) / stepNumerator);
+      runDrumStep(drumDivision);
+      drumNextStepUs = drumGridOriginUs +
+                       ((static_cast<uint64_t>(gridStep + 1) * stepNumerator) / pulseDenominator);
+    }
   }
 }
 
@@ -5338,7 +5507,7 @@ String settingValueString(uint8_t id) {
       return String(v);
     }
     case SET_ARP_MODE: return kArpSelectionNames[v];
-    case SET_DIVISION: return kDivisionNames[v];
+    case SET_DIVISION: return v == ARP_DIVISION_FOLLOW_DRUM ? "DRUM" : kDivisionNames[v];
     case SET_VELOCITY: return String(map(v, 0, 127, 0, 100)) + "%";
     case SET_LENGTH: return String(v) + "%";
     case SET_PATTERN: return "";
@@ -5431,6 +5600,8 @@ void drawBarValue(uint8_t pct, const String &label) {
 }
 
 void drawDivisionPie(uint8_t divisionId) {
+  const bool followsDrum = divisionId == ARP_DIVISION_FOLLOW_DRUM;
+  if (followsDrum) divisionId = currentDivisionSetting();
   const int cx = 90;
   const int cy = 20;
   const int r = 18;
@@ -5451,7 +5622,7 @@ void drawDivisionPie(uint8_t divisionId) {
   }
   display.setTextSize(2);
   display.setCursor(0, 28);
-  display.print(kDivisionNames[divisionId]);
+  display.print(followsDrum ? "DRUM" : kDivisionNames[divisionId]);
 }
 
 void drawArpModeSymbol(uint8_t mode) {
