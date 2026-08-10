@@ -1104,7 +1104,7 @@ const int8_t kEncoderTransitionTable[16] = {
 };
 
 const char *const kSettingNames[SETTING_COUNT] = {
-  "1 BPM", "2 SWING", "3 ARP", "4 VELOCITY", "5 NOTELENGTH", "6 STUTTER", "7 ECHO",
+  "1 BPM", "2 SWING", "3 ARP", "4 VELOCITY", "5 NOTELENGT", "6 STUTTER", "7 ECHO",
   "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 ARP OUT", "11 DRUM MAGIC",
   "12 BASS", "13 THRU OUT", "14 RNDRBN", "15 ROUTER", "16 DRUM ROLL", "17 FEATURES",
   "18 CC MAP", "19 NOTE>CC", "20 IN CC >", "21 MONO RETRIG", "22 SCRNSVR",
@@ -7267,7 +7267,7 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
       index = liveVelocityUi.cursor; label = names[index]; return true;
     }
     case SET_LIVE_NOTE_LENGTH: {
-      static const char *const names[] = {"TARGET", "ON/OFF", "NOTELENGTH", "BACK"};
+      static const char *const names[] = {"TARGET", "ON/OFF", "NOTELENGT", "BACK"};
       index = liveNoteLengthUi.cursor; label = names[index]; return true;
     }
     case SET_STUTTER: {
@@ -7619,7 +7619,7 @@ void drawBackNavigationArrow() {
 void drawModeIndicator() {
   if (ui.menuMode == MENU_SELECT) return;
   const int x = 122;
-  const int editY = SETTING_AREA_Y + SETTING_AREA_H - 4;
+  const int editY = SETTING_AREA_Y + SETTING_AREA_H - 7;
   const int selectY = MODE_INFO_Y + (MODE_INFO_H / 2);
   if (parameterEditActive()) display.fillCircle(x, editY, 3, SSD1306_WHITE);
   else display.fillCircle(x, selectY, 3, SSD1306_WHITE);
@@ -7872,7 +7872,7 @@ String featureKnobName(uint8_t id) {
   struct BlockName { uint8_t base; const char *name; };
   static const BlockName blocks[] = {
     {FEATURE_KNOB_VELOCITY_BASE, "VELOCITY"},
-    {FEATURE_KNOB_NOTE_LENGTH_BASE, "NOTELENGTH"},
+    {FEATURE_KNOB_NOTE_LENGTH_BASE, "NOTELENGT"},
     {FEATURE_KNOB_STUTTER_BASE, "STUTTER"},
     {FEATURE_KNOB_ECHO_WET_BASE, "ECHO WET"},
     {FEATURE_KNOB_ECHO_LENGTH_BASE, "ECHO LENGTH"},
@@ -7903,7 +7903,7 @@ String featureButtonName(uint8_t id) {
   uint8_t target = featureTargetFromBlock(id, FEATURE_BUTTON_VELOCITY_BASE);
   if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " VELOCITY";
   target = featureTargetFromBlock(id, FEATURE_BUTTON_NOTE_LENGTH_BASE);
-  if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " NOTELENGTH";
+  if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " NOTELENGT";
   target = featureTargetFromBlock(id, FEATURE_BUTTON_STUTTER_BASE);
   if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " STUTTER";
   target = featureTargetFromBlock(id, FEATURE_BUTTON_ECHO_BASE);
@@ -8241,7 +8241,7 @@ void drawLiveVelocityScreen() {
 }
 
 void drawLiveNoteLengthScreen() {
-  static const char *const names[] = {"TARGET", "ON/OFF", "NOTELENGTH", "BACK"};
+  static const char *const names[] = {"TARGET", "ON/OFF", "NOTELENGT", "BACK"};
   const LiveTargetSettings &target = firmware3Settings.liveTargets[liveNoteLengthTarget];
   if (ui.menuMode == MENU_SELECT || liveNoteLengthUi.cursor == 2) {
     drawNamedBarValue("", target.noteLengthPercent, 200,
