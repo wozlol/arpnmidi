@@ -14,6 +14,7 @@ The main brain owns:
 - MIDI input parsing, routing, and transformations
 - Musical clock, swing, arpeggiator, and Drum Magic
 - Four-track looper, Time Travel, Stutter, Echo, and Notelength scheduling
+- Quick Jump with configurable input/output channels and held-note transition behavior
 - Note ownership and safe note-off handling
 - Encoder, four physical buttons, and pressure sensor
 - OLED and VL53L0X user interface

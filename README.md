@@ -104,7 +104,8 @@ looper tracks independently.
 
 - Main Input, Arp Out, Thru output, and lowest-note-priority Bass output
 - Bass highest-note split
-- Quick Jump from a chosen input channel to a chosen output channel
+- Quick Jump from a chosen input channel to a chosen output channel, with a
+  Hold option for preserving held notes across channel changes
 - Sixteen-channel router with output channel, low note, high note, and
   transposition for each channel
 - Notes outside a router row's selected range continue on their original

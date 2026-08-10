@@ -219,6 +219,7 @@ void emitNoteLengthEvent(void *context, uint8_t target, uint8_t sourcePort,
                          const arpnmidi3::LoopMidiEvent &event);
 void deactivateStutter(uint8_t target);
 void requestStutterState(uint8_t target, bool enabled, int16_t lengthSelection = -1);
+void setQuickJumpEnabled(bool enabled);
 uint8_t currentDivisionSetting();
 void captureChordMemoryOutput(uint8_t sourcePort, uint8_t channel,
                               uint8_t note, uint8_t velocity);
@@ -692,6 +693,7 @@ struct Firmware3Settings {
   uint8_t quickJumpEnabled;
   uint8_t quickJumpInputChannel;
   uint8_t quickJumpOutputChannel;
+  uint8_t quickJumpHold;
   uint8_t bassHighestNote;
   uint8_t parameterLockChannel;
   uint8_t forwardChannelAftertouch;
@@ -1871,6 +1873,31 @@ void sendFinalMidi(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t da
     sendDinRaw1(status);
   }
   sendMidiToUsbDevice(sourcePort, status, data1, data2);
+}
+
+void sendQuickJumpTransitionNoteOffs(uint8_t channel1) {
+  if (!channelEnabled(channel1)) return;
+  const uint8_t status = static_cast<uint8_t>(0x80 | ((channel1 - 1U) & 0x0F));
+  for (uint8_t note = 0; note < 128; ++note) {
+    if (heldInputNotes[note]) sendFinalMidi(255, status, note, 0);
+  }
+}
+
+void setQuickJumpEnabled(bool enabled) {
+  const bool wasEnabled = firmware3Settings.quickJumpEnabled != 0;
+  if (wasEnabled == enabled) return;
+
+  // Hold preserves notes during the transition into Quick Jump. Turning it
+  // back off still releases those notes from the destination channel.
+  // Without Hold, release notes from whichever channel is being left on both
+  // sides of the transition so no note remains latched in the old path.
+  const uint8_t releaseChannel = enabled
+      ? firmware3Settings.quickJumpInputChannel
+      : firmware3Settings.quickJumpOutputChannel;
+  if (!enabled || !firmware3Settings.quickJumpHold) {
+    sendQuickJumpTransitionNoteOffs(releaseChannel);
+  }
+  firmware3Settings.quickJumpEnabled = enabled ? 1 : 0;
 }
 
 void sendTargetFinal(uint8_t target, uint8_t sourcePort,
@@ -3837,7 +3864,7 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_VELOCITY: return 127;
     case SET_LENGTH: return 100;
     case SET_QUICK_JUMP:
-      if (!quickJumpUi.editing) return 3;
+      if (!quickJumpUi.editing) return 4;
       if (quickJumpUi.cursor < 2) return 16;
       return 1;
     case SET_INPUT_CH: return 16;
@@ -3973,7 +4000,8 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       if (!quickJumpUi.editing) return quickJumpUi.cursor;
       if (quickJumpUi.cursor == 0) return firmware3Settings.quickJumpInputChannel;
       if (quickJumpUi.cursor == 1) return firmware3Settings.quickJumpOutputChannel;
-      return firmware3Settings.quickJumpEnabled;
+      if (quickJumpUi.cursor == 2) return firmware3Settings.quickJumpEnabled;
+      return firmware3Settings.quickJumpHold;
     case SET_INPUT_CH: return settings.inputChannel;
     case SET_ARP_OUT_CH: return settings.arpOutChannel;
     case SET_DRUM_MAGIC:
@@ -4167,10 +4195,11 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_VELOCITY: settings.arpVelocity = clampU8(value, 1, 127); break;
     case SET_LENGTH: settings.arpLengthPct = clampU8(value, 1, 100); break;
     case SET_QUICK_JUMP:
-      if (!quickJumpUi.editing) quickJumpUi.cursor = clampU8(value, 0, 3);
+      if (!quickJumpUi.editing) quickJumpUi.cursor = clampU8(value, 0, 4);
       else if (quickJumpUi.cursor == 0) firmware3Settings.quickJumpInputChannel = clampU8(value, 1, 16);
       else if (quickJumpUi.cursor == 1) firmware3Settings.quickJumpOutputChannel = clampU8(value, 1, 16);
-      else firmware3Settings.quickJumpEnabled = value ? 1 : 0;
+      else if (quickJumpUi.cursor == 2) setQuickJumpEnabled(value != 0);
+      else firmware3Settings.quickJumpHold = value ? 1 : 0;
       break;
     case SET_INPUT_CH: settings.inputChannel = clampU8(value, 1, 16); break;
     case SET_ARP_OUT_CH:
@@ -4507,6 +4536,7 @@ Firmware3Settings defaultFirmware3Settings() {
   s.quickJumpEnabled = 0;
   s.quickJumpInputChannel = 1;
   s.quickJumpOutputChannel = 2;
+  s.quickJumpHold = 0;
   s.bassHighestNote = 127;
   s.parameterLockChannel = 0;
   s.forwardChannelAftertouch = 1;
@@ -4579,6 +4609,7 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
   s.quickJumpEnabled = s.quickJumpEnabled ? 1 : 0;
   s.quickJumpInputChannel = clampU8(s.quickJumpInputChannel, 1, 16);
   s.quickJumpOutputChannel = clampU8(s.quickJumpOutputChannel, 1, 16);
+  s.quickJumpHold = s.quickJumpHold ? 1 : 0;
   s.bassHighestNote = clampU8(s.bassHighestNote, 0, 127);
   s.parameterLockChannel = clampU8(s.parameterLockChannel, 0, 16);
   s.forwardChannelAftertouch = s.forwardChannelAftertouch ? 1 : 0;
@@ -5026,7 +5057,7 @@ bool handleFirmware3SubmenuClick() {
     case SET_LIVE_NOTE_LENGTH: return finishSubmenuOrEdit(liveNoteLengthUi, 3);
     case SET_STUTTER: return finishSubmenuOrEdit(stutterUi, 4);
     case SET_ECHO: return finishSubmenuOrEdit(echoUi, 6);
-    case SET_QUICK_JUMP: return finishSubmenuOrEdit(quickJumpUi, 3);
+    case SET_QUICK_JUMP: return finishSubmenuOrEdit(quickJumpUi, 4);
     case SET_DRUM_MAGIC: return finishSubmenuOrEdit(drumMagicUi, 7);
     case SET_BASS_CH: return finishSubmenuOrEdit(bassUi, 2);
     case SET_LOOP_BARS: return finishSubmenuOrEdit(looperSettingsUi, 8);
@@ -5949,7 +5980,7 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
     }
     loopStorageDirty = true;
   } else if (id == FEATURE_BUTTON_QUICK_JUMP) {
-    firmware3Settings.quickJumpEnabled ^= 1U;
+    setQuickJumpEnabled(firmware3Settings.quickJumpEnabled == 0);
   } else if (id == FEATURE_BUTTON_ARP_RETRIGGER) {
     firmware3Settings.arpRetriggerSync ^= 1U;
   } else if (id == FEATURE_BUTTON_ARP_NOTE_ORDER) {
@@ -7279,7 +7310,7 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
       index = echoUi.cursor; label = names[index]; return true;
     }
     case SET_QUICK_JUMP: {
-      static const char *const names[] = {"INPUT CH", "OUTPUT CH", "ON/OFF", "BACK"};
+      static const char *const names[] = {"INPUT CH", "OUTPUT CH", "ON/OFF", "HOLD", "BACK"};
       index = quickJumpUi.cursor; label = names[index]; return true;
     }
     case SET_BASS_CH: {
@@ -7532,7 +7563,7 @@ bool submenuBackSelected() {
     case SET_LIVE_NOTE_LENGTH: return liveNoteLengthUi.cursor == 3;
     case SET_STUTTER: return stutterUi.cursor == 4;
     case SET_ECHO: return echoUi.cursor == 6;
-    case SET_QUICK_JUMP: return quickJumpUi.cursor == 3;
+    case SET_QUICK_JUMP: return quickJumpUi.cursor == 4;
     case SET_DRUM_MAGIC: return drumMagicUi.cursor == 7;
     case SET_BASS_CH: return bassUi.cursor == 2;
     case SET_RND_RBN: return roundRobinMenuCursor == RND_RBN_BACK_SLOT;
@@ -8293,7 +8324,7 @@ void drawEchoScreen() {
 }
 
 void drawQuickJumpScreen() {
-  static const char *const names[] = {"INPUT CH", "OUTPUT CH", "ON/OFF", "BACK"};
+  static const char *const names[] = {"INPUT CH", "OUTPUT CH", "ON/OFF", "HOLD", "BACK"};
   if (ui.menuMode == MENU_SELECT) {
     drawSubmenuField("", firmware3Settings.quickJumpEnabled
         ? String(firmware3Settings.quickJumpInputChannel) + " > " + String(firmware3Settings.quickJumpOutputChannel)
@@ -8304,6 +8335,7 @@ void drawQuickJumpScreen() {
   if (quickJumpUi.cursor == 0) value = String("CH ") + String(firmware3Settings.quickJumpInputChannel);
   else if (quickJumpUi.cursor == 1) value = String("CH ") + String(firmware3Settings.quickJumpOutputChannel);
   else if (quickJumpUi.cursor == 2) value = onOff(firmware3Settings.quickJumpEnabled);
+  else if (quickJumpUi.cursor == 3) value = onOff(firmware3Settings.quickJumpHold);
   drawSubmenuField(names[quickJumpUi.cursor], value, quickJumpUi.editing);
 }
 
