@@ -1,6 +1,7 @@
 # ARPnMIDI OS firmware set
 
-This folder contains the two Arduino sketches used by the current two-RP2040 ARPnMIDI system.
+This folder contains the two matching Arduino sketches for the current
+dual-RP2040 ARPnMIDI prototype.
 
 ## Firmware folders
 
@@ -10,17 +11,14 @@ This folder contains the two Arduino sketches used by the current two-RP2040 ARP
 
 The main brain owns:
 
-- MIDI routing and channel transformation
-- Arpeggiator and musical timing
-- Note looper and saved loop data
-- Scale correction and note visualization
-- SSD1306 display and rotary encoder interface
-- Distance and pressure sensors
-- Local button actions
-- Sixteen flash-backed presets
-- USB MIDI device connection
-
-MIDI from external DIN/TRS and optional hosted USB devices arrives over the GPIO4/5 serial link from the secondary brain.
+- MIDI input parsing, routing, and transformations
+- Musical clock, swing, arpeggiator, and Drum Magic
+- Four-track looper, Time Travel, Stutter, Echo, and Note Length scheduling
+- Note ownership and safe note-off handling
+- Encoder, four physical buttons, and pressure sensor
+- OLED and VL53L0X user interface
+- Sixteen presets and global loop storage
+- Native USB MIDI device input and output
 
 ### Secondary brain
 
@@ -28,124 +26,200 @@ MIDI from external DIN/TRS and optional hosted USB devices arrives over the GPIO
 
 The secondary brain owns:
 
-- USB MIDI device input and output
 - External DIN/TRS MIDI input and output
-- Serial MIDI transport to and from the main brain
+- A second native USB MIDI device input and output
+- The 1 Mbps UART connection to the main brain
 - USB2514B hub reset control
-- Optional MAX3421E USB MIDI host
+- Optional MAX3421E USB MIDI host and output fan-out
+
+Flash both sketches from the same revision. Both ends of the GPIO4/5 link must
+use the current 1 Mbps inter-brain setting.
 
 ## MIDI data flow
 
-All secondary-side inputs are sent to the main brain before routing:
+Every secondary-side input goes to the main brain before it reaches an output:
 
-- USB MIDI device input goes through the secondary and GPIO4 to the main brain.
-- DIN/TRS MIDI input goes through the secondary and GPIO4 to the main brain.
-- MAX3421E USB-host input goes through the secondary and GPIO4 to the main brain.
-- Main-brain output returns through GPIO5 to the secondary.
-- The secondary sends returned MIDI to USB MIDI device output, DIN/TRS MIDI output, and available MAX3421E-hosted USB MIDI outputs.
+- USB device input goes to the main brain.
+- External DIN/TRS input goes to the main brain.
+- MAX3421E-hosted USB MIDI input goes to the main brain.
+- Processed main-brain output returns to the secondary.
+- The secondary fans returned output to its USB device, external DIN/TRS, and
+  hosted USB MIDI outputs that provide a MIDI OUT endpoint.
 
-The secondary does not route an input directly to another secondary-side output. This keeps the main brain in control of channel routing, transformations, loop capture, and note ownership.
+There is no direct secondary input-to-output thru path. This keeps routing,
+recording, transformations, and note ownership centralized in the main brain.
 
-## Arduino setup
+## Serial speeds
 
-Use these settings for both sketches:
+- Main-to-secondary UART: 1,000,000 baud
+- Secondary-to-main UART: 1,000,000 baud
+- Physical external DIN/TRS MIDI: 31,250 baud
 
-- Board package: Earle Philhower Arduino-Pico
-- Board: Waveshare RP2040 Zero
-- USB stack: Adafruit TinyUSB
-- CPU speed: 120 MHz or 240 MHz
+The inter-brain path drains bounded batches and uses bounded queues so dense CC
+traffic cannot monopolize either musical core. The main queue reserves room for
+critical note offs.
 
-Open and flash each sketch separately:
+## Main-brain prototype connections
 
-1. Flash `arpnmidi_main_brain.ino` to the main-brain RP2040.
-2. Flash `arpnmidi_max_secondary_brain.ino` to the secondary RP2040.
-
-The folder and `.ino` names already match, so both sketches open directly in the Arduino IDE.
-
-## Main-brain connections
-
-- GPIO0: serial TX to ESP32-C3
-- GPIO1: serial RX from ESP32-C3
-- GPIO2: I2C SDA for SSD1306 and VL53L0X
-- GPIO3: I2C SCL for SSD1306 and VL53L0X
-- GPIO4: serial MIDI TX to secondary brain
-- GPIO5: serial MIDI RX from secondary brain
+- GPIO0: serial TX to the planned ESP32-C3
+- GPIO1: serial RX from the planned ESP32-C3
+- GPIO2: shared I2C SDA for SSD1306 and VL53L0X
+- GPIO3: shared I2C SCL for SSD1306 and VL53L0X
+- GPIO4: 1 Mbps UART TX to secondary GPIO5
+- GPIO5: 1 Mbps UART RX from secondary GPIO4
 - GPIO6: rotary encoder A
 - GPIO7: rotary encoder B
 - GPIO8: rotary encoder push switch
-- GPIO9: local button 1; currently `REMOTE 1`
-- GPIO12: local button 2; currently `REMOTE 2`
-- GPIO10: reserved for local button 3
-- GPIO13: reserved for local button 4
-- GPIO16: optional RGB LED output; disabled by default
-- GPIO26: push/pressure analog sensor input
+- GPIO9: physical button 1
+- GPIO12: physical button 2
+- GPIO10: physical button 3
+- GPIO13: physical button 4
+- GPIO16: optional RGB status LED, disabled by default
+- GPIO26: pressure sensor analog input
 
-GPIO11 is intentionally unused for mechanical clearance.
+GPIO11 is intentionally unused for mechanical clearance. The four buttons are
+implemented in the order GPIO9, GPIO12, GPIO10, GPIO13. The firmware uses
+active-high inputs with internal pulldowns.
 
-The current firmware implements local buttons 1 and 2. Actions for buttons 3 and 4 still need to be added.
+GPIO0 and GPIO1 are reserved for a normal two-wire UART connection to the
+planned ESP32-C3 wireless-MIDI processor. Standard BLE MIDI controllers,
+including BLE MIDI foot controllers, can be supported through that processor.
+There is no dedicated wired foot-pedal subsystem.
 
-## Wireless MIDI direction
+## Main-brain core allocation
 
-A future ESP connection to the main brain will provide wireless MIDI. It is intended to accept standard BLE MIDI devices, which may include keyboards, controllers, or BLE MIDI foot pedals. There is no dedicated wired foot-pedal subsystem in the current ARPnMIDI firmware.
+Core 0 handles the timing-sensitive path:
 
-## Secondary-brain pin profiles
+- Encoder, buttons, and pressure input
+- Inter-brain and native USB MIDI input
+- Clock, arp, drums, routing, four-track looper, and live effects
+- Deferred persistence only when the musical engine is idle
 
-The secondary sketch contains two compile-time profiles selected by `ARPNMIDI_SECONDARY_PIN_PROFILE`.
+Core 1 handles slower peripheral work:
+
+- OLED redraws from current state
+- VL53L0X polling
+- Outgoing inter-brain UART queue
+
+The display is marked dirty only when visible state changes. OLED traffic does
+not run continuously in the main musical loop.
+
+## Secondary-brain core allocation
+
+Core 0 handles:
+
+- Native USB MIDI device traffic
+- Physical DIN/TRS MIDI
+- Inter-brain UART
+- Bounded queues to and from the host core
+
+Core 1 handles:
+
+- MAX3421E host servicing when the MAX profile is selected
+- Hosted-device MIDI input and output
+
+## Secondary pin profiles
+
+Select the profile with `ARPNMIDI_SECONDARY_PIN_PROFILE` near the top of the
+secondary sketch.
 
 ### `ARPNMIDI_SECONDARY_PIN_PROFILE_OLD_NO_MAX`
 
-This is the current default profile. It disables the MAX3421E host and uses:
+This is the default for the current prototype:
 
 - GPIO2: external serial MIDI TX
 - GPIO3: external serial MIDI RX
-- GPIO4: serial MIDI TX to main brain
-- GPIO5: serial MIDI RX from main brain
+- GPIO4: 1 Mbps UART TX to main GPIO5
+- GPIO5: 1 Mbps UART RX from main GPIO4
 - GPIO24: USB2514B `RESET_N`
+- MAX3421E host disabled
 
 ### `ARPNMIDI_SECONDARY_PIN_PROFILE_NEW_MAX_PCB`
 
-This profile enables the MAX3421E USB host and uses:
+This profile builds the MAX3421E path:
 
 - GPIO0: MAX3421E SPI0 MISO
 - GPIO1: MAX3421E chip select
 - GPIO2: MAX3421E SPI0 SCK
 - GPIO3: MAX3421E SPI0 MOSI
-- GPIO4: serial MIDI TX to main brain
-- GPIO5: serial MIDI RX from main brain
+- GPIO4: 1 Mbps UART TX to main GPIO5
+- GPIO5: 1 Mbps UART RX from main GPIO4
 - GPIO20: external serial MIDI TX
 - GPIO21: external serial MIDI RX
 - GPIO24: USB2514B `RESET_N`
 - GPIO26: MAX3421E interrupt
 
-The optional MAX3421E reset hardware line is on GPIO22 and is not driven by the current firmware.
+The optional external MAX3421E hardware-reset line is not driven by this
+firmware profile.
 
-## Secondary routing details
+## Arduino setup
 
-- Main-brain and external serial MIDI run at 31,250 baud.
-- USB-device MIDI input is sent only to the main brain.
-- External DIN/TRS MIDI input is sent only to the main brain.
-- MAX3421E-hosted USB MIDI input is sent only to the main brain.
-- MIDI returned by the main brain fans out to USB-device output, DIN/TRS output, and available MAX3421E-hosted USB MIDI outputs.
-- The MAX3421E output path checks that a hosted device actually has a MIDI OUT endpoint before transmitting.
-- The secondary uses non-blocking serial writes so dense continuous-controller traffic cannot indefinitely stall USB-host servicing.
-- Full streaming SysEx parsing is not implemented for every serial path.
+Use for both sketches:
 
-## Libraries
+- Earle Philhower Arduino-Pico board package
+- Board: Waveshare RP2040 Zero
+- USB stack: Adafruit TinyUSB
+- CPU speed: 120 MHz or 240 MHz
 
-The main-brain sketch requires the normal installed Arduino libraries listed in the project-level [README](../README.md#arduino-build-setup).
+The main brain must reserve LittleFS space. Use the 2 MB flash layout with
+512 KB filesystem:
 
-The secondary sketch is self-contained for MAX3421E support. Its patched USB Host Shield 2.0 source is stored at:
+```sh
+arduino-cli compile --warnings all \
+  -b rp2040:rp2040:waveshare_rp2040_zero \
+  --board-options freq=120,usbstack=tinyusb,flash=2097152_524288 \
+  arpnmidi_main_brain
+```
 
-[`arpnmidi_max_secondary_brain/src/USB_Host_Shield_Library_2.0/`](arpnmidi_max_secondary_brain/src/USB_Host_Shield_Library_2.0/)
+Build the secondary with:
 
-The sketch includes this copy with quoted includes. Do not replace those includes with a global USB Host Shield installation. Arduino-Pico also provides a `USB.h`, so directly including `<Usb.h>` can select the wrong library on case-insensitive filesystems.
+```sh
+arduino-cli compile --warnings all \
+  -b rp2040:rp2040:waveshare_rp2040_zero \
+  --board-options freq=120,usbstack=tinyusb \
+  arpnmidi_max_secondary_brain
+```
 
-Patch notes for the bundled library are in [`../patches/README.md`](../patches/README.md).
+Open and flash each `.ino` from its matching sketch folder.
 
-## Current implementation status
+## Libraries and bundled host code
 
-- Both Arduino sketches compile for Waveshare RP2040 Zero with Adafruit TinyUSB.
-- The no-MAX secondary profile provides the current external serial MIDI bridge configuration.
-- The MAX3421E PCB profile is present in firmware but still requires validation on the target PCB hardware.
-- Local buttons 3 and 4 are reserved in the hardware map but do not have firmware actions yet.
-- ESP-based wireless MIDI is planned and is not implemented yet.
+The main sketch uses:
+
+- MIDI Library
+- Adafruit GFX Library
+- Adafruit SSD1306
+- VL53L0X library
+
+The secondary carries its patched USB Host Shield 2.0 source at
+[`arpnmidi_max_secondary_brain/src/USB_Host_Shield_Library_2.0/`](arpnmidi_max_secondary_brain/src/USB_Host_Shield_Library_2.0/).
+
+Keep the quoted local includes. Arduino-Pico also supplies a file named
+`USB.h`, so replacing the bundled includes with a global `<Usb.h>` include can
+select the wrong library on a case-insensitive filesystem.
+
+Patch notes are in [`../patches/README.md`](../patches/README.md).
+
+## Storage behavior
+
+- The main brain uses flash-backed EEPROM for compact preset data.
+- LittleFS stores extended preset records and the four global loop tracks.
+- Use the required filesystem flash layout or extended settings and loops
+  cannot persist.
+- Automatic writes wait for a musically idle window.
+- Time Travel and Stutter rolling history remain RAM-only.
+- A preset-schema mismatch installs factory defaults; no prototype migration
+  path is run.
+
+## Current hardware status
+
+- Both sketches compile without warnings at 120 MHz.
+- The default no-MAX secondary profile is the current prototype configuration.
+- The MAX3421E profile compiles and includes endpoint guards, but still needs
+  validation on its target PCB.
+- Full streaming SysEx parsing is not implemented on every serial path.
+- ESP32-C3 wireless MIDI is planned and is not implemented here yet.
+
+The planned dual-RP2354A and RP2350-Zero module pin assignment is documented in
+[`../max3421e_pins_for_next_pcb.txt`](../max3421e_pins_for_next_pcb.txt). It is
+not the pin map for this RP2040 prototype.

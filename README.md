@@ -1,277 +1,287 @@
 # ARPnMIDI
 
-ARPnMIDI is a two-RP2040 MIDI router, arpeggiator, looper, performance controller, scale tool, and USB/DIN MIDI hub designed by Joseph Wozniak — [woz.lol](https://woz.lol).
+ARPnMIDI is a two-processor MIDI performance instrument designed by Joseph
+Wozniak — [woz.lol](https://woz.lol). It combines MIDI routing, arpeggiation,
+four-track looping, scale and chord processing, live effects, controller
+mapping, USB MIDI, DIN/TRS MIDI, and an optional USB MIDI host.
 
-The main brain runs the musical engine and user interface. The secondary brain handles external MIDI connections and optional MAX3421E USB-host MIDI. MIDI entering through the secondary is sent to the main brain for processing before being returned to the secondary for output.
+The current prototype uses two Waveshare RP2040 Zero boards. The firmware is
+also organized for the planned dual-RP2354A hardware.
 
 ## Current firmware
 
-The current two-sketch firmware set is in [`arpnmidi os/`](<arpnmidi os/>):
+The two matching Arduino sketches are in [`arpnmidi os/`](<arpnmidi os/>):
 
-- [`arpnmidi_main_brain.ino`](<arpnmidi os/arpnmidi_main_brain/arpnmidi_main_brain.ino>) — router, arpeggiator, looper, display, sensors, local controls, presets, and USB MIDI device.
-- [`arpnmidi_max_secondary_brain.ino`](<arpnmidi os/arpnmidi_max_secondary_brain/arpnmidi_max_secondary_brain.ino>) — USB MIDI device, external DIN/TRS MIDI bridge, USB2514B hub control, and optional MAX3421E USB MIDI host.
+- [`arpnmidi_main_brain.ino`](<arpnmidi os/arpnmidi_main_brain/arpnmidi_main_brain.ino>)
+  runs the musical engines, routing, controls, display, presets, loop storage,
+  sensors, and a native USB MIDI device.
+- [`arpnmidi_max_secondary_brain.ino`](<arpnmidi os/arpnmidi_max_secondary_brain/arpnmidi_max_secondary_brain.ino>)
+  runs the external DIN/TRS MIDI bridge, a second native USB MIDI device, and
+  the optional MAX3421E USB MIDI host.
 
-Open each `.ino` from its matching Arduino sketch folder and flash it to the corresponding RP2040. Detailed two-board wiring and build information is in the [firmware-set README](<arpnmidi os/README.md>).
+Both boards must run firmware from the same revision. Their direct GPIO4/5
+UART link runs at 1 Mbps; it is intentionally much faster than physical MIDI.
 
-Archived experiments and previous firmware are kept in [`legacy/`](legacy/). They are not required to build the current system.
+Detailed wiring and two-board build information is in the
+[firmware-set README](<arpnmidi os/README.md>).
 
-## Main features
+## Musical features
 
-- MIDI routing between USB, DIN/TRS, and hosted USB MIDI devices
-- 16-channel remapping with per-channel transposition
-- Arpeggiator with classic and fixed musical patterns
-- Independent arp, thru, bass, and control-message output channels
-- Round-robin distribution across selected MIDI channels
-- Dedicated channel-10 drum lane and note-range remapping
-- Note-only looper with fixed-bar and free-length recording
-- Overdub, automatic overdub, playback, stop, replace, and delete controls
-- Key and scale correction
-- Piano and guitar note visualization
-- Optical distance and pressure-sensor performance control
-- CC-learn assignments for live parameters
-- Flash-backed presets and saved loop storage
-- Two currently implemented local remote buttons, with four local button GPIOs reserved in the hardware design
-- Planned ESP connection for wireless MIDI, including compatibility with standard BLE MIDI controllers such as BLE MIDI foot pedals
+### Arpeggiator
 
-## Main-brain hardware
+- Up, Down, Up-Down 1, Up-Down 2, Trigger, Random, and Off modes
+- Factory patterns: Up 1-Octave, Rhythm, Ostinato, Octave Walk, Fifth,
+  Bass+Chord, and Chord+Run
+- Custom pattern recording with note timing, gate length, velocity, and pitch
+  offsets measured from the lowest note played in the take
+- Custom lengths of 1/4 bar, 1/2 bar, 1, 2, 4, or 8 bars
+- Up to 32 note events in each custom pattern
+- One through four octaves
+- In-order or as-played note ordering
+- Key-press or clock-synchronized retriggering
+- Straight, triplet, and dotted divisions through 1/64T
+- Arp Division can follow Drum Division live
+- Arp velocity and gate length are stored per preset
 
-The main brain uses a Waveshare RP2040 Zero, a 128×64 SSD1306 OLED, a rotary encoder, optional distance and pressure sensors, and local buttons.
+### Drum Magic and Drum Roll
 
-### Main-brain pin map
+- Independent drum engine with its own output channel and division
+- Input from MIDI channel 10 or an eight-note split on Main Input
+- Configurable split start and mapped drum-note start
+- Optional channel-aftertouch-to-drum-velocity control
+- Drum Division can follow Arp Division or run Free
+- Drum Roll learns either notes or CCs for temporary drum divisions
+- Generated drum-roll notes are recorded by the looper
+- Mutual Arp/Drum follow settings cannot form a circular dependency
+
+### Four-track looper
+
+- Four tracks sharing a fixed 3,072-event pool
+- Per-track lengths from 1/4 bar through 8 bars
+- Track 1 can also establish a Free loop length and make it the musical bar
+- Layers, Parts Auto Solo, and Manual track modes
+- Overdub, replace, Auto Rec, mute, exclusive solo, safe clear, and undo
+- When all Layers tracks are occupied, the next overdub goes onto the oldest
+  layer
+- Optional auto quantize from 1/64 through 1/4
+- Optional CC recording with bounded smoothing and pruning
+- Optional MIDI transport response, enabled by default
+- MIDI Start, Continue, Stop, Song Select, and useful MMC transport commands
+- Time Travel can turn the immediately preceding performance into a loop
+- All four loop tracks survive reboot and are shared across presets
+- Time Travel and Stutter history remain in RAM and do not survive reboot
+
+Changing a populated track's length preserves the instrument's special repeat
+behavior:
+
+- Lengthening duplicates the complete stored recording, including notes, note
+  offs, and recorded CCs, until the longer track is filled.
+- Shortening changes only the audible loop window. Material beyond that window
+  remains stored.
+- Lengthening again restores the retained material without creating duplicate
+  copies.
+- A true replacement recording or permanent overwrite discards the retained
+  copies and establishes new source material.
+- A resize is rejected cleanly if the shared event pool cannot hold the needed
+  copies.
+
+### Live transformations
+
+Velocity, Note Length, Stutter, and Echo can target Main or any of the four
+looper tracks independently.
+
+- Velocity scales from 0 to 200 percent.
+- Note Length scales from 1 to 200 percent.
+- Stutter uses the shared rolling history for note-safe beat repeats and has a
+  configurable timeout in bars.
+- Echo provides Wet, Length, Delay division, and signed Drift. Drift accelerates
+  or decelerates the repeats for a bouncing-object effect.
+- Stutter and Echo-generated repeats are kept out of the recorded source loop.
+
+### Routing and note processing
+
+- Main Input, Main output, Thru output, and lowest-note-priority Bass output
+- Bass highest-note split
+- Quick Jump from a chosen input channel to a chosen output channel
+- Sixteen-channel router with output channel, low note, high note, and
+  transposition for each channel
+- Notes outside a router row's selected range continue on their original
+  channel
+- Round Robin across selected channels, with cycle or true-random selection
+- Optional channel-10 remapping in Round Robin
+- Mono Retrig last-note-priority processing on a selected channel
+- Key and scale correction, including an editable twelve-note User Scale
+- Four-position Chord generator using chromatic offsets or scale degrees
+- Four post-processing chord memories on the physical buttons
+- Per-note parameter locks for CC values on a selected channel
+- Channel and poly aftertouch forwarding, aftertouch-to-CC, and Main
+  aftertouch-to-arp-velocity options
+
+### MIDI control and mapping
+
+- Features menu divided into continuous CC Knobs and trigger CC Buttons
+- Trigger features can learn a CC or a MIDI note
+- Per-target mappings for live effects and looper controls
+- Separate Arp and Drum division mappings
+- Sixteen Main-input CC-to-channel/CC remap slots
+- Sixteen Note-to-CC slots with momentary or toggle behavior
+- Live CC screen for selecting and sending a CC with the encoder
+- Four physical buttons can operate as custom notes/CCs, looper controls, or
+  chord memories
+- Custom button behaviors: Momentary, Latch, and Flappy Bird
+
+## Clock and transport
+
+- Internal BPM range: 20–300
+- Swing range: 0–75
+- 4/4 or 3/4 meter
+- Clock Input: Ignore or Follow/Client
+- Clock Output: Off or Send/Host
+- Incoming Start resets synchronized arp phase.
+- Incoming Continue resumes a paused loop without returning to its beginning.
+- Incoming Stop closes active recording, releases owned notes, and pauses the
+  looper at its current position.
+- Looper MIDI Transport is independent of whether incoming clock is followed.
+- An armed looper take starts exactly on an incoming MIDI Start boundary.
+- Tap tempo replaces the normal Eye/Push actions while the BPM screen is open.
+
+Arp and drum timing follow the measured external clock when Clock Input is set
+to Follow/Client. Looper transport follows Start, Continue, and Stop, but saved
+loop event positions are currently microsecond-based and are not continuously
+tempo-stretched if the external tempo changes after recording.
+
+## Main menu
+
+The current top-level screens are:
+
+1. BPM
+2. Swing
+3. Arp
+4. Velocity
+5. Note Length
+6. Stutter
+7. Echo
+8. Quick Jump
+9. Main Input
+10. Main
+11. Drum Magic
+12. Bass
+13. Thru Out
+14. Round Robin
+15. Router
+16. Drum Roll
+17. Features
+18. CC Map
+19. Note to CC
+20. In CC Out
+21. Mono Retrig
+22. Screen Saver
+23. Eye/Push
+24. Eye Mode
+25. Push
+26. 4Button
+27. Looper
+28. Mute/Solo
+29. Parameter Lock
+30. Chord
+31. Key
+32. Scale
+33. Guitar/Keys
+34. Live CC
+35. Global
+36. Load
+37. Save
+38. Panic
+
+Feature screens use submenus with a Back item. Pushing the encoder while
+turning changes supported numeric values in steps of ten.
+
+## Main-brain prototype pins
 
 Use the GPIO numbers printed on the RP2040 Zero:
 
-- GPIO0: serial TX to ESP32-C3
-- GPIO1: serial RX from ESP32-C3
-- GPIO2: I2C SDA for SSD1306 and VL53L0X
-- GPIO3: I2C SCL for SSD1306 and VL53L0X
-- GPIO4: serial MIDI TX to secondary brain
-- GPIO5: serial MIDI RX from secondary brain
+- GPIO0: serial TX to the planned ESP32-C3
+- GPIO1: serial RX from the planned ESP32-C3
+- GPIO2: I2C SDA for the SSD1306 OLED and VL53L0X
+- GPIO3: I2C SCL for the SSD1306 OLED and VL53L0X
+- GPIO4: 1 Mbps UART TX to the secondary brain
+- GPIO5: 1 Mbps UART RX from the secondary brain
 - GPIO6: rotary encoder A
 - GPIO7: rotary encoder B
 - GPIO8: rotary encoder push switch
-- GPIO9: local button 1; currently `REMOTE 1`
-- GPIO12: local button 2; currently `REMOTE 2`
-- GPIO10: reserved for local button 3
-- GPIO13: reserved for local button 4
-- GPIO16: optional RGB LED output; disabled by default
-- GPIO26: push/pressure analog sensor input
+- GPIO9: physical button 1
+- GPIO12: physical button 2
+- GPIO10: physical button 3
+- GPIO13: physical button 4
+- GPIO16: optional RGB status LED, disabled by default
+- GPIO26: pressure sensor analog input
 
-GPIO11 is intentionally unused so a mounting screw can pass through that area.
+GPIO11 is intentionally unused for mechanical clearance. All four physical
+buttons are implemented. The current firmware configures them as active-high
+inputs with internal pulldowns.
 
-Buttons 3 and 4 are part of the hardware direction but do not have firmware actions yet. Wireless MIDI will be added through an ESP connected to the main brain; standard BLE MIDI devices, including BLE MIDI foot pedals, can then be used as ordinary MIDI input devices.
+GPIO0 and GPIO1 reserve a normal two-wire UART connection for an ESP32-C3. The
+planned ESP firmware will add wireless MIDI, allowing ordinary BLE MIDI devices
+such as a standard BLE MIDI foot controller to connect. There is no dedicated
+wired foot-pedal subsystem.
 
-## Arduino build setup
+The future RP2354A and RP2350-Zero pin assignment is kept separately in
+[`max3421e_pins_for_next_pcb.txt`](max3421e_pins_for_next_pcb.txt).
 
-- Board package: Earle Philhower Arduino-Pico
+## Build setup
+
+Use:
+
+- Earle Philhower Arduino-Pico board package
 - Board: Waveshare RP2040 Zero
 - USB stack: Adafruit TinyUSB
 - CPU speed: 120 MHz or 240 MHz
-
-The main-brain sketch also uses:
-
-- MIDI Library
-- Adafruit GFX Library
-- Adafruit SSD1306
-- VL53L0X library
-
-The secondary sketch carries its patched USB Host Shield 2.0 source inside its own `src/` directory.
-
-## Runtime controls
-
-- Turn the encoder in select mode to choose a setting screen.
-- Click the encoder to switch between select and edit modes.
-- Turn the encoder in edit mode to change the current value.
-- Hold the encoder while turning for coarse changes where supported.
-- Hold the encoder button for two seconds for panic and the recovery/reboot path.
-- The first input while the screen saver is active wakes the display without also changing a parameter.
-
-## Presets
-
-- Sixteen flash-backed preset slots
-- Parameter changes automatically save when leaving edit mode
-- `LOAD` recalls a selected slot
-- `SAVE` copies the current configuration to a selected slot
-- MAP CC assignments are stored per preset
-- Saved loop data is restored from flash
-
-To perform a factory reset, hold the encoder button while powering on, release it when prompted, and press it again within five seconds to confirm.
-
-## MIDI routing behavior
-
-- Notes on `INPUT CH` feed the arp, thru, bass, scale, split, and loop processing paths.
-- Notes on other channels pass through unless another routing feature claims that channel.
-- `MONO RETRIG` converts one selected non-input channel to monophonic last-note-priority behavior.
-- CC, Pitch Bend, Program Change, and Channel Aftertouch received on `INPUT CH` route to the `IN CC >` destination.
-- Non-input-channel channel messages pass through unchanged.
-- The sixteen-channel router can change output channel and transpose notes or poly-aftertouch note numbers.
-- MIDI realtime messages are forwarded.
-- Incoming MIDI clock does not currently set the internal arp BPM.
-
-## Complete menu reference
-
-### 1. `BPM`
-
-- Range: `20–300`
-- Sets the internal arp and fixed-bar loop tempo
-
-### 2. `ARP MODE`
-
-- `OFF`
-- `UP`
-- `DOWN`
-- `UP-DOWN 1`
-- `UP-DOWN 2`
-- `TRIGGER`
-- `RANDOM`
-- `UP 1-OCT`
-- `RHYTHM`
-- `OSTINATO`
-- `OCT WALK`
-- `FIFTH`
-- `BASS+CHORD`
-- `CHORD+RUN`
-
-### 3. `DIVISION`
-
-`1/1`, `1/2`, `1/2T`, `1/4`, `1/4T`, `1/8`, `1/8T`, `1/16`, `1/16T`, `1/32`, `1/32T`, and `1/64`.
-
-### 4. `VELOCITY`
-
-- Range: `1–127`
-- Sets arp output velocity
-- Distance or pressure input can reduce it live with `VEL DOWN`
-
-### 5. `LENGTH`
-
-- Range: `1–100%` of the current step
-- Distance or pressure input can reduce it live with `LEN DOWN`
-
-### 6. `INPUT CH`
-
-Selects the main processing input channel from `CH 1–16`.
-
-### 7. `ARP CH`
-
-- `OFF` or `CH 1–16`
-- `1+10`: main arp plus a channel-10 drum arp lane
-- `1+10-A`: channel aftertouch controls the drum-lane pulse velocity
-- `1-10 24`, `1-10 36`, `1-10 48`: add an eight-note input split remapped to channel-10 notes 36–43
-
-The channel-10 drum lane continues pulsing when the main arp mode is off.
-
-### 8. `BASS CH`
-
-- `OFF` or channel selections for `CH 1–12`
-- Per-channel octave offsets: `-2`, `-1`, `0`, or `+1`
-- Lowest-note-priority monophonic bass voice
-
-### 9. `THRU OUT`
-
-Selects an independent thru destination from `OFF` or `CH 1–16`.
-
-### 10. `RNDRBN`
-
-- Sends successive arp notes across selected MIDI channels
-- Allows multiple monophonic instruments to act as a distributed polyphonic instrument
-- Includes the `CH10-1+` and `CH10-2+` channel-10 remapping modes
-
-### 11. `ROUTER`
-
-- One mapping row per input channel
-- Selectable output channel
-- Note and poly-aftertouch transposition from `-24` to `+24` semitones
-- `CLEAR` restores identity routing
-
-### 12. `DIV NOTE`
-
-- Learn a note and channel for each division from `1/4` through `1/64`
-- Holding a learned note temporarily changes the arp division
-- The learned trigger can be swallowed or replaced with a configured `+NOTE`
-
-### 13. `MAP CC`
-
-Learn incoming CC controls for BPM, arp mode, division, velocity, length, channel settings, sensor modes, key, scale, loop length, and preset loading. Mappings can require the learned MIDI channel or accept the CC from all channels.
-
-### 14. `IN CC >`
-
-Routes input-channel CC, Pitch Bend, Program Change, and Channel Aftertouch to one channel or to the de-duplicated arp/thru/bass destinations with `ALL3`.
-
-### 15. `MONO RETRIG`
-
-- `OFF` or `CH 1–16`
-- Converts the selected non-input channel to monophonic last-note priority
-- Pressing a newer note replaces the active note
-- Releasing it recalls the newest note still held
-
-### 16. `REMOTE`
-
-Selects the output channel used by the local `REMOTE 1` and `REMOTE 2` actions.
-
-### 17. `REMOTE 1`
-
-Configures local button 1 to send a short Note or CC pulse.
-
-### 18. `REMOTE 2`
-
-Configures local button 2 to send a short Note or CC pulse.
-
-### 19. `SCRNSVR`
-
-- `OFF`
-- `AUTO`
-- `NOW`
-
-### 20. `EYE/PUSH`
-
-Selects the shared output channel used by the distance and pressure controllers.
-
-### 21. `EYE MODE`
-
-Distance-sensor modes include:
-
-- Division changes: `DIV +2`, `DIV -2`, `DIV +3`, `DIV -3`, `DIV FULL`, `DIV3`
-- `VEL DOWN` and `LEN DOWN`
-- `ARP LATCH`, `ARP LATCH+`, `ARP FREEZE`, `ARP FREEZ+`
-- `PITCH UP` and `PITCH DOWN`
-- Quantized note ranges `NOTES C0–C7`
-- `CC 1–19` and `CC103`
-- Loop record/play/overdub and stop/delete actions
-
-### 22. `PUSH`
-
-Provides the same behavior families as `EYE MODE`, controlled by the pressure sensor.
-
-### 23. `LOOP`
-
-- Lengths: `1 BAR`, `2 BAR`, `4 BAR`, `8 BAR`, or `FREE`
-- Fixed lengths begin playback automatically at the loop boundary
-- Free recording continues until stopped
-- Supports playback, overdub, automatic overdub, replace, stop, and delete
-- The active loop length can be changed while performing
-
-### 24. `KEY`
-
-- `OFF` or roots `C–B`
-- Standard mode moves off-key notes upward to the next scale note
-- `CKEY C–B` maps white keys across the selected scale
-
-### 25. `SCALE`
-
-`OFF`, `MAJOR`, `MINOR`, `MAJ+MIN`, `BLUES`, `MAJ BLUES`, `BLUES+BOTH`, `HARM MIN`, and `MEL MIN`.
-
-### 26. `GIT/KEYS`
-
-Selects live guitar-fretboard or piano-key note visualization.
-
-### 27. `LOAD`
-
-Loads one of sixteen preset slots when leaving edit mode.
-
-### 28. `SAVE`
-
-Writes the current configuration to one of sixteen preset slots when leaving edit mode.
-
-### 29. `PANIC`
-
-Shows MIDI and USB diagnostics including device counts, queue depth, drop counters, overload warning, last received note, and receive timing.
+- Main flash layout: 2 MB flash with 512 KB filesystem
+
+The main sketch requires the MIDI Library, Adafruit GFX, Adafruit SSD1306, and
+VL53L0X libraries. The secondary sketch includes its patched USB Host Shield
+2.0 source in its own `src` directory.
+
+The command-line build used for the main brain is:
+
+```sh
+arduino-cli compile --warnings all \
+  -b rp2040:rp2040:waveshare_rp2040_zero \
+  --board-options freq=120,usbstack=tinyusb,flash=2097152_524288 \
+  "arpnmidi os/arpnmidi_main_brain"
+```
+
+The secondary build uses the same board, USB stack, and CPU setting. It does
+not need the LittleFS flash-layout option.
+
+## Presets and persistence
+
+- Sixteen preset slots
+- Auto Save on or off; it is the device-global storage preference
+- Main musical settings, mappings, custom arp, chord memories, and parameter
+  locks are stored per preset
+- Four loop tracks are stored globally, not per preset
+- Loop mute, solo, hidden/undo state, active length, retained length, and events
+  survive reboot
+- Rolling Time Travel/Stutter history is intentionally RAM-only
+- EEPROM-emulated storage holds the compact preset image
+- LittleFS holds extended preset records and global loop data
+- Automatic writes are deferred until the musical engine is idle
+
+Firmware 3 uses explicit storage schema identities. If the installed preset
+layout does not match, the firmware installs the current factory defaults
+instead of running prototype preset migrations.
+
+To request a complete factory reset, hold the encoder while powering on,
+release it when prompted, and press it again within five seconds.
+
+## Current validation status
+
+- Both sketches compile without warnings for Waveshare RP2040 Zero at 120 MHz.
+- The four looper, rolling-history, Echo, and Note Length host tests pass.
+- The default secondary profile supports the current no-MAX prototype wiring.
+- The MAX3421E profile compiles but still needs validation on its target PCB.
+- ESP32-C3 wireless MIDI is planned and is not implemented in this firmware.
+
+Project archives are in [`legacy/`](legacy/) and are not needed to build or use
+the current firmware.
