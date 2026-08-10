@@ -67,6 +67,7 @@
 // updates). Do NOT switch back to <angle-bracket> or the global lib would be used.
 #include "src/USB_Host_Shield_Library_2.0/usbhub.h"
 #include "src/USB_Host_Shield_Library_2.0/usbh_midi.h"
+#include "src/rt_queue.h"
 #include <Adafruit_TinyUSB.h>
 
 // Select one pin profile:
@@ -107,6 +108,7 @@ constexpr uint8_t MAX_HOST_MIDI_DEVICE_COUNT = 4;
 constexpr uint32_t MIDI_BAUD = 31250;
 constexpr uint32_t USB_HUB_RESET_PULSE_MS = 25;
 constexpr uint32_t USB_HUB_RESET_RELEASE_SETTLE_MS = 5;
+constexpr size_t CORE_MIDI_QUEUE_CAPACITY = 128;
 
 // Subclass to expose whether a hosted device has a host->device (OUT) endpoint.
 // Sending to a device without one targets endpoint 0 and wedges the entire
@@ -139,10 +141,20 @@ struct SerialMidiParser {
   uint8_t have = 0;
 };
 
+struct CoreMidiPacket {
+  uint8_t status = 0;
+  uint8_t data1 = 0;
+  uint8_t data2 = 0;
+  uint8_t len = 0;
+};
+
 SerialMidiParser mainBrainParser;
 SerialMidiParser externalParser;
+arpnmidi3::RtQueue<CoreMidiPacket, CORE_MIDI_QUEUE_CAPACITY> maxToIoQueue;
+arpnmidi3::RtQueue<CoreMidiPacket, CORE_MIDI_QUEUE_CAPACITY> ioToMaxQueue;
 uint32_t usbHubLastResetMs = 0;
-bool maxHostReady = false;
+volatile bool ioCoreReady = false;
+volatile bool maxHostReady = false;
 int8_t maxInitResult = 99;
 uint8_t maxRevision = 0;
 
@@ -236,8 +248,13 @@ void sendUsbMidi(uint8_t status, uint8_t data1, uint8_t data2, uint8_t len) {
 }
 
 void sendMaxHostMidi(uint8_t status, uint8_t data1, uint8_t data2, uint8_t len) {
-  if (!maxHostReady || len == 0) return;
-  uint8_t msg[3] = {status, data1, data2};
+  if (!ENABLE_MAX3421E_HOST || len == 0) return;
+  ioToMaxQueue.push(CoreMidiPacket{status, data1, data2, len});
+}
+
+void sendMaxHostMidiNow(const CoreMidiPacket &packet) {
+  if (!maxHostReady || packet.len == 0) return;
+  uint8_t msg[3] = {packet.status, packet.data1, packet.data2};
   for (uint8_t i = 0; i < MAX_HOST_MIDI_DEVICE_COUNT; ++i) {
     RoutableMidi *midi = maxMidiDevices[i];
     // Only send to devices that actually have an OUT endpoint — sending to an
@@ -289,7 +306,6 @@ void setupMaxHost() {
     maxHostReady = false;
     maxInitResult = -1;
     maxRevision = 0;
-    Serial.println("MAX3421E host disabled by pin profile");
     return;
   }
 
@@ -304,8 +320,6 @@ void setupMaxHost() {
 
   maxInitResult = maxUsb.Init();
   maxRevision = maxUsb.regRd(rREVISION);
-  Serial.printf("MAX3421E Init: %d (%s)  REVISION=0x%02X (expect 0x13 if SPI OK)\n",
-                maxInitResult, maxInitResult == 0 ? "OK" : "FAIL", maxRevision);
   maxHostReady = (maxInitResult == 0);
 }
 
@@ -400,35 +414,31 @@ void pumpMaxHostToMainBrain() {
       // Only write when the TX buffer has room for the whole message, so a
       // USB-speed pad burst can't block here and starve the host Task. Sustained
       // over-rate (which a cable couldn't carry either) is dropped, not blocked.
-      if (Serial2.availableForWrite() >= (int)len) {
-        for (uint8_t b = 0; b < len; ++b) {
-          Serial2.write(msg[b]);
-        }
-      }
+      const CoreMidiPacket packet{msg[0], static_cast<uint8_t>(len > 1 ? msg[1] : 0),
+                                  static_cast<uint8_t>(len > 2 ? msg[2] : 0), len};
+      maxToIoQueue.push(packet);
     }
   }
 }
 
-void setup() {
-  if (ENABLE_MAX3421E_HOST) {
-    // Only drive hub reset if the reset pin is separate from the MAX INT pin.
-    // When PIN_USB_HUB_RESET_N == PIN_MAX_INT (testing mode), skip hub reset
-    // entirely so we don't corrupt the INT pullup.
-    if (PIN_USB_HUB_RESET_N != PIN_MAX_INT) {
-      holdUsbHubInReset();
-      configureMax3421ePinsIdle();
-      delay(USB_HUB_RESET_PULSE_MS);
-      releaseUsbHubForLocalHost();
-    } else {
-      configureMax3421ePinsIdle();
-      Serial.println("Hub reset skipped (PIN_USB_HUB_RESET_N == PIN_MAX_INT, testing mode)");
-    }
-  } else {
-    maxHostReady = false;
-    maxInitResult = -1;
-    maxRevision = 0;
+void pumpQueuedMaxInputToMainBrain() {
+  static CoreMidiPacket pending{};
+  static bool hasPending = false;
+  while (true) {
+    if (!hasPending) hasPending = maxToIoQueue.pop(pending);
+    if (!hasPending) return;
+    if (Serial2.availableForWrite() < pending.len) return;
+    writeSerialMidi(Serial2, pending.status, pending.data1, pending.data2, pending.len);
+    hasPending = false;
   }
+}
 
+void pumpQueuedMainOutputToMax() {
+  CoreMidiPacket packet;
+  while (ioToMaxQueue.pop(packet)) sendMaxHostMidiNow(packet);
+}
+
+void setup() {
   if (!TinyUSBDevice.isInitialized()) {
     TinyUSBDevice.begin(0);
   }
@@ -449,31 +459,43 @@ void setup() {
   Serial2.begin(MIDI_BAUD);
 
   externalMidi.begin(MIDI_BAUD);
-  setupMaxHost();
+  __atomic_store_n(&ioCoreReady, true, __ATOMIC_RELEASE);
 }
 
 void loop() {
 #ifdef TINYUSB_NEED_POLLING_TASK
   TinyUSBDevice.task();
 #endif
-  if (maxHostReady) maxUsb.Task();
-
   pumpUsbToMainBrain();
-  pumpMaxHostToMainBrain();
+  pumpQueuedMaxInputToMainBrain();
   pumpMainBrainToUsbAndExternal();
   pumpExternalToMainBrain();
+}
 
-  static uint32_t lastDiagMs = 0;
-  uint32_t now = millis();
-  if (now - lastDiagMs >= 3000) {
-    lastDiagMs = now;
-    Serial.printf("[%lu ms] maxHostReady=%d  USB state=%d  init=%d  REV=0x%02X\n",
-                  now, (int)maxHostReady, (int)maxUsb.getUsbTaskState(),
-                  (int)maxInitResult, maxRevision);
-    for (uint8_t i = 0; i < MAX_HOST_MIDI_DEVICE_COUNT; ++i) {
-      if (maxMidiDevices[i] && maxMidiDevices[i]->GetAddress() != 0) {
-        Serial.printf("  MIDI[%d] addr=%d\n", i, maxMidiDevices[i]->GetAddress());
-      }
+void setup1() {
+  while (!__atomic_load_n(&ioCoreReady, __ATOMIC_ACQUIRE)) delay(1);
+  if (ENABLE_MAX3421E_HOST) {
+    // Hub reset and all MAX/SPI ownership remain entirely on the host core.
+    if (PIN_USB_HUB_RESET_N != PIN_MAX_INT) {
+      holdUsbHubInReset();
+      configureMax3421ePinsIdle();
+      delay(USB_HUB_RESET_PULSE_MS);
+      releaseUsbHubForLocalHost();
+    } else {
+      configureMax3421ePinsIdle();
     }
+    setupMaxHost();
+  } else {
+    maxHostReady = false;
+    maxInitResult = -1;
+    maxRevision = 0;
+  }
+}
+
+void loop1() {
+  if (maxHostReady) {
+    maxUsb.Task();
+    pumpMaxHostToMainBrain();
+    pumpQueuedMainOutputToMax();
   }
 }
