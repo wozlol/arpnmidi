@@ -155,8 +155,8 @@ constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 // Firmware 3 is still prototype firmware, so an incompatible preset-map change deliberately
 // receives a new schema identity instead of carrying migration code. A mismatch installs all
 // factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
-constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF306;
-constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3060001UL;
+constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF307;
+constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3070001UL;
 constexpr uint8_t MAX_CUSTOM_ARP_EVENTS = 32;
 constexpr uint32_t LOOP_FILE_MAGIC = 0x4C503304UL;  // "LP3" file, schema 4
 constexpr size_t EEPROM_BYTES = 4096;
@@ -218,7 +218,7 @@ void emitStutterEvent(void *context, uint8_t historyTarget,
 void emitNoteLengthEvent(void *context, uint8_t target, uint8_t sourcePort,
                          const arpnmidi3::LoopMidiEvent &event);
 void deactivateStutter(uint8_t target);
-void requestStutterState(uint8_t target, bool enabled, int16_t division = -1);
+void requestStutterState(uint8_t target, bool enabled, int16_t lengthSelection = -1);
 uint8_t currentDivisionSetting();
 void captureChordMemoryOutput(uint8_t sourcePort, uint8_t channel,
                               uint8_t note, uint8_t velocity);
@@ -380,6 +380,15 @@ constexpr uint8_t DRUM_DIVISION_FOLLOW_ARP = DIVISION_COUNT;
 constexpr uint8_t DRUM_DIVISION_FREE = DIVISION_COUNT + 1;
 constexpr uint8_t LIVE_TARGET_COUNT = 5;  // Main plus Looper Tracks 1-4.
 constexpr uint8_t STUTTER_BUTTON_DIVISION_COUNT = 6;
+// Stutter shares the rolling capture engine with Time Travel. Its long choices
+// are meter-aware bars, followed by the ordinary musical divisions from long
+// to short so a mapped knob moves from 8 bars toward 1/64T.
+constexpr uint8_t STUTTER_BAR_LENGTH_COUNT = 4;
+constexpr uint8_t STUTTER_LENGTH_DIVISION_BASE = STUTTER_BAR_LENGTH_COUNT;
+constexpr uint8_t STUTTER_LENGTH_COUNT =
+    STUTTER_LENGTH_DIVISION_BASE + DIVISION_COUNT;
+constexpr uint8_t STUTTER_LENGTH_DEFAULT =
+    STUTTER_LENGTH_DIVISION_BASE + DIV_1_4;
 constexpr uint8_t CC_REMAP_SLOT_COUNT = 16;
 constexpr uint8_t NOTE_CC_SLOT_COUNT = 16;
 
@@ -525,7 +534,7 @@ struct LiveTargetSettings {
   uint8_t noteLengthEnabled;
   uint8_t noteLengthPercent;
   uint8_t stutterEnabled;
-  uint8_t stutterDivision;
+  uint8_t stutterLengthSelection;
   uint8_t echoEnabled;
   uint8_t echoWet;
   uint8_t echoLength;
@@ -904,7 +913,7 @@ bool stutterTimedOut[LIVE_TARGET_COUNT];
 bool noteLengthSettingWasEnabled[LIVE_TARGET_COUNT];
 bool echoSettingWasEnabled[LIVE_TARGET_COUNT];
 bool featureButtonCcHeld[FEATURE_BUTTON_COUNT];
-uint8_t activeStutterDivision[LIVE_TARGET_COUNT];
+uint8_t activeStutterLengthSelection[LIVE_TARGET_COUNT];
 uint64_t stutterStopUs[LIVE_TARGET_COUNT];
 uint8_t multitrackPlaybackHeld[arpnmidi3::kLoopTrackCount][16][16];
 bool loopStorageDirty = false;
@@ -1095,8 +1104,8 @@ const int8_t kEncoderTransitionTable[16] = {
 };
 
 const char *const kSettingNames[SETTING_COUNT] = {
-  "1 BPM", "2 SWING", "3 ARP", "4 VELOCITY", "5 NOTE LENGTH", "6 STUTTER", "7 ECHO",
-  "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 MAIN", "11 DRUM MAGIC",
+  "1 BPM", "2 SWING", "3 ARP", "4 VELOCITY", "5 NOTELENGTH", "6 STUTTER", "7 ECHO",
+  "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 ARP OUT", "11 DRUM MAGIC",
   "12 BASS", "13 THRU OUT", "14 RNDRBN", "15 ROUTER", "16 DRUM ROLL", "17 FEATURES",
   "18 CC MAP", "19 NOTE>CC", "20 IN CC >", "21 MONO RETRIG", "22 SCRNSVR",
   "23 EYE/PUSH", "24 EYE MODE", "25 PUSH", "26 4BUTTON", "27 LOOPER",
@@ -3295,11 +3304,36 @@ void tickNoteLength() {
   noteLengthEngine.tick(time_us_64(), emitNoteLengthEvent, nullptr);
 }
 
+uint8_t stutterLengthForDivision(uint8_t division) {
+  return STUTTER_LENGTH_DIVISION_BASE + clampU8(division, 0, DIVISION_COUNT - 1);
+}
+
+String stutterLengthName(uint8_t selection) {
+  static const char *const barNames[STUTTER_BAR_LENGTH_COUNT] = {
+    "8 BARS", "4 BARS", "2 BARS", "1 BAR"
+  };
+  selection = clampU8(selection, 0, STUTTER_LENGTH_COUNT - 1);
+  if (selection < STUTTER_BAR_LENGTH_COUNT) return String(barNames[selection]);
+  return String(kDivisionNames[selection - STUTTER_LENGTH_DIVISION_BASE]);
+}
+
+uint64_t stutterLengthPulses(uint8_t selection) {
+  selection = clampU8(selection, 0, STUTTER_LENGTH_COUNT - 1);
+  if (selection < STUTTER_BAR_LENGTH_COUNT) {
+    static constexpr uint8_t barMultipliers[STUTTER_BAR_LENGTH_COUNT] = {8, 4, 2, 1};
+    const uint64_t pulsesPerBar = static_cast<uint64_t>(MUSICAL_PPQN) *
+        (firmware3Settings.timeSignature ? 3ULL : 4ULL);
+    return pulsesPerBar * barMultipliers[selection];
+  }
+  return kDivisionPulseSteps[selection - STUTTER_LENGTH_DIVISION_BASE];
+}
+
 uint32_t stutterLengthUs(uint8_t target) {
-  const uint8_t division = clampU8(firmware3Settings.liveTargets[target].stutterDivision,
-                                   DIV_1_2, DIVISION_COUNT - 1);
+  const uint8_t selection = clampU8(
+      firmware3Settings.liveTargets[target].stutterLengthSelection,
+      0, STUTTER_LENGTH_COUNT - 1);
   return static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
-      musicalDurationUs(kDivisionPulseSteps[division])));
+      musicalDurationUs(stutterLengthPulses(selection))));
 }
 
 bool activateStutter(uint8_t target, uint64_t nowUs) {
@@ -3309,7 +3343,8 @@ bool activateStutter(uint8_t target, uint64_t nowUs) {
                                         HISTORY_OUTPUT_TARGET_BASE + target)) return false;
   echoEngine.stopTarget(target, emitEchoEvent, nullptr);
   releaseFinalTarget(target);
-  activeStutterDivision[target] = firmware3Settings.liveTargets[target].stutterDivision;
+  activeStutterLengthSelection[target] =
+      firmware3Settings.liveTargets[target].stutterLengthSelection;
   const uint64_t barPulses = static_cast<uint64_t>(MUSICAL_PPQN) *
       (firmware3Settings.timeSignature ? 3ULL : 4ULL);
   stutterStopUs[target] = nowUs + musicalDurationUs(barPulses) *
@@ -3337,8 +3372,8 @@ void tickStutter() {
       if (!stutterTimedOut[target]) activateStutter(target, nowUs);
       stutterSettingWasEnabled[target] = true;
     } else if (stutterRepeaters[target].active() &&
-               activeStutterDivision[target] !=
-                   firmware3Settings.liveTargets[target].stutterDivision) {
+               activeStutterLengthSelection[target] !=
+                   firmware3Settings.liveTargets[target].stutterLengthSelection) {
       deactivateStutter(target);
       activateStutter(target, nowUs);
     }
@@ -3786,7 +3821,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (!stutterUi.editing) return 4;
       if (stutterUi.cursor == 0) return LIVE_TARGET_COUNT - 1;
       if (stutterUi.cursor == 1) return 1;
-      if (stutterUi.cursor == 2) return DIVISION_COUNT - 1;
+      if (stutterUi.cursor == 2) return STUTTER_LENGTH_COUNT - 1;
       return 16;
     case SET_ECHO:
       if (!echoUi.editing) return 6;
@@ -3916,7 +3951,9 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       if (!stutterUi.editing) return stutterUi.cursor;
       if (stutterUi.cursor == 0) return stutterTarget;
       if (stutterUi.cursor == 1) return firmware3Settings.liveTargets[stutterTarget].stutterEnabled;
-      if (stutterUi.cursor == 2) return firmware3Settings.liveTargets[stutterTarget].stutterDivision;
+      if (stutterUi.cursor == 2) {
+        return firmware3Settings.liveTargets[stutterTarget].stutterLengthSelection;
+      }
       return firmware3Settings.stutterTimeoutBars;
     case SET_ECHO:
       if (!echoUi.editing) return echoUi.cursor;
@@ -4104,7 +4141,7 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       else if (stutterUi.cursor == 1) requestStutterState(stutterTarget, value != 0);
       else if (stutterUi.cursor == 2) requestStutterState(stutterTarget,
           firmware3Settings.liveTargets[stutterTarget].stutterEnabled != 0,
-          clampU8(value, DIV_1_2, DIVISION_COUNT - 1));
+          clampU8(value, 0, STUTTER_LENGTH_COUNT - 1));
       else firmware3Settings.stutterTimeoutBars = clampU8(value, 1, 16);
       break;
     case SET_ECHO:
@@ -4489,7 +4526,7 @@ Firmware3Settings defaultFirmware3Settings() {
     target.noteLengthEnabled = 0;
     target.noteLengthPercent = 100;
     target.stutterEnabled = 0;
-    target.stutterDivision = DIV_1_16;
+    target.stutterLengthSelection = STUTTER_LENGTH_DEFAULT;
     target.echoEnabled = 0;
     target.echoWet = 50;
     target.echoLength = DIV_1_2;
@@ -4561,7 +4598,8 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
     target.noteLengthEnabled = target.noteLengthEnabled ? 1 : 0;
     target.noteLengthPercent = clampU8(target.noteLengthPercent, 1, 200);
     target.stutterEnabled = target.stutterEnabled ? 1 : 0;
-    target.stutterDivision = clampU8(target.stutterDivision, DIV_1_2, DIVISION_COUNT - 1);
+    target.stutterLengthSelection =
+        clampU8(target.stutterLengthSelection, 0, STUTTER_LENGTH_COUNT - 1);
     target.echoEnabled = target.echoEnabled ? 1 : 0;
     target.echoWet = clampU8(target.echoWet, 0, 100);
     target.echoLength = clampU8(target.echoLength, 0, DIVISION_COUNT - 1);
@@ -5696,12 +5734,12 @@ uint8_t featureTargetFromBlock(uint8_t id, uint8_t base) {
   return id >= base && id < base + LIVE_TARGET_COUNT ? id - base : 0xFF;
 }
 
-void requestStutterState(uint8_t target, bool enabled, int16_t division) {
+void requestStutterState(uint8_t target, bool enabled, int16_t lengthSelection) {
   if (target >= LIVE_TARGET_COUNT) return;
   if (stutterRepeaters[target].active()) deactivateStutter(target);
-  if (division >= 0) {
-    firmware3Settings.liveTargets[target].stutterDivision =
-        clampU8(division, DIV_1_2, DIVISION_COUNT - 1);
+  if (lengthSelection >= 0) {
+    firmware3Settings.liveTargets[target].stutterLengthSelection =
+        clampU8(lengthSelection, 0, STUTTER_LENGTH_COUNT - 1);
   }
   firmware3Settings.liveTargets[target].stutterEnabled = enabled ? 1 : 0;
   stutterTimedOut[target] = false;
@@ -5731,9 +5769,10 @@ void applyFeatureKnob(uint8_t id, uint8_t value) {
     if (value == 0) {
       requestStutterState(target, false);
     } else {
-      const uint8_t division = DIV_1_2 + static_cast<uint8_t>(
-          (static_cast<uint16_t>(value - 1U) * (DIVISION_COUNT - 1U - DIV_1_2) + 63U) / 126U);
-      requestStutterState(target, true, division);
+      const uint8_t lengthSelection = static_cast<uint8_t>(
+          (static_cast<uint16_t>(value - 1U) * (STUTTER_LENGTH_COUNT - 1U) + 63U) /
+          126U);
+      requestStutterState(target, true, lengthSelection);
     }
     return;
   }
@@ -5869,7 +5908,8 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
     const uint8_t offset = id - FEATURE_BUTTON_STUTTER_DIV_BASE;
     target = offset / STUTTER_BUTTON_DIVISION_COUNT;
     const uint8_t division = divisions[offset % STUTTER_BUTTON_DIVISION_COUNT];
-    requestStutterState(target, pressed, pressed ? division : -1);
+    requestStutterState(target, pressed,
+        pressed ? stutterLengthForDivision(division) : -1);
     return;
   }
   if (!pressed) return;
@@ -7204,8 +7244,85 @@ String settingValueString(uint8_t id) {
       if (v == 0) return "OFF";
       if (v == 1) return "AUTO";
       return "NOW";
-    case SET_PANIC: return "CLICK";
+    case SET_PANIC: return "PANIC";
     default: return "";
+  }
+}
+
+bool currentSubmenuLabel(String &label, uint8_t &index) {
+  if (ui.menuMode != MENU_EDIT) return false;
+  switch (ui.selectedSetting) {
+    case SET_ARP_MODE: {
+      static const char *const names[] = {
+        "MODE", "DIVISION", "ARP VEL", "ARP LENGTH", "OCTAVES", "RETRIGGER",
+        "NOTE ORDER", "CUSTOM LEN", "LEARN ARP", "CLEAR ARP", "BACK"
+      };
+      index = arpMenuUi.cursor; label = names[index]; return true;
+    }
+    case SET_LIVE_VELOCITY: {
+      static const char *const names[] = {"TARGET", "ON/OFF", "VELOCITY", "BACK"};
+      index = liveVelocityUi.cursor; label = names[index]; return true;
+    }
+    case SET_LIVE_NOTE_LENGTH: {
+      static const char *const names[] = {"TARGET", "ON/OFF", "NOTELENGTH", "BACK"};
+      index = liveNoteLengthUi.cursor; label = names[index]; return true;
+    }
+    case SET_STUTTER: {
+      static const char *const names[] = {"TARGET", "ON/OFF", "DIVISION", "TIMEOUT", "BACK"};
+      index = stutterUi.cursor; label = names[index]; return true;
+    }
+    case SET_ECHO: {
+      static const char *const names[] = {"TARGET", "ON/OFF", "WET", "LENGTH", "DELAY", "DRIFT", "BACK"};
+      index = echoUi.cursor; label = names[index]; return true;
+    }
+    case SET_QUICK_JUMP: {
+      static const char *const names[] = {"INPUT CH", "OUTPUT CH", "ON/OFF", "BACK"};
+      index = quickJumpUi.cursor; label = names[index]; return true;
+    }
+    case SET_BASS_CH: {
+      static const char *const names[] = {"CH/OCTAVE", "HIGH NOTE", "BACK"};
+      index = bassUi.cursor; label = names[index]; return true;
+    }
+    case SET_DRUM_MAGIC: {
+      static const char *const names[] = {
+        "ON/OFF", "INPUT", "OUTPUT CH", "SPLIT START", "MAP START", "AT>VEL", "DIVISION", "BACK"
+      };
+      index = drumMagicUi.cursor; label = names[index]; return true;
+    }
+    case SET_LOOP_BARS: {
+      static const char *const names[] = {
+        "TRACK", "LENGTH", "AUTO REC", "TIME TRAVEL", "TRACK MODE",
+        "AUTO QUANT", "RECORD CCS", "MIDI TRANS", "BACK"
+      };
+      index = looperSettingsUi.cursor; label = names[index]; return true;
+    }
+    case SET_PARAMETER_LOCK: {
+      static const char *const names[] = {"CHANNEL", "CLEAR LOCKS", "BACK"};
+      index = parameterLockUi.cursor; label = names[index]; return true;
+    }
+    case SET_CHORD: {
+      static const char *const names[] = {"ON/OFF", "POSITION 1", "POSITION 2", "POSITION 3", "POSITION 4", "BACK"};
+      index = chordUi.cursor; label = names[index]; return true;
+    }
+    case SET_FORCE_SCALE:
+      index = scaleUi.cursor;
+      if (index == 0) label = "SCALE TYPE";
+      else if (index == 13) label = "BACK";
+      else if (index == 1) label = "USER ROOT";
+      else label = String("INTVL +") + String(index - 1U);
+      return true;
+    case SET_LIVE_CC: {
+      static const char *const names[] = {"CC NUMBER", "VALUE", "BACK"};
+      index = liveCcCursor; label = names[index]; return true;
+    }
+    case SET_GLOBAL: {
+      static const char *const names[] = {
+        "AUTO SAVE", "CLOCK IN", "CLOCK OUT", "TIME SIG", "CH AFTERTCH",
+        "POLY AFTER", "AFTER CC", "AT>ARP VEL", "RESET SLOT", "BACK"
+      };
+      index = globalUi.cursor; label = names[index]; return true;
+    }
+    default: return false;
   }
 }
 
@@ -7226,19 +7343,18 @@ void drawModeLabel() {
       display.print(F("CKEY "));
       display.print(kNoteNames[key - 13]);
     }
-  } else if (ui.selectedSetting == SET_FORCE_SCALE) {
-    if (ui.menuMode == MENU_EDIT) display.print(F("SCALE SETUP"));
-    else display.print(kForceScaleNames[settings.forceScale]);
-  } else if (ui.selectedSetting == SET_ARP_MODE && ui.menuMode == MENU_EDIT) {
-    static const char *const names[] = {
-      "MODE", "DIVISION", "VELOCITY", "LENGTH", "OCTAVES", "RETRIGGER",
-      "NOTE ORDER", "CUSTOM LEN", "LEARN", "CLEAR", "BACK"
-    };
-    display.print(static_cast<char>('A' + arpMenuUi.cursor));
-    display.print(F(" "));
-    display.print(names[arpMenuUi.cursor]);
+  } else if (ui.selectedSetting == SET_FORCE_SCALE && ui.menuMode != MENU_EDIT) {
+    display.print(kForceScaleNames[settings.forceScale]);
   } else {
-    display.print(kSettingNames[ui.selectedSetting]);
+    String submenuLabel;
+    uint8_t submenuIndex = 0;
+    if (currentSubmenuLabel(submenuLabel, submenuIndex)) {
+      display.print(static_cast<char>('A' + submenuIndex));
+      display.print(F(" "));
+      display.print(submenuLabel);
+    } else {
+      display.print(kSettingNames[ui.selectedSetting]);
+    }
   }
   display.setFont();
 }
@@ -7251,6 +7367,25 @@ void drawBarValue(uint8_t pct, const String &label) {
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(2);
   display.setCursor(0, 28);
+  display.print(label);
+}
+
+void drawNamedBarValue(const String &name, uint16_t value, uint16_t maximum,
+                       const String &label, int16_t neutral = -1) {
+  (void)name;
+  maximum = max<uint16_t>(1, maximum);
+  value = min<uint16_t>(value, maximum);
+  display.setTextColor(SSD1306_WHITE);
+  display.drawRect(0, 0, SCREEN_W, 20, SSD1306_WHITE);
+  const uint8_t fillWidth = static_cast<uint8_t>(
+      (static_cast<uint32_t>(value) * (SCREEN_W - 2U)) / maximum);
+  if (fillWidth > 0) display.fillRect(1, 1, fillWidth, 18, SSD1306_WHITE);
+  if (neutral >= 0 && neutral <= static_cast<int16_t>(maximum)) {
+    const int markerX = 1 + (static_cast<uint32_t>(neutral) * (SCREEN_W - 2U)) / maximum;
+    display.drawLine(markerX, 0, markerX, 21, SSD1306_WHITE);
+  }
+  display.setTextSize(label.length() <= 7 ? 3 : (label.length() <= 11 ? 2 : 1));
+  display.setCursor(0, label.length() <= 7 ? 22 : (label.length() <= 11 ? 26 : 32));
   display.print(label);
 }
 
@@ -7417,36 +7552,30 @@ void drawLoopStatusIcon() {
   }
 }
 
-void drawChannelScreen(const __FlashStringHelper *title, int channel, bool allowOff = false) {
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(title);
+void drawChannelScreen(const __FlashStringHelper *, int channel, bool allowOff = false) {
   if (allowOff && channel == 0) {
     display.setTextSize(3);
-    display.setCursor(0, 18);
+    display.setCursor(0, 11);
     display.print(F("OFF"));
   } else {
     display.setTextSize(3);
-    display.setCursor(0, 18);
+    display.setCursor(0, 11);
     display.print(F("CH "));
     display.print(channel);
   }
 }
 
 void drawBassScreen(uint8_t mode) {
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(F("BASS "));
   if (mode == 0) {
     display.setTextSize(3);
-    display.setCursor(0, 18);
+    display.setCursor(0, 11);
     display.print(F("OFF"));
     return;
   }
   const uint8_t channel = bassModeChannel(mode);
   const int8_t octaves = bassModeOctaveOffset(mode);
-  display.setTextSize(2);
-  display.setCursor(60, 0);
+  display.setTextSize(1);
+  display.setCursor(84, 2);
   if (octaves > 0) display.print(F("+1oct"));
   else if (octaves == 0) display.print(F("0oct"));
   else {
@@ -7454,23 +7583,20 @@ void drawBassScreen(uint8_t mode) {
     display.print(F("oct"));
   }
   display.setTextSize(3);
-  display.setCursor(0, 18);
+  display.setCursor(0, 11);
   display.print(F("CH "));
   display.print(channel);
 }
 
 void drawCcChannelScreen(uint8_t channel) {
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(F("CC"));
   if (channel == 17) {
     display.setTextSize(3);
-    display.setCursor(0, 18);
+    display.setCursor(0, 11);
     display.print(F("ALL3"));
     return;
   }
   display.setTextSize(3);
-  display.setCursor(0, 18);
+  display.setCursor(0, 11);
   display.print(F("CH "));
   display.print(channel);
 }
@@ -7499,17 +7625,13 @@ void drawRoundRobinScreen(uint8_t cursor) {
   display.setTextColor(SSD1306_WHITE);
   if (ui.menuMode == MENU_SELECT) {
     display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.print(F("ROUND ROBIN"));
-    display.setCursor(0, 14);
+    display.setCursor(0, 10);
     display.print(roundRobinChannelList());
     return;
   }
 
   display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(F("RNDRBN"));
-  display.setCursor(0, 22);
+  display.setCursor(0, 11);
   if (cursor < 16) {
     display.print((settings.roundRobinMask & channelBit(cursor + 1)) ? F("[x] ") : F("[ ] "));
     display.print(F("CH "));
@@ -7564,17 +7686,13 @@ void drawRouterScreen(uint8_t cursor) {
   display.setTextColor(SSD1306_WHITE);
   if (ui.menuMode == MENU_SELECT) {
     display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.print(F("ROUTER"));
-    display.setCursor(0, 14);
+    display.setCursor(0, 10);
     display.print(routerActiveList());
     return;
   }
 
   display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(F("ROUTER"));
-  display.setCursor(0, 22);
+  display.setCursor(0, 11);
   if (routerEditStage == ROUTER_STAGE_LIST) {
     if (cursor < 16) display.print(routerEntryString(cursor));
     else if (cursor == ROUTER_CLEAR_SLOT) display.print(F("CLEAR"));
@@ -7595,12 +7713,9 @@ void drawRouterScreen(uint8_t cursor) {
 }
 
 void drawDivNotesScreen(uint8_t cursor) {
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(F("DRUM ROLL"));
   if (cursor == DIV_NOTE_PLUS_SLOT) {
     display.setTextSize(2);
-    display.setCursor(0, 18);
+    display.setCursor(0, 8);
     display.print(F("+NOTE"));
     display.setTextSize(1);
     display.setCursor(0, 38);
@@ -7616,22 +7731,22 @@ void drawDivNotesScreen(uint8_t cursor) {
   }
   if (cursor == DIV_NOTE_RESET_SLOT) {
     display.setTextSize(3);
-    display.setCursor(0, 18);
+    display.setCursor(0, 11);
     display.print(F("RESET"));
     return;
   }
   if (cursor == DIV_NOTE_BACK_SLOT) {
     display.setTextSize(3);
-    display.setCursor(0, 18);
+    display.setCursor(0, 11);
     display.print(F("BACK"));
     return;
   }
   const uint8_t divId = divNoteSlotToDivision(cursor);
   display.setTextSize(2);
-  display.setCursor(0, 18);
+  display.setCursor(0, 3);
   display.print(kDivisionNames[divId]);
   display.setTextSize(1);
-  display.setCursor(0, 38);
+  display.setCursor(0, 28);
   const uint8_t mapCh = settings.divNoteChannels[cursor];
   const uint8_t mapNote = settings.divNoteNotes[cursor];
   const uint8_t bindingKind = featureControls.drumRollKinds[cursor];
@@ -7661,7 +7776,7 @@ String featureKnobName(uint8_t id) {
   struct BlockName { uint8_t base; const char *name; };
   static const BlockName blocks[] = {
     {FEATURE_KNOB_VELOCITY_BASE, "VELOCITY"},
-    {FEATURE_KNOB_NOTE_LENGTH_BASE, "NOTE LENGTH"},
+    {FEATURE_KNOB_NOTE_LENGTH_BASE, "NOTELENGTH"},
     {FEATURE_KNOB_STUTTER_BASE, "STUTTER"},
     {FEATURE_KNOB_ECHO_WET_BASE, "ECHO WET"},
     {FEATURE_KNOB_ECHO_LENGTH_BASE, "ECHO LENGTH"},
@@ -7692,7 +7807,7 @@ String featureButtonName(uint8_t id) {
   uint8_t target = featureTargetFromBlock(id, FEATURE_BUTTON_VELOCITY_BASE);
   if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " VELOCITY";
   target = featureTargetFromBlock(id, FEATURE_BUTTON_NOTE_LENGTH_BASE);
-  if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " NOTE LENGTH";
+  if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " NOTELENGTH";
   target = featureTargetFromBlock(id, FEATURE_BUTTON_STUTTER_BASE);
   if (target < LIVE_TARGET_COUNT) return liveTargetName(target) + " STUTTER";
   target = featureTargetFromBlock(id, FEATURE_BUTTON_ECHO_BASE);
@@ -7738,13 +7853,10 @@ String featureButtonName(uint8_t id) {
 }
 
 void drawFeaturesScreen() {
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(F("FEATURES"));
   if (featuresUiStage == FEATURES_UI_GROUPS) {
     static const char *const groups[] = {"CC KNOBS", "CC BUTTONS", "CLEAR", "BACK"};
     display.setTextSize(featuresGroupCursor < 2 ? 2 : 3);
-    display.setCursor(0, 20);
+    display.setCursor(0, 11);
     display.print(groups[featuresGroupCursor]);
     return;
   }
@@ -7753,23 +7865,23 @@ void drawFeaturesScreen() {
       : static_cast<uint8_t>(FEATURE_BUTTON_COUNT);
   if (featuresItemCursor >= count) {
     display.setTextSize(3);
-    display.setCursor(0, 20);
+    display.setCursor(0, 11);
     display.print(F("BACK"));
     return;
   }
   const String name = featuresUiStage == FEATURES_UI_KNOBS
       ? featureKnobName(featuresItemCursor) : featureButtonName(featuresItemCursor);
   display.setTextSize(1);
-  display.setCursor(0, 18);
+  display.setCursor(0, 6);
   display.println(name);
-  display.setCursor(0, 31);
+  display.setCursor(0, 23);
   if (featuresLearnActive) {
     display.print(featuresUiStage == FEATURES_UI_KNOBS ? F("MOVE A CC") : F("MOVE CC / PLAY NOTE"));
     return;
   }
   if (featuresUiStage == FEATURES_UI_KNOBS) {
     const FeatureKnobBinding &binding = featureControls.knobs[featuresItemCursor];
-    if (binding.channel == 0 || binding.cc > 127) display.print(F("UNMAPPED (PUSH)"));
+    if (binding.channel == 0 || binding.cc > 127) display.print(F("UNMAPPED"));
     else {
       display.print(F("CH ")); display.print(binding.channel);
       display.print(F(" CC ")); display.print(binding.cc);
@@ -7777,7 +7889,7 @@ void drawFeaturesScreen() {
   } else {
     const FeatureButtonBinding &binding = featureControls.buttons[featuresItemCursor];
     if (binding.kind == TRIGGER_BINDING_OFF || binding.channel == 0) {
-      display.print(F("UNMAPPED (PUSH)"));
+      display.print(F("UNMAPPED"));
     } else {
       display.print(F("CH ")); display.print(binding.channel);
       display.print(binding.kind == TRIGGER_BINDING_CC ? F(" CC ") : F(" NOTE "));
@@ -7787,20 +7899,17 @@ void drawFeaturesScreen() {
 }
 
 void drawCcRemapScreen() {
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(F("CC MAP"));
   if (ccRemapUiStage == CC_REMAP_UI_LIST) {
     if (ccRemapCursor == CC_REMAP_SLOT_COUNT) {
-      display.setTextSize(3); display.setCursor(0, 20); display.print(F("CLEAR")); return;
+      display.setTextSize(3); display.setCursor(0, 11); display.print(F("CLEAR")); return;
     }
     if (ccRemapCursor > CC_REMAP_SLOT_COUNT) {
-      display.setTextSize(3); display.setCursor(0, 20); display.print(F("BACK")); return;
+      display.setTextSize(3); display.setCursor(0, 11); display.print(F("BACK")); return;
     }
     const CcRemapEntry &entry = featureControls.ccRemaps[ccRemapCursor];
-    display.setTextSize(1); display.setCursor(0, 18);
+    display.setTextSize(1); display.setCursor(0, 6);
     display.print(F("SLOT ")); display.print(ccRemapCursor + 1U);
-    display.setCursor(0, 31);
+    display.setCursor(0, 23);
     if (entry.inputCc > 127) display.print(F("UNMAPPED"));
     else {
       display.print(F("CC ")); display.print(entry.inputCc);
@@ -7810,12 +7919,12 @@ void drawCcRemapScreen() {
     return;
   }
   const CcRemapEntry &entry = featureControls.ccRemaps[ccRemapCursor];
-  display.setTextSize(1); display.setCursor(0, 20);
+  display.setTextSize(1); display.setCursor(0, 8);
   if (ccRemapUiStage == CC_REMAP_UI_INPUT) {
     display.print(F("INPUT CC: "));
     if (entry.inputCc > 127) display.print(F("OFF")); else display.print(entry.inputCc);
     display.setCursor(0, 34);
-    display.print(ccRemapLearnActive ? F("MOVE MAIN CC") : F("TURN OR PUSH"));
+    if (ccRemapLearnActive) display.print(F("MOVE MAIN CC"));
   } else if (ccRemapUiStage == CC_REMAP_UI_OUTPUT_CHANNEL) {
     display.print(F("OUTPUT CH: ")); display.print(entry.outputChannel);
   } else {
@@ -7824,20 +7933,17 @@ void drawCcRemapScreen() {
 }
 
 void drawNoteCcScreen() {
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(F("NOTE>CC"));
   if (noteCcUiStage == NOTE_CC_UI_LIST) {
     if (noteCcCursor == NOTE_CC_SLOT_COUNT) {
-      display.setTextSize(3); display.setCursor(0, 20); display.print(F("CLEAR")); return;
+      display.setTextSize(3); display.setCursor(0, 11); display.print(F("CLEAR")); return;
     }
     if (noteCcCursor > NOTE_CC_SLOT_COUNT) {
-      display.setTextSize(3); display.setCursor(0, 20); display.print(F("BACK")); return;
+      display.setTextSize(3); display.setCursor(0, 11); display.print(F("BACK")); return;
     }
     const NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
-    display.setTextSize(1); display.setCursor(0, 18);
+    display.setTextSize(1); display.setCursor(0, 6);
     display.print(F("SLOT ")); display.print(noteCcCursor + 1U);
-    display.setCursor(0, 31);
+    display.setCursor(0, 23);
     if (entry.inputChannel == 0 || entry.inputNote > 127) display.print(F("UNMAPPED"));
     else {
       display.print(F("CH ")); display.print(entry.inputChannel);
@@ -7848,17 +7954,21 @@ void drawNoteCcScreen() {
     return;
   }
   const NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
-  display.setTextSize(1); display.setCursor(0, 20);
+  display.setTextSize(1); display.setCursor(0, 8);
   if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
     display.print(F("INPUT CHANNEL: ")); display.print(max<uint8_t>(1, entry.inputChannel));
   } else if (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE) {
     display.print(F("INPUT NOTE: ")); display.print(entry.inputNote <= 127 ? entry.inputNote : 0);
-    display.setCursor(0, 34); display.print(noteCcLearnActive ? F("PLAY NOTE TO LEARN") : F("TURN OR PUSH"));
+    if (noteCcLearnActive) {
+      display.setCursor(0, 34); display.print(F("PLAY NOTE TO LEARN"));
+    }
   } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) {
     display.print(F("OUTPUT CHANNEL: ")); display.print(entry.outputChannel);
   } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) {
     display.print(F("OUTPUT CC: ")); display.print(entry.outputCc);
-    display.setCursor(0, 34); display.print(noteCcLearnActive ? F("MOVE CC TO LEARN") : F("TURN OR PUSH"));
+    if (noteCcLearnActive) {
+      display.setCursor(0, 34); display.print(F("MOVE CC TO LEARN"));
+    }
   } else {
     display.print(F("BEHAVIOR")); display.setCursor(0, 34); display.setTextSize(2);
     display.print(entry.behavior == NOTE_CC_TOGGLE ? F("TOGGLE") : F("MOMENTARY"));
@@ -7866,19 +7976,16 @@ void drawNoteCcScreen() {
 }
 
 void drawFourButtonScreen() {
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(F("4BUTTON"));
   display.setTextSize(1);
-  display.setCursor(0, 20);
+  display.setCursor(0, 8);
   if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) {
-    static const char *const items[] = {"MODE", "CUSTOM", "LOOPER", "CHORD MEMORY", "BACK"};
+    static const char *const items[] = {"MODE", "CUSTOM", "LOOPER", "CHORD MEM", "BACK"};
     display.setTextSize(2);
     display.print(items[fourButtonUiCursor]);
     return;
   }
   if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) {
-    static const char *const modes[] = {"CUSTOM", "LOOPER", "CHORD MEMORY"};
+    static const char *const modes[] = {"CUSTOM", "LOOPER", "CHORD MEM"};
     display.print(F("MODE"));
     display.setTextSize(2); display.setCursor(0, 31);
     display.print(modes[featureControls.fourButtonMode]);
@@ -7914,7 +8021,7 @@ void drawFourButtonScreen() {
     return;
   }
   if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) {
-    static const char *const names[] = {"SELECT TRACK", "MUTE", "SOLO", "DELETE", "UNDO", "BACK"};
+    static const char *const names[] = {"SELECT TRK", "MUTE", "SOLO", "DELETE", "UNDO", "BACK"};
     static constexpr uint8_t masks[] = {
       LOOPER_BUTTON_SELECT, LOOPER_BUTTON_MUTE, LOOPER_BUTTON_SOLO,
       LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
@@ -7961,18 +8068,19 @@ void drawMuteSoloScreen() {
   if (muteSoloCursor == 6) display.drawRect(68, 30, 56, 11, SSD1306_WHITE);
 }
 
-void drawSubmenuField(const String &name, const String &value, bool editing) {
-  display.setTextSize(1);
-  display.setCursor(0, 2);
-  display.print(name);
-  display.setTextSize(2);
-  display.setCursor(0, 18);
-  display.print(value);
-  if (editing) {
+void drawSubmenuField(const String &, const String &value, bool) {
+  if (!value.length()) return;
+  if (value.length() <= 7) {
+    display.setTextSize(3);
+    display.setCursor(0, 11);
+  } else if (value.length() <= 11) {
+    display.setTextSize(2);
+    display.setCursor(0, 15);
+  } else {
     display.setTextSize(1);
-    display.setCursor(104, 2);
-    display.print(F("EDIT"));
+    display.setCursor(0, 19);
   }
+  display.print(value);
 }
 
 String onOff(bool enabled) { return enabled ? String("ON") : String("OFF"); }
@@ -7984,15 +8092,24 @@ String customArpLengthName(uint8_t selection) {
 
 void drawArpMenuScreen() {
   static const char *const names[] = {
-    "MODE", "DIVISION", "ARP VELOCITY", "ARP LENGTH", "OCTAVE RANGE",
-    "RETRIGGER", "NOTE ORDER", "CUSTOM LENGTH", "LEARN CUSTOM", "CLEAR CUSTOM", "BACK"
+    "MODE", "DIVISION", "ARP VEL", "ARP LENGTH", "OCTAVES",
+    "RETRIGGER", "NOTE ORDER", "CUSTOM LEN", "LEARN ARP", "CLEAR ARP", "BACK"
   };
   const uint8_t cursor = arpMenuUi.cursor;
-  if (!arpMenuUi.editing) {
-    if (cursor == 8 && customArpLearning) {
-      drawSubmenuField(names[cursor], customArpWaitingForFirstNote ? "WAIT FOR NOTE" :
-          String("LEARNING ") + String(customArpPattern.count), false);
-    } else drawSubmenuField(names[cursor], cursor >= 8 ? "PUSH" : "PUSH TO EDIT", false);
+  if (ui.menuMode == MENU_SELECT) {
+    drawSubmenuField("", String(kArpSelectionNames[settings.arpMode]) + " " +
+        (settings.division == ARP_DIVISION_FOLLOW_DRUM
+            ? String("DRUM") : String(kDivisionNames[settings.division])), false);
+    return;
+  }
+  if (cursor == 2) {
+    drawNamedBarValue("", map(settings.arpVelocity, 0, 127, 0, 100), 100,
+                      String(settings.arpVelocity));
+    return;
+  }
+  if (cursor == 3) {
+    drawNamedBarValue("", settings.arpLengthPct, 100,
+                      String(settings.arpLengthPct) + "%");
     return;
   }
   String value;
@@ -8004,71 +8121,93 @@ void drawArpMenuScreen() {
   else if (cursor == 4) value = String(firmware3Settings.arpOctaves);
   else if (cursor == 5) value = firmware3Settings.arpRetriggerSync ? "CLOCK SYNC" : "KEY PRESS";
   else if (cursor == 6) value = firmware3Settings.arpNoteOrder ? "AS-PLAYED" : "IN ORDER";
-  else value = customArpLengthName(firmware3Settings.customArpLength);
-  drawSubmenuField(names[cursor], value, true);
+  else if (cursor == 7) value = customArpLengthName(firmware3Settings.customArpLength);
+  else if (cursor == 8) {
+    if (customArpLearning) value = customArpWaitingForFirstNote
+        ? "WAIT NOTE" : String("REC ") + String(customArpPattern.count);
+    else value = String(customArpPattern.count) + " EVENTS";
+  } else if (cursor == 9) value = String(customArpPattern.count) + " EVENTS";
+  drawSubmenuField(names[cursor], value, arpMenuUi.editing);
 }
 
 void drawLiveVelocityScreen() {
   static const char *const names[] = {"TARGET", "ON/OFF", "VELOCITY", "BACK"};
-  String value = "PUSH TO EDIT";
-  if (liveVelocityUi.editing) {
-    if (liveVelocityUi.cursor == 0) value = liveTargetName(liveVelocityTarget);
-    else if (liveVelocityUi.cursor == 1) value = onOff(
-        firmware3Settings.liveTargets[liveVelocityTarget].velocityEnabled);
-    else value = String(firmware3Settings.liveTargets[liveVelocityTarget].velocityPercent) + "%";
-  } else if (liveVelocityUi.cursor == 3) value = "PUSH";
+  const LiveTargetSettings &target = firmware3Settings.liveTargets[liveVelocityTarget];
+  if (ui.menuMode == MENU_SELECT || liveVelocityUi.cursor == 2) {
+    drawNamedBarValue("", target.velocityPercent, 200,
+        liveTargetName(liveVelocityTarget) + " " + String(target.velocityPercent) + "%", 100);
+    return;
+  }
+  String value;
+  if (liveVelocityUi.cursor == 0) value = liveTargetName(liveVelocityTarget);
+  else if (liveVelocityUi.cursor == 1) value = onOff(target.velocityEnabled);
   drawSubmenuField(names[liveVelocityUi.cursor], value, liveVelocityUi.editing);
 }
 
 void drawLiveNoteLengthScreen() {
-  static const char *const names[] = {"TARGET", "ON/OFF", "NOTE LENGTH", "BACK"};
-  String value = "PUSH TO EDIT";
-  if (liveNoteLengthUi.editing) {
-    if (liveNoteLengthUi.cursor == 0) value = liveTargetName(liveNoteLengthTarget);
-    else if (liveNoteLengthUi.cursor == 1) value = onOff(
-        firmware3Settings.liveTargets[liveNoteLengthTarget].noteLengthEnabled);
-    else value = String(firmware3Settings.liveTargets[liveNoteLengthTarget].noteLengthPercent) + "%";
-  } else if (liveNoteLengthUi.cursor == 3) value = "PUSH";
+  static const char *const names[] = {"TARGET", "ON/OFF", "NOTELENGTH", "BACK"};
+  const LiveTargetSettings &target = firmware3Settings.liveTargets[liveNoteLengthTarget];
+  if (ui.menuMode == MENU_SELECT || liveNoteLengthUi.cursor == 2) {
+    drawNamedBarValue("", target.noteLengthPercent, 200,
+        liveTargetName(liveNoteLengthTarget) + " " + String(target.noteLengthPercent) + "%", 100);
+    return;
+  }
+  String value;
+  if (liveNoteLengthUi.cursor == 0) value = liveTargetName(liveNoteLengthTarget);
+  else if (liveNoteLengthUi.cursor == 1) value = onOff(target.noteLengthEnabled);
   drawSubmenuField(names[liveNoteLengthUi.cursor], value, liveNoteLengthUi.editing);
 }
 
 void drawStutterScreen() {
-  static const char *const names[] = {"TARGET", "ON/OFF", "DIVISION", "TIMEOUT BARS", "BACK"};
-  String value = "PUSH TO EDIT";
-  if (stutterUi.editing) {
-    if (stutterUi.cursor == 0) value = liveTargetName(stutterTarget);
-    else if (stutterUi.cursor == 1) value = onOff(
-        firmware3Settings.liveTargets[stutterTarget].stutterEnabled);
-    else if (stutterUi.cursor == 2) value = kDivisionNames[
-        firmware3Settings.liveTargets[stutterTarget].stutterDivision];
-    else value = String(firmware3Settings.stutterTimeoutBars);
-  } else if (stutterUi.cursor == 4) value = "PUSH";
+  static const char *const names[] = {"TARGET", "ON/OFF", "DIVISION", "TIMEOUT", "BACK"};
+  const LiveTargetSettings &target = firmware3Settings.liveTargets[stutterTarget];
+  if (ui.menuMode == MENU_SELECT) {
+    drawSubmenuField("", liveTargetName(stutterTarget) + " " +
+        (target.stutterEnabled
+            ? stutterLengthName(target.stutterLengthSelection) : String("OFF")), false);
+    return;
+  }
+  String value;
+  if (stutterUi.cursor == 0) value = liveTargetName(stutterTarget);
+  else if (stutterUi.cursor == 1) value = onOff(target.stutterEnabled);
+  else if (stutterUi.cursor == 2) value = stutterLengthName(target.stutterLengthSelection);
+  else if (stutterUi.cursor == 3) value = String(firmware3Settings.stutterTimeoutBars) + " BARS";
   drawSubmenuField(names[stutterUi.cursor], value, stutterUi.editing);
 }
 
 void drawEchoScreen() {
   static const char *const names[] = {"TARGET", "ON/OFF", "WET", "LENGTH", "DELAY", "DRIFT", "BACK"};
-  String value = "PUSH TO EDIT";
   const LiveTargetSettings &echo = firmware3Settings.liveTargets[echoTarget];
-  if (echoUi.editing) {
-    if (echoUi.cursor == 0) value = liveTargetName(echoTarget);
-    else if (echoUi.cursor == 1) value = onOff(echo.echoEnabled);
-    else if (echoUi.cursor == 2) value = String(echo.echoWet) + "%";
-    else if (echoUi.cursor == 3) value = kDivisionNames[echo.echoLength];
-    else if (echoUi.cursor == 4) value = kDivisionNames[echo.echoDelay];
-    else value = String(echo.echoDrift);
-  } else if (echoUi.cursor == 6) value = "PUSH";
+  if (ui.menuMode == MENU_SELECT) {
+    drawSubmenuField("", liveTargetName(echoTarget) + " " +
+        (echo.echoEnabled ? String("WET ") + String(echo.echoWet) + "%" : String("OFF")), false);
+    return;
+  }
+  if (echoUi.cursor == 2) {
+    drawNamedBarValue("", echo.echoWet, 100, String(echo.echoWet) + "%");
+    return;
+  }
+  String value;
+  if (echoUi.cursor == 0) value = liveTargetName(echoTarget);
+  else if (echoUi.cursor == 1) value = onOff(echo.echoEnabled);
+  else if (echoUi.cursor == 3) value = kDivisionNames[echo.echoLength];
+  else if (echoUi.cursor == 4) value = kDivisionNames[echo.echoDelay];
+  else if (echoUi.cursor == 5) value = String(echo.echoDrift);
   drawSubmenuField(names[echoUi.cursor], value, echoUi.editing);
 }
 
 void drawQuickJumpScreen() {
-  static const char *const names[] = {"INPUT CHANNEL", "OUTPUT CHANNEL", "ON/OFF", "BACK"};
-  String value = "PUSH TO EDIT";
-  if (quickJumpUi.editing) {
-    if (quickJumpUi.cursor == 0) value = String(firmware3Settings.quickJumpInputChannel);
-    else if (quickJumpUi.cursor == 1) value = String(firmware3Settings.quickJumpOutputChannel);
-    else value = onOff(firmware3Settings.quickJumpEnabled);
-  } else if (quickJumpUi.cursor == 3) value = "PUSH";
+  static const char *const names[] = {"INPUT CH", "OUTPUT CH", "ON/OFF", "BACK"};
+  if (ui.menuMode == MENU_SELECT) {
+    drawSubmenuField("", firmware3Settings.quickJumpEnabled
+        ? String(firmware3Settings.quickJumpInputChannel) + " > " + String(firmware3Settings.quickJumpOutputChannel)
+        : String("OFF"), false);
+    return;
+  }
+  String value;
+  if (quickJumpUi.cursor == 0) value = String("CH ") + String(firmware3Settings.quickJumpInputChannel);
+  else if (quickJumpUi.cursor == 1) value = String("CH ") + String(firmware3Settings.quickJumpOutputChannel);
+  else if (quickJumpUi.cursor == 2) value = onOff(firmware3Settings.quickJumpEnabled);
   drawSubmenuField(names[quickJumpUi.cursor], value, quickJumpUi.editing);
 }
 
@@ -8081,12 +8220,10 @@ void drawBassMenuScreen() {
     display.print(firmware3Settings.bassHighestNote);
     return;
   }
-  static const char *const names[] = {"CHANNEL/OCTAVE", "HIGHEST NOTE", "BACK"};
-  String value = "PUSH TO EDIT";
-  if (bassUi.editing) {
-    value = bassUi.cursor == 0 ? bassLabel(settings.bassMode)
-                              : String(firmware3Settings.bassHighestNote);
-  } else if (bassUi.cursor == 2) value = "PUSH";
+  static const char *const names[] = {"CH/OCTAVE", "HIGH NOTE", "BACK"};
+  String value;
+  if (bassUi.cursor == 0) value = bassLabel(settings.bassMode);
+  else if (bassUi.cursor == 1) value = String(firmware3Settings.bassHighestNote);
   drawSubmenuField(names[bassUi.cursor], value, bassUi.editing);
 }
 
@@ -8097,19 +8234,17 @@ void drawScaleMenuScreen() {
     return;
   }
   if (scaleUi.cursor == 0) {
-    drawSubmenuField("SCALE TYPE",
-        scaleUi.editing ? String(kForceScaleNames[settings.forceScale]) : String("PUSH TO EDIT"),
-        scaleUi.editing);
+    drawSubmenuField("SCALE TYPE", String(kForceScaleNames[settings.forceScale]), scaleUi.editing);
     return;
   }
   if (scaleUi.cursor == 13) {
-    drawSubmenuField("BACK", "PUSH", false);
+    drawSubmenuField("BACK", "", false);
     return;
   }
   const uint8_t semitones = scaleUi.cursor - 1U;
   const bool included = (firmware3Settings.userScaleMask & (1U << semitones)) != 0;
   const String name = semitones == 0 ? String("USER ROOT")
-                                     : String("USER INTERVAL +") + String(semitones);
+                                     : String("INTVL +") + String(semitones);
   drawSubmenuField(name, included ? "INCLUDED" : "OMITTED", false);
 }
 
@@ -8173,21 +8308,26 @@ void drawPanicScreen() {
 
 void drawDrumMagicScreen() {
   static const char *const names[] = {
-    "ON/OFF", "INPUT", "OUTPUT CHANNEL", "SPLIT START", "MAP START",
-    "AFTERTOUCH>VEL", "DIVISION", "BACK"
+    "ON/OFF", "INPUT", "OUTPUT CH", "SPLIT START", "MAP START",
+    "AT>VEL", "DIVISION", "BACK"
   };
-  String value = "PUSH TO EDIT";
-  if (drumMagicUi.editing) {
-    if (drumMagicUi.cursor == 0) value = onOff(firmware3Settings.drumEnabled);
-    else if (drumMagicUi.cursor == 1) value = firmware3Settings.drumInputMode ? "KEY SPLIT" : "CHANNEL 10";
-    else if (drumMagicUi.cursor == 2) value = String(firmware3Settings.drumOutputChannel);
-    else if (drumMagicUi.cursor == 3) value = String(firmware3Settings.drumSplitNote);
-    else if (drumMagicUi.cursor == 4) value = String(firmware3Settings.drumMappedStart);
-    else if (drumMagicUi.cursor == 5) value = onOff(firmware3Settings.drumAftertouchVelocity);
-    else if (firmware3Settings.drumDivision == DRUM_DIVISION_FOLLOW_ARP) value = "ARP";
-    else if (firmware3Settings.drumDivision == DRUM_DIVISION_FREE) value = "FREE";
-    else value = kDivisionNames[firmware3Settings.drumDivision];
-  } else if (drumMagicUi.cursor == 7) value = "PUSH";
+  String division;
+  if (firmware3Settings.drumDivision == DRUM_DIVISION_FOLLOW_ARP) division = "ARP";
+  else if (firmware3Settings.drumDivision == DRUM_DIVISION_FREE) division = "FREE";
+  else division = kDivisionNames[firmware3Settings.drumDivision];
+  if (ui.menuMode == MENU_SELECT) {
+    drawSubmenuField("", firmware3Settings.drumEnabled
+        ? String(firmware3Settings.drumOutputChannel) + " " + division : String("OFF"), false);
+    return;
+  }
+  String value;
+  if (drumMagicUi.cursor == 0) value = onOff(firmware3Settings.drumEnabled);
+  else if (drumMagicUi.cursor == 1) value = firmware3Settings.drumInputMode ? "KEY SPLIT" : "CHANNEL 10";
+  else if (drumMagicUi.cursor == 2) value = String("CH ") + String(firmware3Settings.drumOutputChannel);
+  else if (drumMagicUi.cursor == 3) value = String(firmware3Settings.drumSplitNote);
+  else if (drumMagicUi.cursor == 4) value = String(firmware3Settings.drumMappedStart);
+  else if (drumMagicUi.cursor == 5) value = onOff(firmware3Settings.drumAftertouchVelocity);
+  else if (drumMagicUi.cursor == 6) value = division;
   drawSubmenuField(names[drumMagicUi.cursor], value, drumMagicUi.editing);
 }
 
@@ -8201,53 +8341,64 @@ String loopLengthSelectionName(uint8_t selection) {
 void drawLooperSettingsScreen() {
   static const char *const names[] = {
     "TRACK", "LENGTH", "AUTO REC", "TIME TRAVEL", "TRACK MODE",
-    "AUTO QUANTIZE", "RECORD CCS", "MIDI TRANSPORT", "BACK"
+    "AUTO QUANT", "RECORD CCS", "MIDI TRANS", "BACK"
   };
-  String value = "PUSH TO EDIT";
-  if (looperSettingsUi.editing) {
-    if (looperSettingsUi.cursor == 0) value = String(multitrackLooper.selectedTrack() + 1U);
-    else if (looperSettingsUi.cursor == 1) value = loopLengthSelectionName(
-        loopTrackLengthSelection[multitrackLooper.selectedTrack()]);
-    else if (looperSettingsUi.cursor == 2) value = onOff(firmware3Settings.looperAutoRec);
-    else if (looperSettingsUi.cursor == 3) value = onOff(firmware3Settings.looperTimeTravel);
-    else if (looperSettingsUi.cursor == 4) {
-      static const char *const modes[] = {"LAYERS", "PARTS AUTO SOLO", "MANUAL"};
-      value = modes[firmware3Settings.looperTrackMode];
-    } else if (looperSettingsUi.cursor == 5) {
-      static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
-      value = quantize[firmware3Settings.looperQuantize];
-    } else if (looperSettingsUi.cursor == 6) value = onOff(firmware3Settings.looperRecordCc);
-    else value = onOff(firmware3Settings.looperMidiTransport);
-  } else if (looperSettingsUi.cursor == 8) value = "PUSH";
+  const uint8_t track = multitrackLooper.selectedTrack();
+  if (ui.menuMode == MENU_SELECT) {
+    drawSubmenuField("", String("TRK ") + String(track + 1U) + " " +
+        loopLengthSelectionName(loopTrackLengthSelection[track]), false);
+    return;
+  }
+  String value;
+  if (looperSettingsUi.cursor == 0) value = String(track + 1U);
+  else if (looperSettingsUi.cursor == 1) value = loopLengthSelectionName(loopTrackLengthSelection[track]);
+  else if (looperSettingsUi.cursor == 2) value = onOff(firmware3Settings.looperAutoRec);
+  else if (looperSettingsUi.cursor == 3) value = onOff(firmware3Settings.looperTimeTravel);
+  else if (looperSettingsUi.cursor == 4) {
+    static const char *const modes[] = {"LAYERS", "PARTS SOLO", "MANUAL"};
+    value = modes[firmware3Settings.looperTrackMode];
+  } else if (looperSettingsUi.cursor == 5) {
+    static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
+    value = quantize[firmware3Settings.looperQuantize];
+  } else if (looperSettingsUi.cursor == 6) value = onOff(firmware3Settings.looperRecordCc);
+  else if (looperSettingsUi.cursor == 7) value = onOff(firmware3Settings.looperMidiTransport);
   drawSubmenuField(names[looperSettingsUi.cursor], value, looperSettingsUi.editing);
 }
 
 void drawParameterLockScreen() {
   static const char *const names[] = {"CHANNEL", "CLEAR LOCKS", "BACK"};
-  String value = parameterLockUi.cursor == 1
-      ? String(parameterLockCount) + " STORED" : "PUSH";
-  if (parameterLockUi.editing) {
-    value = firmware3Settings.parameterLockChannel == 0 ? "OFF" :
-        String("CH ") + String(firmware3Settings.parameterLockChannel);
+  if (ui.menuMode == MENU_SELECT) {
+    drawSubmenuField("", firmware3Settings.parameterLockChannel == 0
+        ? String("OFF") : String("CH ") + String(firmware3Settings.parameterLockChannel), false);
+    return;
   }
+  String value;
+  if (parameterLockUi.cursor == 0) value = firmware3Settings.parameterLockChannel == 0
+      ? "OFF" : String("CH ") + String(firmware3Settings.parameterLockChannel);
+  else if (parameterLockUi.cursor == 1) value = String(parameterLockCount) + " STORED";
   drawSubmenuField(names[parameterLockUi.cursor], value, parameterLockUi.editing);
 }
 
 void drawChordScreen() {
   static const char *const names[] = {"ON/OFF", "POSITION 1", "POSITION 2", "POSITION 3", "POSITION 4", "BACK"};
-  String value = "PUSH TO EDIT";
-  if (chordUi.editing) {
-    value = chordUi.cursor == 0 ? onOff(firmware3Settings.chordEnabled) :
-        String(firmware3Settings.chordPositions[chordUi.cursor - 1]);
-  } else if (chordUi.cursor == 5) value = "PUSH";
+  if (ui.menuMode == MENU_SELECT) {
+    drawSubmenuField("", onOff(firmware3Settings.chordEnabled), false);
+    return;
+  }
+  String value;
+  if (chordUi.cursor == 0) value = onOff(firmware3Settings.chordEnabled);
+  else if (chordUi.cursor < 5) value = String(firmware3Settings.chordPositions[chordUi.cursor - 1]);
   drawSubmenuField(names[chordUi.cursor], value, chordUi.editing);
 }
 
 void drawLiveCcScreen() {
   static const char *const names[] = {"CC NUMBER", "VALUE", "BACK"};
-  String value = "PUSH TO EDIT";
-  if (liveCcEditing) value = String(liveCcCursor == 0 ? liveCcNumber : liveCcValue);
-  else if (liveCcCursor == 2) value = "PUSH";
+  if (ui.menuMode == MENU_SELECT) {
+    drawSubmenuField("", String("CC ") + String(liveCcNumber) + " = " + String(liveCcValue), false);
+    return;
+  }
+  String value;
+  if (liveCcCursor < 2) value = String(liveCcCursor == 0 ? liveCcNumber : liveCcValue);
   drawSubmenuField(names[liveCcCursor], value, liveCcEditing);
   if (liveCcEditing && liveCcCursor == 1) {
     const int cx = 105;
@@ -8261,22 +8412,23 @@ void drawLiveCcScreen() {
 
 void drawGlobalScreen() {
   static const char *const names[] = {
-    "AUTO SAVE", "CLOCK INPUT", "CLOCK OUTPUT", "TIME SIGNATURE",
-    "CHANNEL AFTERTOUCH", "POLY AFTERTOUCH", "AFTERTOUCH CC",
-    "AT>ARP VELOCITY", "RESET PRESET", "BACK"
+    "AUTO SAVE", "CLOCK IN", "CLOCK OUT", "TIME SIG", "CH AFTERTCH",
+    "POLY AFTER", "AFTER CC", "AT>ARP VEL", "RESET SLOT", "BACK"
   };
-  String value = "PUSH TO EDIT";
-  if (globalUi.editing) {
-    if (globalUi.cursor == 0) value = onOff(storage.autoSave);
-    else if (globalUi.cursor == 1) value = firmware3Settings.clockInFollow ? "FOLLOW/CLIENT" : "IGNORE";
-    else if (globalUi.cursor == 2) value = firmware3Settings.clockOutSend ? "SEND/HOST" : "OFF";
-    else if (globalUi.cursor == 3) value = firmware3Settings.timeSignature ? "3/4" : "4/4";
-    else if (globalUi.cursor == 4) value = onOff(firmware3Settings.forwardChannelAftertouch);
-    else if (globalUi.cursor == 5) value = onOff(firmware3Settings.forwardPolyAftertouch);
-    else if (globalUi.cursor == 6) value = firmware3Settings.channelAftertouchCc <= 127
-        ? String(firmware3Settings.channelAftertouchCc) : "OFF";
-    else value = onOff(firmware3Settings.mainAftertouchArpVelocity);
-  } else if (globalUi.cursor >= 8) value = "PUSH";
+  if (ui.menuMode == MENU_SELECT) {
+    drawSubmenuField("", firmware3Settings.timeSignature ? String("3/4") : String("4/4"), false);
+    return;
+  }
+  String value;
+  if (globalUi.cursor == 0) value = onOff(storage.autoSave);
+  else if (globalUi.cursor == 1) value = firmware3Settings.clockInFollow ? "CLIENT" : "IGNORE";
+  else if (globalUi.cursor == 2) value = firmware3Settings.clockOutSend ? "SEND/HOST" : "OFF";
+  else if (globalUi.cursor == 3) value = firmware3Settings.timeSignature ? "3/4" : "4/4";
+  else if (globalUi.cursor == 4) value = onOff(firmware3Settings.forwardChannelAftertouch);
+  else if (globalUi.cursor == 5) value = onOff(firmware3Settings.forwardPolyAftertouch);
+  else if (globalUi.cursor == 6) value = firmware3Settings.channelAftertouchCc <= 127
+      ? String(firmware3Settings.channelAftertouchCc) : "OFF";
+  else if (globalUi.cursor == 7) value = onOff(firmware3Settings.mainAftertouchArpVelocity);
   drawSubmenuField(names[globalUi.cursor], value, globalUi.editing);
 }
 
@@ -8357,7 +8509,7 @@ void renderMainTop() {
       drawChannelScreen(F("MAIN INPUT"), v);
       break;
     case SET_ARP_OUT_CH:
-      drawChannelScreen(F("MAIN"), v, true);
+      drawChannelScreen(F("ARP OUT"), v, true);
       break;
     case SET_DRUM_MAGIC:
       drawDrumMagicScreen();

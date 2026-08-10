@@ -87,12 +87,13 @@ behavior:
 
 ### Live transformations
 
-Velocity, Note Length, Stutter, and Echo can target Main or any of the four
+Velocity, Notelength, Stutter, and Echo can target Main or any of the four
 looper tracks independently.
 
 - Velocity scales from 0 to 200 percent.
-- Note Length scales from 1 to 200 percent.
-- Stutter uses the shared rolling history for note-safe beat repeats and has a
+- Notelength scales from 1 to 200 percent.
+- Stutter uses the shared rolling history for note-safe beat repeats. It
+  defaults to `1/4`, reaches the looper's `8 BARS` maximum, and has a
   configurable timeout in bars.
 - Echo provides Wet, Length, Delay division, and signed Drift. Drift accelerates
   or decelerates the repeats for a bouncing-object effect.
@@ -100,7 +101,7 @@ looper tracks independently.
 
 ### Routing and note processing
 
-- Main Input, Main output, Thru output, and lowest-note-priority Bass output
+- Main Input, Arp Out, Thru output, and lowest-note-priority Bass output
 - Bass highest-note split
 - Quick Jump from a chosen input channel to a chosen output channel
 - Sixteen-channel router with output channel, low note, high note, and
@@ -158,12 +159,12 @@ The current top-level screens are:
 2. Swing
 3. Arp
 4. Velocity
-5. Note Length
+5. Notelength
 6. Stutter
 7. Echo
 8. Quick Jump
 9. Main Input
-10. Main
+10. Arp Out
 11. Drum Magic
 12. Bass
 13. Thru Out
@@ -193,7 +194,7 @@ The current top-level screens are:
 37. Save
 38. Panic
 
-Feature screens use submenus with a Back item. Pushing the encoder while
+Feature screens use submenus with a Back item. Holding the encoder switch while
 turning changes supported numeric values in steps of ten.
 
 ## Main-brain prototype pins
@@ -208,7 +209,7 @@ Use the GPIO numbers printed on the RP2040 Zero:
 - GPIO5: 1 Mbps UART RX from the secondary brain
 - GPIO6: rotary encoder A
 - GPIO7: rotary encoder B
-- GPIO8: rotary encoder push switch
+- GPIO8: rotary encoder switch
 - GPIO9: physical button 1
 - GPIO12: physical button 2
 - GPIO10: physical button 3
@@ -277,8 +278,8 @@ release it when prompted, and press it again within five seconds.
 
 ## Current validation status
 
-- Both sketches compile without warnings for Waveshare RP2040 Zero at 120 MHz.
-- The four looper, rolling-history, Echo, and Note Length host tests pass.
+- Both sketches compile for Waveshare RP2040 Zero at 120 MHz.
+- The four looper, rolling-history, Echo, and Notelength host tests pass.
 - The default secondary profile supports the current no-MAX prototype wiring.
 - The MAX3421E profile compiles but still needs validation on its target PCB.
 - ESP32-C3 wireless MIDI is planned and is not implemented in this firmware.

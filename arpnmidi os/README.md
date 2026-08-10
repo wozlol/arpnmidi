@@ -13,7 +13,7 @@ The main brain owns:
 
 - MIDI input parsing, routing, and transformations
 - Musical clock, swing, arpeggiator, and Drum Magic
-- Four-track looper, Time Travel, Stutter, Echo, and Note Length scheduling
+- Four-track looper, Time Travel, Stutter, Echo, and Notelength scheduling
 - Note ownership and safe note-off handling
 - Encoder, four physical buttons, and pressure sensor
 - OLED and VL53L0X user interface
@@ -69,7 +69,7 @@ critical note offs.
 - GPIO5: 1 Mbps UART RX from secondary GPIO4
 - GPIO6: rotary encoder A
 - GPIO7: rotary encoder B
-- GPIO8: rotary encoder push switch
+- GPIO8: rotary encoder switch
 - GPIO9: physical button 1
 - GPIO12: physical button 2
 - GPIO10: physical button 3
@@ -208,12 +208,14 @@ Patch notes are in [`../patches/README.md`](../patches/README.md).
   cannot persist.
 - Automatic writes wait for a musically idle window.
 - Time Travel and Stutter rolling history remain RAM-only.
+- Stutter defaults to a `1/4` repeat window and can reach the same `8 BARS`
+  maximum as the looper.
 - A preset-schema mismatch installs factory defaults; no prototype migration
   path is run.
 
 ## Current hardware status
 
-- Both sketches compile without warnings at 120 MHz.
+- Both sketches compile at 120 MHz.
 - The default no-MAX secondary profile is the current prototype configuration.
 - The MAX3421E profile compiles and includes endpoint guards, but still needs
   validation on its target PCB.
