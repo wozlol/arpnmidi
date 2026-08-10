@@ -7524,11 +7524,104 @@ void drawPresetGrid(uint8_t slot) {
   display.print(slot + 1);
 }
 
+bool submenuBackSelected() {
+  if (ui.menuMode != MENU_EDIT) return false;
+  switch (ui.selectedSetting) {
+    case SET_ARP_MODE: return arpMenuUi.cursor == 10;
+    case SET_LIVE_VELOCITY: return liveVelocityUi.cursor == 3;
+    case SET_LIVE_NOTE_LENGTH: return liveNoteLengthUi.cursor == 3;
+    case SET_STUTTER: return stutterUi.cursor == 4;
+    case SET_ECHO: return echoUi.cursor == 6;
+    case SET_QUICK_JUMP: return quickJumpUi.cursor == 3;
+    case SET_DRUM_MAGIC: return drumMagicUi.cursor == 7;
+    case SET_BASS_CH: return bassUi.cursor == 2;
+    case SET_RND_RBN: return roundRobinMenuCursor == RND_RBN_BACK_SLOT;
+    case SET_ROUTER:
+      return routerEditStage == ROUTER_STAGE_LIST && routerMenuCursor == ROUTER_BACK_SLOT;
+    case SET_DIV_NOTES: return divNotesCursor == DIV_NOTE_BACK_SLOT;
+    case SET_MAP_CC:
+      if (featuresUiStage == FEATURES_UI_GROUPS) return featuresGroupCursor == 3;
+      {
+        const uint8_t count = featuresUiStage == FEATURES_UI_KNOBS
+            ? static_cast<uint8_t>(FEATURE_KNOB_COUNT)
+            : static_cast<uint8_t>(FEATURE_BUTTON_COUNT);
+        return featuresItemCursor >= count;
+      }
+    case SET_CC_MAP:
+      return ccRemapUiStage == CC_REMAP_UI_LIST && ccRemapCursor > CC_REMAP_SLOT_COUNT;
+    case SET_NOTE_CC:
+      return noteCcUiStage == NOTE_CC_UI_LIST && noteCcCursor > NOTE_CC_SLOT_COUNT;
+    case SET_FOUR_BUTTON:
+      if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) return fourButtonUiCursor == 4;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) return fourButtonUiCursor >= 4;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) return fourButtonUiCursor == 5;
+      return fourButtonUiStage == FOUR_BUTTON_UI_CHORD && fourButtonUiCursor == 2;
+    case SET_LOOP_BARS: return looperSettingsUi.cursor == 8;
+    case SET_PARAMETER_LOCK: return parameterLockUi.cursor == 2;
+    case SET_MUTE_SOLO: return muteSoloCursor == 6;
+    case SET_CHORD: return chordUi.cursor == 5;
+    case SET_FORCE_SCALE: return scaleUi.cursor == 13;
+    case SET_LIVE_CC: return liveCcCursor == 2;
+    case SET_GLOBAL: return globalUi.cursor == 9;
+    default: return false;
+  }
+}
+
+bool parameterEditActive() {
+  if (ui.menuMode != MENU_EDIT) return false;
+  switch (ui.selectedSetting) {
+    case SET_ARP_MODE: return arpMenuUi.editing;
+    case SET_LIVE_VELOCITY: return liveVelocityUi.editing;
+    case SET_LIVE_NOTE_LENGTH: return liveNoteLengthUi.editing;
+    case SET_STUTTER: return stutterUi.editing;
+    case SET_ECHO: return echoUi.editing;
+    case SET_QUICK_JUMP: return quickJumpUi.editing;
+    case SET_DRUM_MAGIC: return drumMagicUi.editing;
+    case SET_BASS_CH: return bassUi.editing;
+    case SET_ROUTER: return routerEditStage != ROUTER_STAGE_LIST;
+    case SET_CC_MAP: return ccRemapUiStage != CC_REMAP_UI_LIST;
+    case SET_NOTE_CC: return noteCcUiStage != NOTE_CC_UI_LIST;
+    case SET_FOUR_BUTTON:
+      return fourButtonUiStage == FOUR_BUTTON_UI_MODE ||
+             (fourButtonUiStage >= FOUR_BUTTON_UI_CUSTOM_CHANNEL &&
+              fourButtonUiStage <= FOUR_BUTTON_UI_CUSTOM_BEHAVIOR);
+    case SET_MAP_CC: return featuresLearnActive;
+    case SET_PARAMETER_LOCK: return parameterLockUi.editing;
+    case SET_CHORD: return chordUi.editing;
+    case SET_FORCE_SCALE: return scaleUi.editing;
+    case SET_LIVE_CC: return liveCcEditing;
+    case SET_GLOBAL: return globalUi.editing;
+    // These are direct option lists: the encoder is choosing a submenu item,
+    // not entering a separate numeric parameter editor.
+    case SET_RND_RBN:
+    case SET_DIV_NOTES:
+    case SET_MUTE_SOLO:
+      return false;
+    default:
+      // Plain top-level settings enter MENU_EDIT directly to change their
+      // value, so they use the blue parameter dot.
+      return true;
+  }
+}
+
+void drawBackNavigationArrow() {
+  // Large down-then-left return mark in the blue setting area.
+  const int downX = 88;
+  const int pathY = 29;
+  display.drawLine(downX, 4, downX, pathY - 7, SSD1306_WHITE);
+  display.drawLine(downX, pathY - 7, downX - 6, pathY - 13, SSD1306_WHITE);
+  display.drawLine(downX, pathY - 7, downX + 6, pathY - 13, SSD1306_WHITE);
+  display.drawLine(downX, pathY, 28, pathY, SSD1306_WHITE);
+  display.drawLine(28, pathY, 40, pathY - 10, SSD1306_WHITE);
+  display.drawLine(28, pathY, 40, pathY + 10, SSD1306_WHITE);
+}
+
 void drawModeIndicator() {
+  if (ui.menuMode == MENU_SELECT) return;
   const int x = 122;
   const int editY = SETTING_AREA_Y + SETTING_AREA_H - 4;
   const int selectY = MODE_INFO_Y + (MODE_INFO_H / 2);
-  if (ui.menuMode == MENU_EDIT) display.fillCircle(x, editY, 3, SSD1306_WHITE);
+  if (parameterEditActive()) display.fillCircle(x, editY, 3, SSD1306_WHITE);
   else display.fillCircle(x, selectY, 3, SSD1306_WHITE);
 }
 
@@ -8592,6 +8685,7 @@ void renderMainTop() {
       drawWrappedTopValue(settingValueString(id));
       break;
   }
+  if (submenuBackSelected()) drawBackNavigationArrow();
 }
 
 void drawScreenSaver() {
