@@ -8828,6 +8828,23 @@ void processDeferredUiActions() {
       panicMidiOnly();
       ui.dirty = true;
     }
+
+    // Back is a navigation choice, not the persistent status of the parent
+    // menu. Clear it after deferred exit work so list-style submenus cannot
+    // reopen or render with BACK still selected.
+    if (ui.selectedSetting == SET_DIV_NOTES &&
+        divNotesCursor == DIV_NOTE_BACK_SLOT) {
+      divNotesCursor = 0;
+    }
+    if (ui.selectedSetting == SET_RND_RBN &&
+        roundRobinMenuCursor == RND_RBN_BACK_SLOT) {
+      roundRobinMenuCursor = 0;
+    }
+    if (ui.selectedSetting == SET_ROUTER &&
+        routerEditStage == ROUTER_STAGE_LIST &&
+        routerMenuCursor == ROUTER_BACK_SLOT) {
+      routerMenuCursor = 0;
+    }
     saveStorageIfAuto();
   }
 
