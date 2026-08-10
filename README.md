@@ -96,7 +96,8 @@ looper tracks independently.
   defaults to `1/4`, reaches the looper's `8 BARS` maximum, and has a
   configurable timeout in bars.
 - Echo provides Wet, Length, Delay division, and signed Drift. Drift accelerates
-  or decelerates the repeats for a bouncing-object effect.
+  or decelerates the repeats for a bouncing-object effect. Echo Length and
+  Delay reach the same `8 BARS` maximum as Stutter and the looper.
 - Stutter and Echo-generated repeats are kept out of the recorded source loop.
 
 ### Routing and note processing

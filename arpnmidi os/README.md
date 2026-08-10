@@ -210,6 +210,7 @@ Patch notes are in [`../patches/README.md`](../patches/README.md).
 - Time Travel and Stutter rolling history remain RAM-only.
 - Stutter defaults to a `1/4` repeat window and can reach the same `8 BARS`
   maximum as the looper.
+- Echo Length and Delay use the same extended range through `8 BARS`.
 - A preset-schema mismatch installs factory defaults; no prototype migration
   path is run.
 

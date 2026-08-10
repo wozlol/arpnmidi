@@ -155,8 +155,8 @@ constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 // Firmware 3 is still prototype firmware, so an incompatible preset-map change deliberately
 // receives a new schema identity instead of carrying migration code. A mismatch installs all
 // factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
-constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF307;
-constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3070001UL;
+constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF308;
+constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3080001UL;
 constexpr uint8_t MAX_CUSTOM_ARP_EVENTS = 32;
 constexpr uint32_t LOOP_FILE_MAGIC = 0x4C503304UL;  // "LP3" file, schema 4
 constexpr size_t EEPROM_BYTES = 4096;
@@ -1909,9 +1909,9 @@ arpnmidi3::EchoConfig echoConfigForTarget(uint8_t target) {
   const LiveTargetSettings &settings = firmware3Settings.liveTargets[target];
   arpnmidi3::EchoConfig config;
   config.lengthUs = static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
-      musicalDurationUs(kDivisionPulseSteps[settings.echoLength])));
+      musicalDurationUs(lengthSelectionPulses(settings.echoLength))));
   config.delayUs = static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
-      musicalDurationUs(kDivisionPulseSteps[settings.echoDelay])));
+      musicalDurationUs(lengthSelectionPulses(settings.echoDelay))));
   config.wetPercent = settings.echoWet;
   config.drift = settings.echoDrift;
   return config;
@@ -3307,11 +3307,11 @@ void tickNoteLength() {
   noteLengthEngine.tick(time_us_64(), emitNoteLengthEvent, nullptr);
 }
 
-uint8_t stutterLengthForDivision(uint8_t division) {
+uint8_t lengthSelectionForDivision(uint8_t division) {
   return STUTTER_LENGTH_DIVISION_BASE + clampU8(division, 0, DIVISION_COUNT - 1);
 }
 
-String stutterLengthName(uint8_t selection) {
+String lengthSelectionName(uint8_t selection) {
   static const char *const barNames[STUTTER_BAR_LENGTH_COUNT] = {
     "8 BARS", "4 BARS", "2 BARS", "1 BAR"
   };
@@ -3320,7 +3320,7 @@ String stutterLengthName(uint8_t selection) {
   return String(kDivisionNames[selection - STUTTER_LENGTH_DIVISION_BASE]);
 }
 
-uint64_t stutterLengthPulses(uint8_t selection) {
+uint64_t lengthSelectionPulses(uint8_t selection) {
   selection = clampU8(selection, 0, STUTTER_LENGTH_COUNT - 1);
   if (selection < STUTTER_BAR_LENGTH_COUNT) {
     static constexpr uint8_t barMultipliers[STUTTER_BAR_LENGTH_COUNT] = {8, 4, 2, 1};
@@ -3336,7 +3336,7 @@ uint32_t stutterLengthUs(uint8_t target) {
       firmware3Settings.liveTargets[target].stutterLengthSelection,
       0, STUTTER_LENGTH_COUNT - 1);
   return static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
-      musicalDurationUs(stutterLengthPulses(selection))));
+      musicalDurationUs(lengthSelectionPulses(selection))));
 }
 
 bool activateStutter(uint8_t target, uint64_t nowUs) {
@@ -3832,7 +3832,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (echoUi.cursor == 1) return 1;
       if (echoUi.cursor == 2) return 100;
       if (echoUi.cursor == 5) return 32;
-      return DIVISION_COUNT - 1;
+      return STUTTER_LENGTH_COUNT - 1;
     case SET_DIVISION: return ARP_DIVISION_FOLLOW_DRUM;
     case SET_VELOCITY: return 127;
     case SET_LENGTH: return 100;
@@ -4152,8 +4152,8 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       else if (echoUi.cursor == 0) echoTarget = clampU8(value, 0, LIVE_TARGET_COUNT - 1);
       else if (echoUi.cursor == 1) firmware3Settings.liveTargets[echoTarget].echoEnabled = value ? 1 : 0;
       else if (echoUi.cursor == 2) firmware3Settings.liveTargets[echoTarget].echoWet = clampU8(value, 0, 100);
-      else if (echoUi.cursor == 3) firmware3Settings.liveTargets[echoTarget].echoLength = clampU8(value, 0, DIVISION_COUNT - 1);
-      else if (echoUi.cursor == 4) firmware3Settings.liveTargets[echoTarget].echoDelay = clampU8(value, 0, DIVISION_COUNT - 1);
+      else if (echoUi.cursor == 3) firmware3Settings.liveTargets[echoTarget].echoLength = clampU8(value, 0, STUTTER_LENGTH_COUNT - 1);
+      else if (echoUi.cursor == 4) firmware3Settings.liveTargets[echoTarget].echoDelay = clampU8(value, 0, STUTTER_LENGTH_COUNT - 1);
       else firmware3Settings.liveTargets[echoTarget].echoDrift =
           constrain(static_cast<int>(value) - 16, -16, 16);
       break;
@@ -4532,8 +4532,8 @@ Firmware3Settings defaultFirmware3Settings() {
     target.stutterLengthSelection = STUTTER_LENGTH_DEFAULT;
     target.echoEnabled = 0;
     target.echoWet = 50;
-    target.echoLength = DIV_1_2;
-    target.echoDelay = DIV_1_8;
+    target.echoLength = lengthSelectionForDivision(DIV_1_2);
+    target.echoDelay = lengthSelectionForDivision(DIV_1_8);
     target.echoDrift = 0;
   }
   return s;
@@ -4605,8 +4605,8 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
         clampU8(target.stutterLengthSelection, 0, STUTTER_LENGTH_COUNT - 1);
     target.echoEnabled = target.echoEnabled ? 1 : 0;
     target.echoWet = clampU8(target.echoWet, 0, 100);
-    target.echoLength = clampU8(target.echoLength, 0, DIVISION_COUNT - 1);
-    target.echoDelay = clampU8(target.echoDelay, 0, DIVISION_COUNT - 1);
+    target.echoLength = clampU8(target.echoLength, 0, STUTTER_LENGTH_COUNT - 1);
+    target.echoDelay = clampU8(target.echoDelay, 0, STUTTER_LENGTH_COUNT - 1);
     target.echoDrift = constrain(static_cast<int>(target.echoDrift), -16, 16);
   }
 }
@@ -5790,14 +5790,14 @@ void applyFeatureKnob(uint8_t id, uint8_t value) {
   target = featureTargetFromBlock(id, FEATURE_KNOB_ECHO_LENGTH_BASE);
   if (target < LIVE_TARGET_COUNT) {
     firmware3Settings.liveTargets[target].echoLength =
-        static_cast<uint8_t>((static_cast<uint16_t>(value) * (DIVISION_COUNT - 1U) + 63U) / 127U);
+        static_cast<uint8_t>((static_cast<uint16_t>(value) * (STUTTER_LENGTH_COUNT - 1U) + 63U) / 127U);
     ui.dirty = true;
     return;
   }
   target = featureTargetFromBlock(id, FEATURE_KNOB_ECHO_DELAY_BASE);
   if (target < LIVE_TARGET_COUNT) {
     firmware3Settings.liveTargets[target].echoDelay =
-        static_cast<uint8_t>((static_cast<uint16_t>(value) * (DIVISION_COUNT - 1U) + 63U) / 127U);
+        static_cast<uint8_t>((static_cast<uint16_t>(value) * (STUTTER_LENGTH_COUNT - 1U) + 63U) / 127U);
     ui.dirty = true;
     return;
   }
@@ -5912,7 +5912,7 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
     target = offset / STUTTER_BUTTON_DIVISION_COUNT;
     const uint8_t division = divisions[offset % STUTTER_BUTTON_DIVISION_COUNT];
     requestStutterState(target, pressed,
-        pressed ? stutterLengthForDivision(division) : -1);
+        pressed ? lengthSelectionForDivision(division) : -1);
     return;
   }
   if (!pressed) return;
@@ -8167,13 +8167,13 @@ void drawStutterScreen() {
   if (ui.menuMode == MENU_SELECT) {
     drawSubmenuField("", liveTargetName(stutterTarget) + " " +
         (target.stutterEnabled
-            ? stutterLengthName(target.stutterLengthSelection) : String("OFF")), false);
+            ? lengthSelectionName(target.stutterLengthSelection) : String("OFF")), false);
     return;
   }
   String value;
   if (stutterUi.cursor == 0) value = liveTargetName(stutterTarget);
   else if (stutterUi.cursor == 1) value = onOff(target.stutterEnabled);
-  else if (stutterUi.cursor == 2) value = stutterLengthName(target.stutterLengthSelection);
+  else if (stutterUi.cursor == 2) value = lengthSelectionName(target.stutterLengthSelection);
   else if (stutterUi.cursor == 3) value = String(firmware3Settings.stutterTimeoutBars) + " BARS";
   drawSubmenuField(names[stutterUi.cursor], value, stutterUi.editing);
 }
@@ -8193,8 +8193,8 @@ void drawEchoScreen() {
   String value;
   if (echoUi.cursor == 0) value = liveTargetName(echoTarget);
   else if (echoUi.cursor == 1) value = onOff(echo.echoEnabled);
-  else if (echoUi.cursor == 3) value = kDivisionNames[echo.echoLength];
-  else if (echoUi.cursor == 4) value = kDivisionNames[echo.echoDelay];
+  else if (echoUi.cursor == 3) value = lengthSelectionName(echo.echoLength);
+  else if (echoUi.cursor == 4) value = lengthSelectionName(echo.echoDelay);
   else if (echoUi.cursor == 5) value = String(echo.echoDrift);
   drawSubmenuField(names[echoUi.cursor], value, echoUi.editing);
 }
