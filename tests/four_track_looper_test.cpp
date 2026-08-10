@@ -53,6 +53,16 @@ int main() {
   looper.undoClear(0);
   assert(looper.hasAnyData());
 
+  looper.beginImport(0, 500000, release, &probe);
+  assert(!looper.audible(0));
+  assert(looper.importEvent(0, LoopMidiEvent{0, 0x90, 67, 110}));
+  assert(looper.importEvent(0, LoopMidiEvent{499999, 0x80, 67, 0}));
+  assert(!looper.importEvent(0, LoopMidiEvent{500000, 0x90, 70, 100}));
+  looper.finishImport(0, 2750000);
+  assert(looper.track(0).count == 2);
+  assert(looper.track(0).lengthUs == 500000);
+  assert(looper.audible(0));
+
   looper.armRecord(1, 1000000, false);
   assert(looper.capture(3000000, LoopMidiEvent{0, 0x90, 64, 90}));
   assert(looper.finishRecording(4000000));

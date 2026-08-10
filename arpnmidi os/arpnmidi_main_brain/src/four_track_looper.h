@@ -82,6 +82,9 @@ class FourTrackLooper {
   bool restoreEvent(uint8_t track, const LoopMidiEvent &event);
   void setRestoredTrackState(uint8_t track, uint32_t lengthUs, uint32_t generation,
                              bool muted, bool solo, bool hidden);
+  void beginImport(uint8_t track, uint32_t lengthUs, ReleaseFn release, void *context);
+  bool importEvent(uint8_t track, const LoopMidiEvent &event);
+  void finishImport(uint8_t track, uint64_t boundaryUs);
 
  private:
   struct EventSlot {
@@ -114,6 +117,7 @@ class FourTrackLooper {
   bool recordingArmed_ = false;
   bool recording_ = false;
   bool overdubbing_ = false;
+  bool importing_[kLoopTrackCount]{};
   bool recordHeld_[16][128]{};
 };
 

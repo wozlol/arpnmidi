@@ -27,6 +27,7 @@ void FourTrackLooper::reset() {
   recordingArmed_ = false;
   recording_ = false;
   overdubbing_ = false;
+  memset(importing_, 0, sizeof(importing_));
   memset(recordHeld_, 0, sizeof(recordHeld_));
 }
 
@@ -201,7 +202,7 @@ bool FourTrackLooper::audible(uint8_t trackIndex) const {
   bool anySolo = false;
   for (const LoopTrackState &track : tracks_) anySolo |= track.solo && !track.hidden;
   const LoopTrackState &track = tracks_[trackIndex];
-  return !track.hidden && !track.muted && (!anySolo || track.solo);
+  return !importing_[trackIndex] && !track.hidden && !track.muted && (!anySolo || track.solo);
 }
 
 void FourTrackLooper::tick(uint64_t nowUs, EmitFn emit, ReleaseFn release,
@@ -331,6 +332,31 @@ void FourTrackLooper::setRestoredTrackState(uint8_t track, uint32_t lengthUs,
   tracks_[track].solo = solo;
   tracks_[track].hidden = hidden;
   generationCounter_ = generation > generationCounter_ ? generation : generationCounter_;
+}
+
+void FourTrackLooper::beginImport(uint8_t track, uint32_t lengthUs,
+                                  ReleaseFn release, void *context) {
+  if (track >= kLoopTrackCount || lengthUs == 0) return;
+  if (release && audible(track)) release(context, track);
+  if (recordingTrack_ == track) cancelRecording();
+  permanentlyClear(track);
+  selectedTrack_ = track;
+  tracks_[track].lengthUs = lengthUs;
+  tracks_[track].generation = ++generationCounter_;
+  importing_[track] = true;
+}
+
+bool FourTrackLooper::importEvent(uint8_t track, const LoopMidiEvent &event) {
+  if (track >= kLoopTrackCount || !importing_[track] ||
+      event.atUs >= tracks_[track].lengthUs) return false;
+  return insertEvent(track, event);
+}
+
+void FourTrackLooper::finishImport(uint8_t track, uint64_t boundaryUs) {
+  if (track >= kLoopTrackCount || !importing_[track]) return;
+  importing_[track] = false;
+  tracks_[track].playCursor = tracks_[track].head;
+  tracks_[track].cycleStartUs = boundaryUs;
 }
 
 }  // namespace arpnmidi3

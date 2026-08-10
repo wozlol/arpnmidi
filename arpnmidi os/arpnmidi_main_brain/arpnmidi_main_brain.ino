@@ -44,6 +44,7 @@
 #include <VL53L0X.h>
 #include "src/clock_engine.h"
 #include "src/four_track_looper.h"
+#include "src/rolling_history.h"
 
 #ifndef ARPNMIDI_ENABLE_USB_DEVICE_MIDI
 #define ARPNMIDI_ENABLE_USB_DEVICE_MIDI 1
@@ -157,8 +158,8 @@ constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 // Firmware 3 is still prototype firmware, so an incompatible preset-map change deliberately
 // receives a new schema identity instead of carrying migration code. A mismatch installs all
 // factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
-constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF302;
-constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3020001UL;
+constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF303;
+constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3030001UL;
 constexpr uint8_t MAX_CUSTOM_ARP_EVENTS = 32;
 constexpr uint16_t LOOP_EEPROM_MAGIC = 0x4C32;
 constexpr uint32_t LOOP_FILE_MAGIC = 0x4C503303UL;  // "LP3" schema 3
@@ -218,6 +219,7 @@ void handleMultitrackStopDelete();
 void releaseMultitrackOutput(void *context, uint8_t track);
 void emitMultitrackEvent(void *context, uint8_t track, const arpnmidi3::LoopMidiEvent &event);
 void syncLegacyLoopStatusFromMultitrack();
+void tickTimeTravelImport();
 
 enum MenuMode : uint8_t {
   MENU_SELECT = 0,
@@ -354,6 +356,21 @@ enum DivisionId : uint8_t {
 constexpr uint8_t ARP_DIVISION_FOLLOW_DRUM = DIVISION_COUNT;
 constexpr uint8_t DRUM_DIVISION_FOLLOW_ARP = DIVISION_COUNT;
 constexpr uint8_t DRUM_DIVISION_FREE = DIVISION_COUNT + 1;
+constexpr uint8_t LIVE_TARGET_COUNT = 5;  // Main plus Looper Tracks 1-4.
+
+struct LiveTargetSettings {
+  uint8_t velocityEnabled;
+  uint8_t velocityPercent;
+  uint8_t noteLengthEnabled;
+  uint8_t noteLengthPercent;
+  uint8_t stutterEnabled;
+  uint8_t stutterDivision;
+  uint8_t echoEnabled;
+  uint8_t echoWet;
+  uint8_t echoLength;
+  uint8_t echoDelay;
+  int8_t echoDrift;
+};
 
 enum PatternId : uint8_t {
   PAT_MODE = 0,
@@ -498,6 +515,7 @@ struct Firmware3Settings {
   uint8_t looperTrackMode;
   uint8_t looperQuantize;
   uint8_t looperRecordCc;
+  uint8_t stutterTimeoutBars;
   uint8_t arpOctaves;
   uint8_t arpRetriggerSync;
   uint8_t arpNoteOrder;
@@ -523,6 +541,7 @@ struct Firmware3Settings {
   uint16_t userScaleMask;
   uint8_t routerLowNotes[16];
   uint8_t routerHighNotes[16];
+  LiveTargetSettings liveTargets[LIVE_TARGET_COUNT];
 };
 
 struct SettingsV8 {
@@ -778,7 +797,6 @@ struct StorageImage {
   uint16_t magic;
   uint8_t currentPreset;
   Settings presets[PRESET_COUNT];
-  Firmware3Settings firmware3[PRESET_COUNT];
   uint8_t autoSave;
 };
 
@@ -909,6 +927,20 @@ struct LoopCcPruneState {
   uint32_t lastSeenMs = 0;
 };
 
+struct TimeTravelImportJob {
+  arpnmidi3::HistorySnapshot snapshot{};
+  uint64_t boundaryUs = 0;
+  uint32_t lengthUs = 0;
+  uint16_t closeScan = 0;
+  uint16_t importedEvents = 0;
+  uint8_t track = 0;
+  bool active = false;
+  bool closingNotes = false;
+  bool wasPlaying = false;
+  bool overflowed = false;
+  uint8_t heldNotes[16][16]{};
+};
+
 struct ParameterLockEntry {
   uint8_t note = 0;
   uint8_t cc = 0;
@@ -936,6 +968,7 @@ struct CustomArpVoice {
 };
 
 struct ExtendedPresetRecord {
+  Firmware3Settings firmware3;
   CustomArpPattern customArp;
   uint16_t parameterLockCount = 0;
   ParameterLockEntry parameterLocks[MAX_PARAMETER_LOCKS];
@@ -1030,6 +1063,8 @@ uint64_t customArpCycleStartUs = 0;
 uint8_t customArpPlayIndex = 0;
 bool littleFsReady = false;
 arpnmidi3::FourTrackLooper multitrackLooper;
+arpnmidi3::RollingHistory rollingHistory;
+TimeTravelImportJob timeTravelImport;
 uint8_t multitrackPlaybackHeld[arpnmidi3::kLoopTrackCount][16][16];
 bool loopStorageDirty = false;
 bool loopStorageError = false;
@@ -3771,8 +3806,13 @@ void flushLoopCcPruning(bool forceAll) {
 }
 
 void recordLoopCc(uint8_t sourcePort, uint8_t channel, uint8_t cc, uint8_t value) {
-  if (loopOwnsInput(sourcePort) || !firmware3Settings.looperRecordCc ||
-      !multitrackLooper.recording()) return;
+  const bool fromLoop = loopOwnsInput(sourcePort);
+  if (firmware3Settings.looperRecordCc) {
+    const uint8_t target = fromLoop ? loopTrackForSource(sourcePort) + 1U : 0;
+    rollingHistory.push(time_us_64(), target, arpnmidi3::LoopMidiEvent{0,
+        static_cast<uint8_t>(0xB0 | ((channel - 1) & 0x0F)), cc, value});
+  }
+  if (fromLoop || !firmware3Settings.looperRecordCc || !multitrackLooper.recording()) return;
   LoopCcPruneState *state = nullptr;
   for (LoopCcPruneState &candidate : loopCcPrune) {
     if (candidate.used && candidate.channel == channel && candidate.cc == cc) {
@@ -3826,9 +3866,113 @@ void armSelectedMultitrack(bool overdub) {
   ui.dirty = true;
 }
 
+bool beginTimeTravelImport() {
+  const uint8_t track = multitrackLooper.selectedTrack();
+  uint32_t lengthUs = multitrackFixedLengthUs(track);
+  if (lengthUs == 0) {
+    // A retrospective loop needs a known window. Free Track 1 therefore uses
+    // one bar for this capture and adopts the normal one-bar selection.
+    loopTrackLengthSelection[track] = 2;
+    lengthUs = multitrackFixedLengthUs(track);
+  }
+  const uint64_t boundaryUs = time_us_64();
+  const arpnmidi3::HistorySnapshot snapshot = rollingHistory.snapshot(boundaryUs, lengthUs, 0);
+  if (snapshot.empty()) return false;
+
+  timeTravelImport = TimeTravelImportJob{};
+  timeTravelImport.snapshot = snapshot;
+  timeTravelImport.boundaryUs = boundaryUs;
+  timeTravelImport.lengthUs = lengthUs;
+  timeTravelImport.track = track;
+  timeTravelImport.wasPlaying = multitrackLooper.playing();
+  timeTravelImport.active = true;
+  multitrackLooper.beginImport(track, lengthUs, releaseMultitrackOutput, nullptr);
+  syncLegacyLoopStatusFromMultitrack();
+  ui.dirty = true;
+  return true;
+}
+
+bool timeTravelNoteHeld(uint8_t channel, uint8_t note) {
+  return (timeTravelImport.heldNotes[channel][note >> 3] &
+          static_cast<uint8_t>(1U << (note & 0x07))) != 0;
+}
+
+void setTimeTravelNoteHeld(uint8_t channel, uint8_t note, bool held) {
+  uint8_t &bits = timeTravelImport.heldNotes[channel][note >> 3];
+  const uint8_t mask = static_cast<uint8_t>(1U << (note & 0x07));
+  if (held) bits |= mask;
+  else bits &= static_cast<uint8_t>(~mask);
+}
+
+void finishTimeTravelImport() {
+  multitrackLooper.finishImport(timeTravelImport.track, timeTravelImport.boundaryUs);
+  if (!timeTravelImport.wasPlaying && multitrackLooper.hasAnyData()) {
+    multitrackLooper.start(timeTravelImport.boundaryUs);
+  }
+  timeTravelImport.active = false;
+  loopStorageDirty = true;
+  syncLegacyLoopStatusFromMultitrack();
+  ui.dirty = true;
+}
+
+void tickTimeTravelImport() {
+  if (!timeTravelImport.active) return;
+  constexpr uint16_t kMaxWorkPerTick = 48;
+  uint16_t work = 0;
+  while (!timeTravelImport.closingNotes && work < kMaxWorkPerTick) {
+    arpnmidi3::LoopMidiEvent event;
+    if (!rollingHistory.readNext(timeTravelImport.snapshot, event)) {
+      timeTravelImport.closingNotes = true;
+      break;
+    }
+    ++work;
+    const uint8_t type = event.status & 0xF0;
+    if ((type == 0x90 || type == 0x80) && event.data1 <= 127) {
+      const uint8_t channel = event.status & 0x0F;
+      const bool on = type == 0x90 && event.data2 > 0;
+      if (!on && !timeTravelNoteHeld(channel, event.data1)) continue;
+      setTimeTravelNoteHeld(channel, event.data1, on);
+      if (!on) {
+        event.status = static_cast<uint8_t>(0x80 | channel);
+        event.data2 = 0;
+      }
+    }
+    if (multitrackLooper.importEvent(timeTravelImport.track, event)) {
+      ++timeTravelImport.importedEvents;
+    } else {
+      timeTravelImport.overflowed = true;
+    }
+  }
+
+  while (timeTravelImport.closingNotes && work < kMaxWorkPerTick &&
+         timeTravelImport.closeScan < 16U * 128U) {
+    const uint16_t noteIndex = timeTravelImport.closeScan++;
+    ++work;
+    const uint8_t channel = noteIndex / 128U;
+    const uint8_t note = noteIndex % 128U;
+    if (!timeTravelNoteHeld(channel, note)) continue;
+    const arpnmidi3::LoopMidiEvent noteOff{timeTravelImport.lengthUs - 1U,
+        static_cast<uint8_t>(0x80 | channel), note, 0};
+    if (multitrackLooper.importEvent(timeTravelImport.track, noteOff)) {
+      ++timeTravelImport.importedEvents;
+    } else {
+      timeTravelImport.overflowed = true;
+    }
+    setTimeTravelNoteHeld(channel, note, false);
+  }
+  if (timeTravelImport.closingNotes && timeTravelImport.closeScan >= 16U * 128U) {
+    finishTimeTravelImport();
+  }
+}
+
 void handleMultitrackRecPlay() {
   const uint64_t nowUs = time_us_64();
   configureMultitrackLooper();
+  if (firmware3Settings.looperTimeTravel && !multitrackLooper.recordingArmed() &&
+      !multitrackLooper.recording()) {
+    beginTimeTravelImport();
+    return;
+  }
   if (multitrackLooper.recordingArmed() || multitrackLooper.recording()) {
     flushLoopCcPruning(true);
     const bool captured = multitrackLooper.finishRecording(nowUs);
@@ -3903,15 +4047,18 @@ void handleMultitrackStopDelete() {
 }
 
 void recordLoopNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t velocity, bool on) {
+  const uint64_t nowUs = time_us_64();
+  const arpnmidi3::LoopMidiEvent event{0,
+      static_cast<uint8_t>((on && velocity > 0 ? 0x90 : 0x80) | ((channel1 - 1) & 0x0F)),
+      note, static_cast<uint8_t>(on ? velocity : 0)};
+  const uint8_t historyTarget = loopOwnsInput(sourcePort) ? loopTrackForSource(sourcePort) + 1U : 0;
+  rollingHistory.push(nowUs, historyTarget, event);
   if (!loopOwnsInput(sourcePort)) {
     if (firmware3Settings.looperAutoRec && !multitrackLooper.hasAnyData() &&
         !multitrackLooper.recording() && !multitrackLooper.recordingArmed() && on && velocity > 0) {
       armSelectedMultitrack(false);
     }
-    const arpnmidi3::LoopMidiEvent event{0,
-        static_cast<uint8_t>((on && velocity > 0 ? 0x90 : 0x80) | ((channel1 - 1) & 0x0F)),
-        note, static_cast<uint8_t>(on ? velocity : 0)};
-    if (multitrackLooper.capture(time_us_64(), event)) loopStorageDirty = true;
+    if (multitrackLooper.capture(nowUs, event)) loopStorageDirty = true;
     syncLegacyLoopStatusFromMultitrack();
   }
   return;
@@ -3991,6 +4138,7 @@ void tickLooperAt(uint64_t now) {
 }
 
 void tickLooper() {
+  tickTimeTravelImport();
   const bool wasRecording = multitrackLooper.recording();
   flushLoopCcPruning(false);
   configureMultitrackLooper();
@@ -4005,7 +4153,7 @@ void tickLooper() {
 
 void pollLoopStoragePersistence() {
   if (!loopStorageDirty || multitrackLooper.recording() || multitrackLooper.recordingArmed() ||
-      multitrackLooper.playing()) return;
+      multitrackLooper.playing() || timeTravelImport.active) return;
   if (anyPhysicalInputNotesHeld() || heldDrumCount > 0 || arpAnyPlaybackActive()) return;
   saveLoopStorageIfAny();
 }
@@ -4677,6 +4825,7 @@ Firmware3Settings defaultFirmware3Settings() {
   s.looperTrackMode = static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Layers);
   s.looperQuantize = 0;
   s.looperRecordCc = 0;
+  s.stutterTimeoutBars = 4;
   s.arpOctaves = 1;
   s.arpRetriggerSync = 0;
   s.arpNoteOrder = 0;
@@ -4707,6 +4856,19 @@ Firmware3Settings defaultFirmware3Settings() {
     s.routerLowNotes[ch] = 0;
     s.routerHighNotes[ch] = 127;
   }
+  for (LiveTargetSettings &target : s.liveTargets) {
+    target.velocityEnabled = 0;
+    target.velocityPercent = 100;
+    target.noteLengthEnabled = 0;
+    target.noteLengthPercent = 100;
+    target.stutterEnabled = 0;
+    target.stutterDivision = DIV_1_16;
+    target.echoEnabled = 0;
+    target.echoWet = 50;
+    target.echoLength = DIV_1_2;
+    target.echoDelay = DIV_1_8;
+    target.echoDrift = 0;
+  }
   return s;
 }
 
@@ -4722,6 +4884,7 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
       static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
   s.looperQuantize = clampU8(s.looperQuantize, 0, 5);
   s.looperRecordCc = s.looperRecordCc ? 1 : 0;
+  s.stutterTimeoutBars = clampU8(s.stutterTimeoutBars, 1, 16);
   s.arpOctaves = clampU8(s.arpOctaves, 1, 4);
   s.arpRetriggerSync = s.arpRetriggerSync ? 1 : 0;
   s.arpNoteOrder = s.arpNoteOrder ? 1 : 0;
@@ -4752,19 +4915,26 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
     s.routerLowNotes[ch] = clampU8(s.routerLowNotes[ch], 0, 127);
     s.routerHighNotes[ch] = clampU8(s.routerHighNotes[ch], s.routerLowNotes[ch], 127);
   }
-}
-
-void initializeFirmware3PresetExtensions() {
-  for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-    storage.firmware3[i] = defaultFirmware3Settings();
+  for (LiveTargetSettings &target : s.liveTargets) {
+    target.velocityEnabled = target.velocityEnabled ? 1 : 0;
+    target.velocityPercent = clampU8(target.velocityPercent, 0, 200);
+    target.noteLengthEnabled = target.noteLengthEnabled ? 1 : 0;
+    target.noteLengthPercent = clampU8(target.noteLengthPercent, 1, 200);
+    target.stutterEnabled = target.stutterEnabled ? 1 : 0;
+    target.stutterDivision = clampU8(target.stutterDivision, DIV_1_2, DIVISION_COUNT - 1);
+    target.echoEnabled = target.echoEnabled ? 1 : 0;
+    target.echoWet = clampU8(target.echoWet, 0, 100);
+    target.echoLength = clampU8(target.echoLength, 0, DIVISION_COUNT - 1);
+    target.echoDelay = clampU8(target.echoDelay, 0, DIVISION_COUNT - 1);
+    target.echoDrift = constrain(static_cast<int>(target.echoDrift), -16, 16);
   }
-  storage.autoSave = 1;
 }
 
 constexpr const char *EXTENDED_PRESET_PATH = "/presets.f3";
 
 ExtendedPresetRecord currentExtendedPresetRecord() {
   ExtendedPresetRecord record{};
+  record.firmware3 = firmware3Settings;
   record.customArp = customArpPattern;
   record.parameterLockCount = min<uint16_t>(parameterLockCount, MAX_PARAMETER_LOCKS);
   memcpy(record.parameterLocks, parameterLocks,
@@ -4797,7 +4967,8 @@ bool initializeExtendedPresetStorage(bool forceFactoryDefaults) {
   }
   for (uint8_t slot = 0; slot < PRESET_COUNT; ++slot) {
     ExtendedPresetRecord record{};
-    record.customArp.lengthSelection = defaultFirmware3Settings().customArpLength;
+    record.firmware3 = defaultFirmware3Settings();
+    record.customArp.lengthSelection = record.firmware3.customArpLength;
     if (file.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record)) != sizeof(record)) {
       file.close();
       return false;
@@ -4808,6 +4979,7 @@ bool initializeExtendedPresetStorage(bool forceFactoryDefaults) {
 }
 
 bool loadExtendedPreset(uint8_t slot) {
+  firmware3Settings = defaultFirmware3Settings();
   customArpPattern = CustomArpPattern{};
   customArpPattern.lengthSelection = firmware3Settings.customArpLength;
   parameterLockCount = 0;
@@ -4821,6 +4993,8 @@ bool loadExtendedPreset(uint8_t slot) {
   file.close();
   if (!ok || record.customArp.count > MAX_CUSTOM_ARP_EVENTS ||
       record.parameterLockCount > MAX_PARAMETER_LOCKS) return false;
+  firmware3Settings = record.firmware3;
+  sanitizeFirmware3Settings(firmware3Settings);
   customArpPattern = record.customArp;
   customArpPattern.lengthSelection = clampU8(customArpPattern.lengthSelection, 0, 5);
   parameterLockCount = record.parameterLockCount;
@@ -4846,13 +5020,11 @@ void loadCurrentPreset() {
   memset(parameterLockHeldNotes, 0, sizeof(parameterLockHeldNotes));
   settings = storage.presets[storage.currentPreset];
   sanitizeSettings(settings);
-  firmware3Settings = storage.firmware3[storage.currentPreset];
-  sanitizeFirmware3Settings(firmware3Settings);
+  loadExtendedPreset(storage.currentPreset);
   if (settings.division == ARP_DIVISION_FOLLOW_DRUM &&
       firmware3Settings.drumDivision == DRUM_DIVISION_FOLLOW_ARP) {
     firmware3Settings.drumDivision = DIV_1_16;
   }
-  loadExtendedPreset(storage.currentPreset);
   syncMusicalClockConfig(false);
   divNotesCursor = 0;
   mapCcCursor = 0;
@@ -4887,7 +5059,6 @@ void saveStorage() {
   storage.magic = PRESET_SCHEMA_MAGIC;
   syncMapCcRuntimeToSettings();
   storage.presets[storage.currentPreset] = settings;
-  storage.firmware3[storage.currentPreset] = firmware3Settings;
   storage.presets[storage.currentPreset].loadPreset = storage.currentPreset;
   storage.presets[storage.currentPreset].savePreset = storage.currentPreset;
   EEPROM.put(0, storage);
@@ -5231,7 +5402,6 @@ void initStorageIfNeeded() {
       storage.presets[i] = defaultSettings();
       storage.presets[i].loadPreset = i;
       storage.presets[i].savePreset = i;
-      storage.firmware3[i] = defaultFirmware3Settings();
     }
     storage.autoSave = 1;
     EEPROM.write(UI_SCREEN_STORAGE_OFFSET, 0xFF);
@@ -5243,7 +5413,6 @@ void initStorageIfNeeded() {
   storage.autoSave = storage.autoSave ? 1 : 0;
   for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
     sanitizeSettings(storage.presets[i]);
-    sanitizeFirmware3Settings(storage.firmware3[i]);
   }
   initializeExtendedPresetStorage(factoryDefaultsRequired);
   loadCurrentPreset();
