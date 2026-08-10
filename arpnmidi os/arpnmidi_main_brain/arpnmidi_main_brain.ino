@@ -155,8 +155,8 @@ constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 // Firmware 3 is still prototype firmware, so an incompatible preset-map change deliberately
 // receives a new schema identity instead of carrying migration code. A mismatch installs all
 // factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
-constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF308;
-constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3080001UL;
+constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF309;
+constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3090001UL;
 constexpr uint8_t MAX_CUSTOM_ARP_EVENTS = 32;
 constexpr uint32_t LOOP_FILE_MAGIC = 0x4C503304UL;  // "LP3" file, schema 4
 constexpr size_t EEPROM_BYTES = 4096;
@@ -219,6 +219,7 @@ void emitNoteLengthEvent(void *context, uint8_t target, uint8_t sourcePort,
                          const arpnmidi3::LoopMidiEvent &event);
 void deactivateStutter(uint8_t target);
 void requestStutterState(uint8_t target, bool enabled, int16_t lengthSelection = -1);
+void clearSplitNoteFromMainPaths(uint8_t sourcePort, uint8_t note);
 void setQuickJumpEnabled(bool enabled);
 uint8_t currentDivisionSetting();
 void captureChordMemoryOutput(uint8_t sourcePort, uint8_t channel,
@@ -1876,10 +1877,27 @@ void sendFinalMidi(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t da
 }
 
 void sendQuickJumpTransitionNoteOffs(uint8_t channel1) {
-  if (!channelEnabled(channel1)) return;
-  const uint8_t status = static_cast<uint8_t>(0x80 | ((channel1 - 1U) & 0x0F));
+  const bool channelValid = channelEnabled(channel1);
+  const uint8_t status = channelValid
+      ? static_cast<uint8_t>(0x80 | ((channel1 - 1U) & 0x0F)) : 0;
   for (uint8_t note = 0; note < 128; ++note) {
-    if (heldInputNotes[note]) sendFinalMidi(255, status, note, 0);
+    if (!heldInputNotes[note]) continue;
+
+    // Clear ownership maps before changing the Quick Jump route.  Directly
+    // sending a note-off here leaves mapped thru/chord/arp outputs latched,
+    // especially when the thru channel is split or remapped.
+    if (physicalHeldInputNotes[note]) {
+      clearSplitNoteFromMainPaths(0, note);
+    }
+    for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+      if (loopTrackHeldInputNotes[track][note]) {
+        clearSplitNoteFromMainPaths(LOOP_TRACK_SOURCE_BASE + track, note);
+      }
+    }
+
+    // Also release any direct Quick Jump output that was not represented by
+    // one of the main-path ownership maps.
+    if (channelValid) sendFinalMidi(255, status, note, 0);
   }
 }
 
