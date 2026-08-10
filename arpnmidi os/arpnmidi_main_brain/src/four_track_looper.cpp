@@ -24,6 +24,7 @@ void FourTrackLooper::reset() {
   recordingTrack_ = 0;
   mode_ = LoopTrackMode::Manual;
   playing_ = false;
+  paused_ = false;
   recordingArmed_ = false;
   recording_ = false;
   overdubbing_ = false;
@@ -96,17 +97,23 @@ void FourTrackLooper::armRecord(uint8_t track, uint32_t fixedLengthUs, bool over
   if (overdub) tracks_[track].generation = ++generationCounter_;
 }
 
+bool FourTrackLooper::beginArmedRecording(uint64_t nowUs) {
+  if (!recordingArmed_) return false;
+  recordingArmed_ = false;
+  recording_ = true;
+  overdubbing_ = false;
+  recordStartUs_ = nowUs;
+  permanentlyClear(recordingTrack_);
+  tracks_[recordingTrack_].generation = ++generationCounter_;
+  return true;
+}
+
 bool FourTrackLooper::capture(uint64_t nowUs, const LoopMidiEvent &input) {
   const uint8_t type = input.status & 0xF0;
   const bool noteOn = type == 0x90 && input.data2 > 0;
   if (recordingArmed_) {
     if (!noteOn) return false;
-    recordingArmed_ = false;
-    recording_ = true;
-    overdubbing_ = false;
-    recordStartUs_ = nowUs;
-    permanentlyClear(recordingTrack_);
-    tracks_[recordingTrack_].generation = ++generationCounter_;
+    beginArmedRecording(nowUs);
   }
   if (!recording_) return false;
 
@@ -195,7 +202,45 @@ void FourTrackLooper::resetPlaybackCursors(uint64_t nowUs) {
 void FourTrackLooper::start(uint64_t nowUs) {
   if (!hasAnyData()) return;
   playing_ = true;
+  paused_ = false;
+  for (LoopTrackState &track : tracks_) track.pausedPositionUs = 0;
   resetPlaybackCursors(nowUs);
+}
+
+void FourTrackLooper::pause(uint64_t nowUs, ReleaseFn release, void *context) {
+  if (!playing_) return;
+  if (release) {
+    for (uint8_t track = 0; track < kLoopTrackCount; ++track) release(context, track);
+  }
+  for (LoopTrackState &track : tracks_) {
+    track.pausedPositionUs = track.lengthUs > 0
+        ? static_cast<uint32_t>((nowUs - track.cycleStartUs) % track.lengthUs) : 0;
+    track.playCursor = track.head;
+  }
+  playing_ = false;
+  paused_ = true;
+}
+
+void FourTrackLooper::resume(uint64_t nowUs) {
+  if (playing_ || !hasAnyData()) return;
+  if (!paused_) {
+    start(nowUs);
+    return;
+  }
+  playing_ = true;
+  paused_ = false;
+  transportStartUs_ = nowUs;
+  for (LoopTrackState &track : tracks_) {
+    if (track.lengthUs == 0) continue;
+    const uint32_t positionUs = track.pausedPositionUs % track.lengthUs;
+    track.cycleStartUs = nowUs - positionUs;
+    track.playCursor = track.head;
+    while (track.playCursor != kNoLoopEvent &&
+           slots_[track.playCursor].event.atUs <= positionUs) {
+      track.playCursor = slots_[track.playCursor].next;
+    }
+    track.pausedPositionUs = 0;
+  }
 }
 
 void FourTrackLooper::stop(ReleaseFn release, void *context) {
@@ -203,7 +248,11 @@ void FourTrackLooper::stop(ReleaseFn release, void *context) {
     for (uint8_t track = 0; track < kLoopTrackCount; ++track) release(context, track);
   }
   playing_ = false;
-  for (LoopTrackState &track : tracks_) track.playCursor = track.head;
+  paused_ = false;
+  for (LoopTrackState &track : tracks_) {
+    track.playCursor = track.head;
+    track.pausedPositionUs = 0;
+  }
 }
 
 bool FourTrackLooper::resizeTrack(uint8_t trackIndex, uint32_t lengthUs,
@@ -343,6 +392,7 @@ void FourTrackLooper::clearAll(ReleaseFn release, void *context) {
   for (uint8_t track = 0; track < kLoopTrackCount; ++track) permanentlyClear(track);
   cancelRecording();
   playing_ = false;
+  paused_ = false;
 }
 
 void FourTrackLooper::setMuted(uint8_t track, bool muted, ReleaseFn release, void *context) {

@@ -11,10 +11,12 @@
 
   Special routing:
   - USB device MIDI in from the computer goes only to GP4 serial TX, into the main brain.
-  - GP5 serial RX from the main brain goes to USB device MIDI out and GP23 external serial TX.
+  - GP5 serial RX from the main brain goes to USB device MIDI out and the
+    profile-selected external serial MIDI TX.
   - GP5 serial RX from the main brain also goes to all MAX3421E-hosted USB MIDI outs.
   - MAX3421E USB host MIDI merges only to GP4 serial TX, into the main brain.
-  - GP25 external serial RX goes only to GP4 serial TX, into the main brain.
+  - The profile-selected external serial MIDI RX goes only to GP4 serial TX,
+    into the main brain.
   - Nothing received by the secondary is routed directly to another secondary output.
 
   Wiring, matching the ARPnMIDI PCB pin convention:
@@ -40,8 +42,8 @@
   - Tools -> USB Stack = Adafruit TinyUSB
 
   Notes:
-  - Main-brain MIDI uses hardware UART Serial2/UART1 at 31250 baud on GP4/GP5.
-  - External MIDI uses SerialPIO at 31250 baud on GP23/GP25.
+  - Main-brain MIDI uses hardware UART Serial2/UART1 at 1 Mbps on GP4/GP5.
+  - External MIDI uses SerialPIO at 31250 baud.
   - MAX3421E host support uses USB Host Shield 2.0's hub and MIDI classes.
   - It forwards channel voice, system common, and real-time MIDI.
   - It does not implement full streaming SysEx parsing from serial inputs.
@@ -105,7 +107,8 @@ constexpr uint8_t PIN_MAX_INT = 26;
 #endif
 
 constexpr uint8_t MAX_HOST_MIDI_DEVICE_COUNT = 4;
-constexpr uint32_t MIDI_BAUD = 31250;
+constexpr uint32_t INTER_BRAIN_MIDI_BAUD = 1000000UL;
+constexpr uint32_t EXTERNAL_MIDI_BAUD = 31250UL;
 constexpr uint32_t USB_HUB_RESET_PULSE_MS = 25;
 constexpr uint32_t USB_HUB_RESET_RELEASE_SETTLE_MS = 5;
 constexpr size_t CORE_MIDI_QUEUE_CAPACITY = 128;
@@ -409,11 +412,8 @@ void pumpMaxHostToMainBrain() {
     uint8_t len = 0;
     while ((len = midi->RecvData(msg)) > 0) {
       if (isSysExAndTrack(i, msg, len)) continue;   // drop SysEx entirely
-      // Serial2 runs at 31250 baud — a real MIDI-cable rate — so it inherently
-      // throttles the stream, aftertouch/pressure included (kept, not dropped).
-      // Only write when the TX buffer has room for the whole message, so a
-      // USB-speed pad burst can't block here and starve the host Task. Sustained
-      // over-rate (which a cable couldn't carry either) is dropped, not blocked.
+      // Queue the complete message so the MAX host core never blocks on UART.
+      // The direct inter-brain link runs much faster than a physical MIDI cable.
       const CoreMidiPacket packet{msg[0], static_cast<uint8_t>(len > 1 ? msg[1] : 0),
                                   static_cast<uint8_t>(len > 2 ? msg[2] : 0), len};
       maxToIoQueue.push(packet);
@@ -456,9 +456,9 @@ void setup() {
 
   Serial2.setTX(PIN_MAIN_BRAIN_MIDI_TX);
   Serial2.setRX(PIN_MAIN_BRAIN_MIDI_RX);
-  Serial2.begin(MIDI_BAUD);
+  Serial2.begin(INTER_BRAIN_MIDI_BAUD);
 
-  externalMidi.begin(MIDI_BAUD);
+  externalMidi.begin(EXTERNAL_MIDI_BAUD);
   __atomic_store_n(&ioCoreReady, true, __ATOMIC_RELEASE);
 }
 

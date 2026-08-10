@@ -30,6 +30,7 @@ struct LoopTrackState {
   uint32_t storedLengthUs = 0;
   uint32_t generation = 0;
   uint64_t cycleStartUs = 0;
+  uint32_t pausedPositionUs = 0;
   bool muted = false;
   bool solo = false;
   bool hidden = false;
@@ -50,6 +51,7 @@ class FourTrackLooper {
   uint8_t selectedTrack() const { return selectedTrack_; }
 
   void armRecord(uint8_t track, uint32_t fixedLengthUs, bool overdub);
+  bool beginArmedRecording(uint64_t nowUs);
   void setRecordQuantizeUs(uint32_t quantumUs) { recordQuantizeUs_ = quantumUs; }
   bool capture(uint64_t nowUs, const LoopMidiEvent &event);
   bool finishRecording(uint64_t nowUs);
@@ -60,6 +62,8 @@ class FourTrackLooper {
   uint8_t recordingTrack() const { return recordingTrack_; }
 
   void start(uint64_t nowUs);
+  void pause(uint64_t nowUs, ReleaseFn release, void *context);
+  void resume(uint64_t nowUs);
   void stop(ReleaseFn release, void *context);
   bool resizeTrack(uint8_t track, uint32_t lengthUs, uint64_t nowUs,
                    ReleaseFn release, void *context);
@@ -118,6 +122,7 @@ class FourTrackLooper {
   uint8_t recordingTrack_ = 0;
   LoopTrackMode mode_ = LoopTrackMode::Manual;
   bool playing_ = false;
+  bool paused_ = false;
   bool recordingArmed_ = false;
   bool recording_ = false;
   bool overdubbing_ = false;

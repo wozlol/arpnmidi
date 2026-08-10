@@ -142,6 +142,35 @@ int main() {
   }, &copiedCcContext));
   assert(foundCopiedCc);
 
+  FourTrackLooper transportLooper;
+  Probe transportProbe;
+  transportLooper.armRecord(0, 1000000, false);
+  assert(transportLooper.capture(1000000, LoopMidiEvent{0, 0x90, 60, 100}));
+  assert(transportLooper.capture(1500000, LoopMidiEvent{0, 0x80, 60, 0}));
+  assert(transportLooper.finishRecording(2000000));
+  transportLooper.start(3000000);
+  transportLooper.tick(3000000, emit, release, &transportProbe);
+  assert(transportProbe.emitted == 1);
+  transportLooper.pause(3300000, release, &transportProbe);
+  assert(!transportLooper.playing());
+  transportLooper.resume(4000000);
+  assert(transportLooper.playing());
+  transportLooper.tick(4199999, emit, release, &transportProbe);
+  assert(transportProbe.emitted == 1);
+  transportLooper.tick(4200000, emit, release, &transportProbe);
+  assert(transportProbe.emitted == 2);
+  assert(transportProbe.last.status == 0x80);
+
+  FourTrackLooper transportRecordLooper;
+  transportRecordLooper.armRecord(0, 1000000, false);
+  assert(transportRecordLooper.beginArmedRecording(5000000));
+  assert(transportRecordLooper.recording());
+  assert(!transportRecordLooper.recordingArmed());
+  assert(transportRecordLooper.capture(
+      5250000, LoopMidiEvent{0, 0x90, 69, 100}));
+  assert(transportRecordLooper.track(0).count == 1);
+  assert(!transportRecordLooper.beginArmedRecording(5500000));
+
   // A replacement take clears both the sounding window and retained copies.
   resizeLooper.armRecord(0, 250000, false);
   assert(resizeLooper.capture(2000000, LoopMidiEvent{0, 0x90, 67, 100}));

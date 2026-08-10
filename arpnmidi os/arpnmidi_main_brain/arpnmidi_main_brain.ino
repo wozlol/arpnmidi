@@ -8,8 +8,8 @@
   1   Serial RX from ESP32-C3
   2   I2C SDA for SSD1306 + VL53L0X
   3   I2C SCL for SSD1306 + VL53L0X
-  4   MIDI serial TX to secondary brain
-  5   MIDI serial RX from secondary brain
+  4   1 Mbps inter-brain UART TX to secondary brain
+  5   1 Mbps inter-brain UART RX from secondary brain
   6   Encoder A
   7   Encoder B
   8   Encoder push
@@ -26,7 +26,7 @@
   - Build this with the Arduino-Pico core, Tools->USB Stack = Adafruit TinyUSB,
     and CPU speed = 120 MHz or 240 MHz.
   - The display is only redrawn when something visible changes.
-  - Settings persist in flash-backed EEPROM with 16 preset slots.
+  - Settings persist in flash-backed EEPROM and LittleFS with 16 preset slots.
 */
 
 #include <Arduino.h>
@@ -86,6 +86,7 @@ constexpr uint8_t PIN_BUTTON_4 = 13;
 constexpr uint8_t PIN_PUSH = 26;
 constexpr uint8_t PIN_RGB_LED = 16;
 constexpr uint8_t USB_DEVICE_SOURCE_PORT = 253;
+constexpr uint32_t INTER_BRAIN_MIDI_BAUD = 1000000UL;
 
 constexpr uint8_t OLED_ADDR = 0x3C;
 constexpr uint8_t SCREEN_W = 128;
@@ -125,7 +126,6 @@ constexpr uint32_t SCREEN_SAVER_IDLE_MS = 60000UL;
 constexpr uint32_t SCREEN_SAVER_REFRESH_MS = 4000UL;
 constexpr uint32_t LONG_HOLD_PANIC_MS = 2000UL;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 25UL;
-constexpr uint32_t BUTTON_PULSE_MS = 35UL;
 
 constexpr uint8_t MAX_HELD_NOTES = 32;
 constexpr uint8_t MAX_ARP_OUTPUT_NOTES = 8;
@@ -155,21 +155,19 @@ constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 // Firmware 3 is still prototype firmware, so an incompatible preset-map change deliberately
 // receives a new schema identity instead of carrying migration code. A mismatch installs all
 // factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
-constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF305;
-constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3050001UL;
+constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF306;
+constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3060001UL;
 constexpr uint8_t MAX_CUSTOM_ARP_EVENTS = 32;
 constexpr uint32_t LOOP_FILE_MAGIC = 0x4C503304UL;  // "LP3" file, schema 4
 constexpr size_t EEPROM_BYTES = 4096;
-constexpr uint8_t ARP_CH_1_PLUS_10 = 17;
-constexpr uint8_t ARP_CH_1_PLUS_10_AFTERTOUCH = 18;
-constexpr uint8_t ARP_CH_1_TO_10_SPLIT_24 = 19;
-constexpr uint8_t ARP_CH_1_TO_10_SPLIT_36 = 20;
-constexpr uint8_t ARP_CH_1_TO_10_SPLIT_48 = 21;
-constexpr uint8_t ARP_CH_MAX = ARP_CH_1_TO_10_SPLIT_48;
 constexpr uint8_t DRUM_AFTERTOUCH_MIN_VELOCITY = 42;  // 33% floor.
 
 decltype(Serial2) &DinSerial = Serial2;
-MIDI_CREATE_INSTANCE(HardwareSerial, Serial2, DinMIDI);
+struct InterBrainSerialSettings : public midi::DefaultSerialSettings {
+  static const long BaudRate = INTER_BRAIN_MIDI_BAUD;
+};
+MIDI_CREATE_CUSTOM_INSTANCE(HardwareSerial, Serial2, DinMIDI,
+                            InterBrainSerialSettings);
 bool core1_separate_stack = true;
 Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire1, -1);
 VL53L0X tof;
@@ -290,7 +288,6 @@ enum SettingId : uint8_t {
   SET_DIVISION,
   SET_VELOCITY,
   SET_LENGTH,
-  SET_PATTERN,
   SET_QUICK_JUMP,
   SET_INPUT_CH,
   SET_ARP_OUT_CH,
@@ -305,9 +302,6 @@ enum SettingId : uint8_t {
   SET_NOTE_CC,
   SET_CC_OUT_CH,
   SET_LEGATO_CH,
-  SET_REMOTE_CH,
-  SET_REMOTE1,
-  SET_REMOTE2,
   SET_SCREEN_SAVER,
   SET_SENSOR_CH,
   SET_SENSOR_MODE,
@@ -326,15 +320,6 @@ enum SettingId : uint8_t {
   SET_SAVE_PRESET,
   SET_PANIC,
   SETTING_COUNT
-};
-
-enum LoopBarsId : uint8_t {
-  LOOP_BARS_1 = 0,
-  LOOP_BARS_2,
-  LOOP_BARS_4,
-  LOOP_BARS_8,
-  LOOP_BARS_FREE,
-  LOOP_BARS_COUNT
 };
 
 enum ArpMode : uint8_t {
@@ -646,7 +631,6 @@ struct Settings {
   uint8_t division;
   uint8_t arpVelocity;
   uint8_t arpLengthPct;
-  uint8_t pattern;
   uint8_t inputChannel;
   uint8_t arpOutChannel;
   uint8_t bassMode;
@@ -656,14 +640,11 @@ struct Settings {
   uint8_t routerOutChannels[16];
   int8_t routerTranspose[16];
   uint8_t ccOutChannel;
-  uint8_t remoteChannel;
   uint8_t sensorChannel;
   uint8_t sensorMode;
   uint8_t forceKey;
   uint8_t forceScale;
   uint8_t instrumentView;
-  uint8_t remote1Action;
-  uint8_t remote2Action;
   uint8_t loadPreset;
   uint8_t savePreset;
   uint8_t reserved;
@@ -672,8 +653,6 @@ struct Settings {
   uint8_t divNoteNotes[DIV_NOTE_SLOT_COUNT];
   uint8_t divNotePlusNote;
   uint8_t pushMode;
-  uint8_t loopBars;
-  uint8_t loopAutoOverdub;
   uint8_t legatoChannel;
   uint8_t roundRobinOptions;
 };
@@ -756,20 +735,6 @@ constexpr uint8_t UI_SCREEN_STORAGE_MAGIC = 0xA7;
 constexpr uint32_t UI_SCREEN_SAVE_IDLE_MS = 2000UL;
 static_assert(sizeof(StorageImage) <= UI_SCREEN_STORAGE_OFFSET,
               "Preset storage overlaps saved UI state");
-
-struct ClockTracker {
-  uint32_t lastClockMicros = 0;
-  uint32_t lastDinClockMs = 0;
-  uint8_t pulseCount = 0;
-  float bpm = 120.0f;
-};
-
-struct ButtonPulse {
-  bool active = false;
-  bool isCc = false;
-  uint8_t number = 0;
-  uint32_t offAtMs = 0;
-};
 
 struct LoopCcPruneState {
   bool used = false;
@@ -894,7 +859,6 @@ Settings settings;
 Firmware3Settings firmware3Settings;
 FeatureControlSettings featureControls;
 arpnmidi3::ClockEngine musicalClock;
-ClockTracker clockTracker;
 EncoderState encoder;
 SensorRuntime sensorRt;
 PushRuntime pushRt;
@@ -1078,6 +1042,7 @@ uint32_t physicalButtonChangeMs[4];
 bool customButtonLatch[4];
 uint8_t customButtonFlappyValue[4];
 uint32_t customButtonFlappyMs[4];
+uint8_t looperButtonStep[4];
 bool chordButtonPlaying[4];
 bool chordLearnArmed = false;
 bool chordClearArmed = false;
@@ -1131,13 +1096,12 @@ const int8_t kEncoderTransitionTable[16] = {
 
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 SWING", "3 ARP", "4 VELOCITY", "5 NOTE LENGTH", "6 STUTTER", "7 ECHO",
-  "", "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 MAIN", "11 DRUM MAGIC",
+  "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 MAIN", "11 DRUM MAGIC",
   "12 BASS", "13 THRU OUT", "14 RNDRBN", "15 ROUTER", "16 DRUM ROLL", "17 FEATURES",
-  "18 CC MAP", "19 NOTE>CC", "20 IN CC >", "21 MONO RETRIG", "22 REMOTE",
-  "23 REMOTE 1", "24 REMOTE 2", "25 SCRNSVR", "26 EYE/PUSH", "27 EYE MODE",
-  "28 PUSH", "29 4BUTTON", "30 LOOPER", "31 MUTE/SOLO", "32 PARAM LOCK",
-  "33 CHORD", "34 KEY", "35 SCALE", "36 GIT/KEYS", "37 LIVE CC", "38 GLOBAL",
-  "39 LOAD", "40 SAVE", "41 PANIC"
+  "18 CC MAP", "19 NOTE>CC", "20 IN CC >", "21 MONO RETRIG", "22 SCRNSVR",
+  "23 EYE/PUSH", "24 EYE MODE", "25 PUSH", "26 4BUTTON", "27 LOOPER",
+  "28 MUTE/SOLO", "29 PARAM LOCK", "30 CHORD", "31 KEY", "32 SCALE",
+  "33 GIT/KEYS", "34 LIVE CC", "35 GLOBAL", "36 LOAD", "37 SAVE", "38 PANIC"
 };
 
 const char *const kArpModeNames[ARP_MODE_COUNT] = {
@@ -1168,11 +1132,6 @@ const uint16_t kDivisionPulseSteps[DIVISION_COUNT] = {
   32, 24, 18, 16, 12, 9, 8, 6, 4
 };
 
-const char *const kPatternNames[PATTERN_COUNT] = {
-  "MODE", "UP 1-OCT", "DOWN", "UP-DOWN 1", "UP-DOWN 2", "RANDOM", "TRIGGER",
-  "RHYTHM", "OSTINATO", "OCT WALK", "FIFTH", "BASS+CHORD", "CHORD+RUN"
-};
-
 const char *const kForceScaleNames[FORCE_SCALE_COUNT] = {
   "OFF", "MAJOR", "MINOR", "MAJ+MIN", "BLUES", "MAJ BLUES",
   "BLUES+BOTH", "HARM MIN", "MEL MIN", "USER"
@@ -1186,10 +1145,6 @@ const char *const kSensorModeNames[SENSOR_MODE_COUNT] = {
   "CC 1", "CC 2", "CC 3", "CC 4", "CC 5", "CC 6", "CC 7", "CC 8", "CC 9",
   "CC 10", "CC 11", "CC 12", "CC 13", "CC 14", "CC 15", "CC 16", "CC 17", "CC 18", "CC 19",
   "CC103", "Loop Rec/\nPlay/Over", "Loop Stop/\nDelete"
-};
-
-const char *const kLoopBarsNames[LOOP_BARS_COUNT] = {
-  "1 BAR", "2 BAR", "4 BAR", "8 BAR", "FREE"
 };
 
 const char *const kNoteNames[12] = {
@@ -1392,8 +1347,8 @@ bool splitDrumInputNote(uint8_t note) {
 }
 
 bool selectableSetting(uint8_t settingId) {
-  return settingId != SET_PATTERN && settingId != SET_DIVISION &&
-         settingId != SET_VELOCITY && settingId != SET_LENGTH;
+  return settingId != SET_DIVISION && settingId != SET_VELOCITY &&
+         settingId != SET_LENGTH;
 }
 
 uint8_t advanceSelectableSetting(uint8_t current, int delta) {
@@ -1652,11 +1607,6 @@ bool settingNeedsPanic(uint8_t settingId) {
 
 String midiChannelLabel(uint8_t value, bool allowOff = false) {
   if (allowOff && value == 0) return "OFF";
-  if (value == ARP_CH_1_PLUS_10) return "1+10";
-  if (value == ARP_CH_1_PLUS_10_AFTERTOUCH) return "1+10-A";
-  if (value == ARP_CH_1_TO_10_SPLIT_24) return "1-10 24";
-  if (value == ARP_CH_1_TO_10_SPLIT_36) return "1-10 36";
-  if (value == ARP_CH_1_TO_10_SPLIT_48) return "1-10 48";
   return "CH " + String(value);
 }
 
@@ -1802,33 +1752,6 @@ String bassLabel(uint8_t value) {
   if (octaves > 0) return "CH " + String(channel) + " +" + String(octaves) + " OCT";
   if (octaves == 0) return "CH " + String(channel) + " 0 OCT";
   return "CH " + String(channel) + " " + String(octaves) + " OCT";
-}
-
-String remoteActionLabel(uint8_t action) {
-  if (action < 128) {
-    uint8_t octave = action / 12;
-    uint8_t note = action % 12;
-    return String("NOTE ") + kNoteNames[note] + String(octave);
-  }
-  return String("CC ") + String(action - 128 + 1);
-}
-
-void drawRemoteActionScreen(uint8_t action) {
-  display.setCursor(0, 0);
-  if (action < 128) {
-    const uint8_t octave = action / 12;
-    const uint8_t note = action % 12;
-    display.setTextSize(3);
-    display.print(kNoteNames[note]);
-    display.print(octave);
-    display.setTextSize(2);
-    display.setCursor(0, 26);
-    display.print(action);
-  } else {
-    display.setTextSize(3);
-    display.print(F("CC"));
-    display.print(action - 128 + 1);
-  }
 }
 
 void drawWrappedTopValue(const String &text) {
@@ -2071,18 +1994,6 @@ void sendAllNoteOffChannel(uint8_t ch1) {
   sendFinalMidi(255, 0xB0 | ((ch1 - 1) & 0x0F), 120, 0);
 }
 
-[[noreturn]] void rebootBoard(const __FlashStringHelper *reason = nullptr) {
-  if (ui.selectedSetting < SETTING_COUNT && selectableSetting(ui.selectedSetting)) {
-    storeUiResumeHint(ui.selectedSetting);
-  }
-  if (storage.autoSave || presetStorageDirty) saveStorage();
-  saveLoopStorageIfAny();
-  showBootStage(F("Rebooting..."), reason);
-  delay(80);
-  watchdog_reboot(0, 0, 10);
-  while (true) delay(1);
-}
-
 void storeUiResumeHint(uint8_t settingId) {
   watchdog_hw->scratch[0] = UI_RESUME_MAGIC;
   watchdog_hw->scratch[1] = settingId;
@@ -2124,43 +2035,7 @@ void panicMidiOnly() {
   if (channelEnabled(settings.thruOutChannel)) sendAllNoteOffChannel(settings.thruOutChannel);
   if (channelEnabled(settings.legatoChannel)) sendAllNoteOffChannel(settings.legatoChannel);
   if (settings.bassMode > 0) sendAllNoteOffChannel(bassModeChannel(settings.bassMode));
-  if (channelEnabled(settings.remoteChannel)) sendAllNoteOffChannel(settings.remoteChannel);
   if (channelEnabled(settings.sensorChannel)) sendAllNoteOffChannel(settings.sensorChannel);
-  activeArpCount = 0;
-  activeDrumArpCount = 0;
-  loopSafeClearArmed = false;
-  currentBassOutNote = -1;
-  sensorRt.activeNote = -1;
-  pushRt.activeNote = -1;
-  sensorRt.lastPitch = 0;
-  pushRt.lastPitch = 0;
-  sensorRt.lastCcValue = -1;
-  pushRt.lastCcValue = -1;
-}
-
-void sendDinAllNoteOffChannelOnly(uint8_t ch1) {
-  if (!channelEnabled(ch1)) return;
-  sendDinCc(ch1, 123, 0);
-  sendDinCc(ch1, 120, 0);
-}
-
-void panicDinOnly() {
-  // loopAllOff() routes through normal fanout, including USB host output.
-  // This DIN-only path is used while changing USB host mode to avoid a stuck hub write during save/reboot.
-  const uint8_t panicArpCh = mainArpOutChannel();
-  if (channelEnabled(panicArpCh)) sendDinAllNoteOffChannelOnly(panicArpCh);
-  for (uint8_t ch = 1; ch <= 16; ++ch) {
-    if (settings.roundRobinMask & channelBit(ch)) sendDinAllNoteOffChannelOnly(ch);
-  }
-  if (roundRobinCh10To1Enabled() || roundRobinCh10To2Enabled()) {
-    for (uint8_t ch = 1; ch <= 16; ++ch) sendDinAllNoteOffChannelOnly(ch);
-  }
-  if (arpChannelSpecialMode()) sendDinAllNoteOffChannelOnly(10);
-  if (channelEnabled(settings.thruOutChannel)) sendDinAllNoteOffChannelOnly(settings.thruOutChannel);
-  if (channelEnabled(settings.legatoChannel)) sendDinAllNoteOffChannelOnly(settings.legatoChannel);
-  if (settings.bassMode > 0) sendDinAllNoteOffChannelOnly(bassModeChannel(settings.bassMode));
-  if (channelEnabled(settings.remoteChannel)) sendDinAllNoteOffChannelOnly(settings.remoteChannel);
-  if (channelEnabled(settings.sensorChannel)) sendDinAllNoteOffChannelOnly(settings.sensorChannel);
   activeArpCount = 0;
   activeDrumArpCount = 0;
   loopSafeClearArmed = false;
@@ -2912,19 +2787,39 @@ void restartArpFromNewKeyPhrase() {
 }
 
 void syncArpDivisionToGrid() {
-  if (arpNextStepUs == 0) return;
   const uint64_t now = time_us_64();
-  if (now < arpGridOriginUs) {
-    arpNextStepUs = arpGridOriginUs;
+  if (arpNextStepUs != 0) {
+    if (now < arpGridOriginUs) {
+      arpNextStepUs = arpGridOriginUs;
+    } else {
+      const uint8_t division = currentDivisionSetting();
+      const uint64_t stepUs = max<uint64_t>(1, musicalDurationUs(kDivisionPulseSteps[division]));
+      uint32_t boundary = static_cast<uint32_t>((now - arpGridOriginUs) / stepUs);
+      while (swungGridTimeUs(arpGridOriginUs, boundary, division) < now) ++boundary;
+      arpGlobalStep = boundary;
+      arpPatternStep = boundary % 16U;
+      arpNextStepUs = swungGridTimeUs(arpGridOriginUs, boundary, division);
+    }
+  }
+
+  if (drumNextStepUs == 0) return;
+  const int8_t drumDivision = currentDrumDivisionSetting();
+  if (drumDivision < 0) {
+    drumNextStepUs = 0;
     return;
   }
-  const uint8_t division = currentDivisionSetting();
-  const uint64_t stepUs = max<uint64_t>(1, musicalDurationUs(kDivisionPulseSteps[division]));
-  uint32_t boundary = static_cast<uint32_t>((now - arpGridOriginUs) / stepUs);
-  while (swungGridTimeUs(arpGridOriginUs, boundary, division) < now) ++boundary;
-  arpGlobalStep = boundary;
-  arpPatternStep = boundary % 16U;
-  arpNextStepUs = swungGridTimeUs(arpGridOriginUs, boundary, division);
+  if (now < drumGridOriginUs) {
+    drumNextStepUs = drumGridOriginUs;
+    return;
+  }
+  const uint64_t drumStepUs = max<uint64_t>(1,
+      musicalDurationUs(kDivisionPulseSteps[drumDivision]));
+  uint32_t drumBoundary = static_cast<uint32_t>((now - drumGridOriginUs) / drumStepUs);
+  while (swungGridTimeUs(drumGridOriginUs, drumBoundary, drumDivision) < now) {
+    ++drumBoundary;
+  }
+  drumGlobalStep = drumBoundary;
+  drumNextStepUs = swungGridTimeUs(drumGridOriginUs, drumBoundary, drumDivision);
 }
 
 void noteArpOffPassthrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on) {
@@ -3811,26 +3706,29 @@ uint8_t nextRoundRobinChannel(uint8_t baseCh) {
 }
 
 void applyIncomingTransport(arpnmidi3::TransportEvent event) {
-  if (!firmware3Settings.clockInFollow || event == arpnmidi3::TransportEvent::None) return;
+  if (event == arpnmidi3::TransportEvent::None) return;
 
   const uint64_t nowUs = time_us_64();
   if (event == arpnmidi3::TransportEvent::Start) {
-    restartArpTiming(true);
-    if (firmware3Settings.looperMidiTransport && multitrackLooper.hasAnyData()) {
-      multitrackLooper.start(nowUs);
+    if (firmware3Settings.clockInFollow) restartArpTiming(true);
+    if (firmware3Settings.looperMidiTransport) {
+      if (multitrackLooper.hasAnyData()) multitrackLooper.start(nowUs);
+      multitrackLooper.beginArmedRecording(nowUs);
     }
   } else if (event == arpnmidi3::TransportEvent::Continue) {
     if (firmware3Settings.looperMidiTransport && multitrackLooper.hasAnyData() &&
-        !multitrackLooper.playing()) multitrackLooper.start(nowUs);
+        !multitrackLooper.playing()) multitrackLooper.resume(nowUs);
   } else if (event == arpnmidi3::TransportEvent::Stop) {
-    arpNoteOffs();
-    drumArpNoteOffs();
-    arpNextStepUs = 0;
+    if (firmware3Settings.clockInFollow) {
+      arpNoteOffs();
+      drumArpNoteOffs();
+      arpNextStepUs = 0;
+    }
     if (firmware3Settings.looperMidiTransport) {
       if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
         loopStorageDirty |= multitrackLooper.finishRecording(nowUs);
       }
-      multitrackLooper.stop(releaseMultitrackOutput, nullptr);
+      multitrackLooper.pause(nowUs, releaseMultitrackOutput, nullptr);
     }
   }
   refreshLoopUiState();
@@ -3900,7 +3798,6 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_DIVISION: return ARP_DIVISION_FOLLOW_DRUM;
     case SET_VELOCITY: return 127;
     case SET_LENGTH: return 100;
-    case SET_PATTERN: return PATTERN_COUNT - 1;
     case SET_QUICK_JUMP:
       if (!quickJumpUi.editing) return 3;
       if (quickJumpUi.cursor < 2) return 16;
@@ -3942,7 +3839,6 @@ int16_t settingRangeMax(uint8_t settingId) {
       return 127;
     case SET_LEGATO_CH: return 16;
     case SET_CC_OUT_CH: return 17;
-    case SET_REMOTE_CH: return 16;
     case SET_SENSOR_CH: return 16;
     case SET_SENSOR_MODE: return SENSOR_MODE_COUNT - 1;
     case SET_PUSH_MODE: return SENSOR_MODE_COUNT - 1;
@@ -3984,8 +3880,6 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (globalUi.cursor <= 5 || globalUi.cursor == 7) return 1;
       if (globalUi.cursor == 6) return 128;
       return 0;
-    case SET_REMOTE1: return 254;
-    case SET_REMOTE2: return 254;
     case SET_LOAD_PRESET: return PRESET_COUNT - 1;
     case SET_SAVE_PRESET: return PRESET_COUNT - 1;
     case SET_SCREEN_SAVER: return 2;
@@ -4035,7 +3929,6 @@ int16_t getSettingValueRaw(uint8_t settingId) {
     case SET_DIVISION: return settings.division;
     case SET_VELOCITY: return settings.arpVelocity;
     case SET_LENGTH: return settings.arpLengthPct;
-    case SET_PATTERN: return settings.pattern;
     case SET_QUICK_JUMP:
       if (!quickJumpUi.editing) return quickJumpUi.cursor;
       if (quickJumpUi.cursor == 0) return firmware3Settings.quickJumpInputChannel;
@@ -4096,7 +3989,6 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       return featureControls.noteCcMaps[noteCcCursor].behavior;
     case SET_LEGATO_CH: return settings.legatoChannel;
     case SET_CC_OUT_CH: return settings.ccOutChannel;
-    case SET_REMOTE_CH: return settings.remoteChannel;
     case SET_SENSOR_CH: return settings.sensorChannel;
     case SET_SENSOR_MODE: return settings.sensorMode;
     case SET_PUSH_MODE: return settings.pushMode;
@@ -4154,8 +4046,6 @@ int16_t getSettingValueRaw(uint8_t settingId) {
           ? firmware3Settings.channelAftertouchCc : 128;
       if (globalUi.cursor == 7) return firmware3Settings.mainAftertouchArpVelocity;
       return 0;
-    case SET_REMOTE1: return settings.remote1Action;
-    case SET_REMOTE2: return settings.remote2Action;
     case SET_LOAD_PRESET:
       if (ui.menuMode == MENU_SELECT && ui.selectedSetting == SET_LOAD_PRESET) return storage.currentPreset;
       return settings.loadPreset;
@@ -4236,7 +4126,6 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       break;
     case SET_VELOCITY: settings.arpVelocity = clampU8(value, 1, 127); break;
     case SET_LENGTH: settings.arpLengthPct = clampU8(value, 1, 100); break;
-    case SET_PATTERN: settings.pattern = clampU8(value, 0, PATTERN_COUNT - 1); break;
     case SET_QUICK_JUMP:
       if (!quickJumpUi.editing) quickJumpUi.cursor = clampU8(value, 0, 3);
       else if (quickJumpUi.cursor == 0) firmware3Settings.quickJumpInputChannel = clampU8(value, 1, 16);
@@ -4335,7 +4224,6 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       break;
     }
     case SET_CC_OUT_CH: settings.ccOutChannel = clampU8(value, 1, 17); break;
-    case SET_REMOTE_CH: settings.remoteChannel = clampU8(value, 1, 16); break;
     case SET_SENSOR_CH: settings.sensorChannel = clampU8(value, 1, 16); break;
     case SET_SENSOR_MODE:
       settings.sensorMode = clampU8(value, 0, SENSOR_MODE_COUNT - 1);
@@ -4458,8 +4346,6 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       else if (globalUi.cursor == 7) firmware3Settings.mainAftertouchArpVelocity = value ? 1 : 0;
       syncMusicalClockConfig(false);
       break;
-    case SET_REMOTE1: settings.remote1Action = clampU8(value, 0, 254); break;
-    case SET_REMOTE2: settings.remote2Action = clampU8(value, 0, 254); break;
     case SET_LOAD_PRESET: settings.loadPreset = clampU8(value, 0, PRESET_COUNT - 1); break;
     case SET_SAVE_PRESET: settings.savePreset = clampU8(value, 0, PRESET_COUNT - 1); break;
     case SET_SCREEN_SAVER:
@@ -4534,18 +4420,13 @@ void sanitizeSettings(Settings &s) {
   }
   s.legatoChannel = clampU8(s.legatoChannel, 0, 16);
   s.ccOutChannel = clampU8(s.ccOutChannel, 1, 17);
-  s.remoteChannel = clampU8(s.remoteChannel, 1, 16);
   s.sensorChannel = clampU8(s.sensorChannel, 1, 16);
   s.sensorMode = clampU8(s.sensorMode, 0, SENSOR_MODE_COUNT - 1);
   s.pushMode = clampU8(s.pushMode, 0, SENSOR_MODE_COUNT - 1);
-  s.loopBars = clampU8(s.loopBars, 0, LOOP_BARS_COUNT - 1);
-  s.loopAutoOverdub = (s.loopAutoOverdub > 0) ? 1 : 0;
   s.forceKey = clampU8(s.forceKey, 0, 24);
   s.forceScale = clampU8(s.forceScale, 0, FORCE_SCALE_COUNT - 1);
   if (ckeyEnabledForValue(s.forceKey) && scaleIsCombo(s.forceScale)) s.forceScale = SCALE_MAJOR;
   s.instrumentView = clampU8(s.instrumentView, 0, 1);
-  s.remote1Action = clampU8(s.remote1Action, 0, 254);
-  s.remote2Action = clampU8(s.remote2Action, 0, 254);
   s.loadPreset = clampU8(s.loadPreset, 0, PRESET_COUNT - 1);
   s.savePreset = clampU8(s.savePreset, 0, PRESET_COUNT - 1);
   s.reserved = 0;
@@ -4853,6 +4734,7 @@ void loadCurrentPreset() {
   fourButtonLearnActive = false;
   memset(customButtonLatch, 0, sizeof(customButtonLatch));
   memset(customButtonFlappyValue, 0, sizeof(customButtonFlappyValue));
+  memset(looperButtonStep, 0, sizeof(looperButtonStep));
   memset(chordButtonPlaying, 0, sizeof(chordButtonPlaying));
   chordLearnArmed = false;
   chordClearArmed = false;
@@ -4905,7 +4787,6 @@ Settings defaultSettings() {
   s.division = DIV_1_8;
   s.arpVelocity = 96;
   s.arpLengthPct = 55;
-  s.pattern = PAT_MODE;
   s.inputChannel = 1;
   s.arpOutChannel = 1;
   s.bassMode = 0;
@@ -4914,15 +4795,12 @@ Settings defaultSettings() {
   clearRouterMappings(s);
   s.legatoChannel = 0;
   s.ccOutChannel = 17;
-  s.remoteChannel = 16;
   s.sensorChannel = 3;
   s.sensorMode = SENSOR_OFF;
   s.pushMode = SENSOR_OFF;
   s.forceKey = 0;
   s.forceScale = SCALE_OFF;
   s.instrumentView = 0;
-  s.remote1Action = 103;
-  s.remote2Action = 104;
   s.loadPreset = 0;
   s.savePreset = 0;
   s.reserved = 0;
@@ -4932,8 +4810,6 @@ Settings defaultSettings() {
     s.divNoteNotes[i] = 0xFF;
   }
   s.divNotePlusNote = 0xFF;
-  s.loopBars = LOOP_BARS_1;
-  s.loopAutoOverdub = 0;
   s.roundRobinOptions = 0;
   return s;
 }
@@ -4990,7 +4866,7 @@ void applySettingDelta(int delta, bool fastStep) {
   const int maxValue = settingRangeMax(id);
 
   if (id == SET_BPM) next = constrain(next, 20, 300);
-  else if (id == SET_INPUT_CH || id == SET_REMOTE_CH || id == SET_SENSOR_CH) next = constrain(next, 1, 16);
+  else if (id == SET_INPUT_CH || id == SET_SENSOR_CH) next = constrain(next, 1, 16);
   else if (id == SET_CC_OUT_CH) next = wrapIndex(next - 1, 17) + 1;
   else if (id == SET_ROUTER && routerEditStage == ROUTER_STAGE_DEST) next = wrapIndex(next - 1, 16) + 1;
   else if (id == SET_ROUTER && routerEditStage == ROUTER_STAGE_TRANSPOSE) {
@@ -5052,7 +4928,7 @@ void applySettingDelta(int delta, bool fastStep) {
     setSettingValueRaw(id, next);
   }
 
-  if (id == SET_SWING || id == SET_DIVISION || id == SET_PATTERN || id == SET_LENGTH || id == SET_VELOCITY ||
+  if (id == SET_SWING || id == SET_DIVISION || id == SET_LENGTH || id == SET_VELOCITY ||
       (id == SET_ARP_MODE && arpMenuUi.editing && arpMenuUi.cursor <= 4)) {
     restartArpTiming(true);
   }
@@ -5659,13 +5535,12 @@ uint8_t handleDivNoteOverride(uint8_t sourcePort, uint8_t channel1, uint8_t &not
   for (uint8_t i = 0; i < DIV_NOTE_SLOT_COUNT; ++i) {
     if (featureControls.drumRollKinds[i] == TRIGGER_BINDING_NOTE &&
         settings.divNoteChannels[i] == channel1 && settings.divNoteNotes[i] == note) {
-      const uint8_t previousDivision = currentDivisionSetting();
       recordLoopNote(sourcePort, channel1, note, velocity, on);
       if (loopOwnsInput(sourcePort)) loopDivNoteHeld[i] = on;
       else physicalDivNoteHeld[i] = on;
       divNoteHeld[i] = physicalDivNoteHeld[i] || loopDivNoteHeld[i];
       if (on) divNoteHeldStamp[i] = ++divNotePressCounter;
-      if (currentDivisionSetting() != previousDivision) syncArpDivisionToGrid();
+      syncArpDivisionToGrid();
       markActivity(false);
       if (settings.divNotePlusNote != 0xFF) {
         note = settings.divNotePlusNote;
@@ -6104,12 +5979,11 @@ bool processDrumRollCc(uint8_t sourcePort, uint8_t channel, uint8_t cc,
       loopStorageDirty |= multitrackLooper.capture(time_us_64(), event);
       recordedControl = true;
     }
-    const uint8_t previousDivision = currentDivisionSetting();
     if (loopOwnsInput(sourcePort)) loopDivNoteHeld[slot] = pressed;
     else physicalDivNoteHeld[slot] = pressed;
     divNoteHeld[slot] = physicalDivNoteHeld[slot] || loopDivNoteHeld[slot];
     if (pressed) divNoteHeldStamp[slot] = ++divNotePressCounter;
-    if (currentDivisionSetting() != previousDivision) syncArpDivisionToGrid();
+    syncArpDivisionToGrid();
     matched = true;
   }
   if (matched) {
@@ -6399,11 +6273,11 @@ void handleMmcCommand(uint8_t command) {
   switch (command) {
     case 0x01:  // Stop
       finishMidiTransportRecording();
-      multitrackLooper.stop(releaseMultitrackOutput, nullptr);
+      multitrackLooper.pause(nowUs, releaseMultitrackOutput, nullptr);
       break;
     case 0x02:  // Play
     case 0x03:  // Deferred Play
-      multitrackLooper.start(nowUs);
+      multitrackLooper.resume(nowUs);
       break;
     case 0x04:  // Fast Forward: next working track
       selectAdjacentLooperTrack(1);
@@ -6423,10 +6297,10 @@ void handleMmcCommand(uint8_t command) {
       break;
     case 0x08:  // Record Pause
       finishMidiTransportRecording();
-      multitrackLooper.stop(releaseMultitrackOutput, nullptr);
+      multitrackLooper.pause(nowUs, releaseMultitrackOutput, nullptr);
       break;
     case 0x09:  // Pause
-      multitrackLooper.stop(releaseMultitrackOutput, nullptr);
+      multitrackLooper.pause(nowUs, releaseMultitrackOutput, nullptr);
       break;
     case 0x0D:  // MMC Reset: stop safely and return to track 1
       finishMidiTransportRecording();
@@ -6746,25 +6620,6 @@ void tickArp() {
   }
 }
 
-void triggerRemoteAction(uint8_t action, ButtonPulse &pulse) {
-  const uint8_t ch = settings.remoteChannel;
-  if (!channelEnabled(ch)) return;
-  if (action < 128) {
-    sendFanout(254, 0x90 | ((ch - 1) & 0x0F), action, 127);
-    pulse.active = true;
-    pulse.isCc = false;
-    pulse.number = action;
-    pulse.offAtMs = millis() + BUTTON_PULSE_MS;
-  } else {
-    const uint8_t cc = action - 128 + 1;
-    sendFanout(254, 0xB0 | ((ch - 1) & 0x0F), cc, 127);
-    pulse.active = true;
-    pulse.isCc = true;
-    pulse.number = cc;
-    pulse.offAtMs = millis() + BUTTON_PULSE_MS;
-  }
-}
-
 constexpr uint8_t kButtonPins[4] = {
   PIN_BUTTON_1, PIN_BUTTON_2, PIN_BUTTON_3, PIN_BUTTON_4
 };
@@ -6797,29 +6652,35 @@ void handleCustomButton(uint8_t button, bool pressed) {
 
 void handleLooperButton(uint8_t button) {
   const uint8_t actions = featureControls.looperButtonActions;
-  if (actions & LOOPER_BUTTON_SELECT) multitrackLooper.selectTrack(button);
-  if (actions & LOOPER_BUTTON_MUTE) {
+  static constexpr uint8_t orderedActions[5] = {
+    LOOPER_BUTTON_SELECT, LOOPER_BUTTON_MUTE, LOOPER_BUTTON_SOLO,
+    LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
+  };
+  uint8_t selectedAction = 0;
+  for (uint8_t offset = 0; offset < 5; ++offset) {
+    const uint8_t index = (looperButtonStep[button] + offset) % 5U;
+    if ((actions & orderedActions[index]) == 0) continue;
+    selectedAction = orderedActions[index];
+    looperButtonStep[button] = (index + 1U) % 5U;
+    break;
+  }
+  if (selectedAction == LOOPER_BUTTON_SELECT) {
+    multitrackLooper.selectTrack(button);
+  } else if (selectedAction == LOOPER_BUTTON_MUTE) {
     multitrackLooper.setMuted(button, !multitrackLooper.track(button).muted,
                               releaseMultitrackOutput, nullptr);
-  }
-  if (actions & LOOPER_BUTTON_SOLO) {
+  } else if (selectedAction == LOOPER_BUTTON_SOLO) {
     const bool enable = !multitrackLooper.track(button).solo;
     for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
       multitrackLooper.setSolo(track, enable && track == button,
                                releaseMultitrackOutput, nullptr);
     }
-  }
-  const bool deleteAction = (actions & LOOPER_BUTTON_DELETE) != 0;
-  const bool undoAction = (actions & LOOPER_BUTTON_UNDO) != 0;
-  if (deleteAction && undoAction) {
-    if (multitrackLooper.track(button).hidden) multitrackLooper.undoClear(button);
-    else multitrackLooper.safeClear(button, releaseMultitrackOutput, nullptr);
-  } else if (deleteAction) {
+  } else if (selectedAction == LOOPER_BUTTON_DELETE) {
     multitrackLooper.safeClear(button, releaseMultitrackOutput, nullptr);
-  } else if (undoAction) {
+  } else if (selectedAction == LOOPER_BUTTON_UNDO) {
     multitrackLooper.undoClear(button);
   }
-  loopStorageDirty = true;
+  if (selectedAction != 0) loopStorageDirty = true;
   refreshLoopUiState();
   ui.dirty = true;
 }
@@ -7295,7 +7156,6 @@ String settingValueString(uint8_t id) {
     case SET_DIVISION: return v == ARP_DIVISION_FOLLOW_DRUM ? "DRUM" : kDivisionNames[v];
     case SET_VELOCITY: return String(map(v, 0, 127, 0, 100)) + "%";
     case SET_LENGTH: return String(v) + "%";
-    case SET_PATTERN: return "";
     case SET_INPUT_CH: return midiChannelLabel(v);
     case SET_ARP_OUT_CH: return midiChannelLabel(v, true);
     case SET_BASS_CH: return bassLabel(v);
@@ -7328,7 +7188,6 @@ String settingValueString(uint8_t id) {
       return "MUTE/SOLO";
     case SET_LEGATO_CH: return midiChannelLabel(v, true);
     case SET_CC_OUT_CH: return ccChannelLabel(v);
-    case SET_REMOTE_CH: return midiChannelLabel(v);
     case SET_SENSOR_CH: return midiChannelLabel(v);
     case SET_SENSOR_MODE: return kSensorModeNames[v];
     case SET_PUSH_MODE: return kSensorModeNames[v];
@@ -7339,8 +7198,6 @@ String settingValueString(uint8_t id) {
       return String("CKEY ") + kNoteNames[v - 13];
     case SET_FORCE_SCALE: return "SCALE";
     case SET_GUITAR_PIANO: return (v == 0) ? "GUITAR" : "PIANO";
-    case SET_REMOTE1: return remoteActionLabel(v);
-    case SET_REMOTE2: return remoteActionLabel(v);
     case SET_LOAD_PRESET: return String(v + 1);
     case SET_SAVE_PRESET: return String(v + 1);
     case SET_SCREEN_SAVER:
@@ -7421,56 +7278,6 @@ void drawDivisionPie(uint8_t divisionId) {
   display.setTextSize(2);
   display.setCursor(0, 28);
   display.print(followsDrum ? "DRUM" : kDivisionNames[divisionId]);
-}
-
-void drawArpModeSymbol(uint8_t mode) {
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(kArpSelectionNames[mode]);
-  const int y = 40;
-  if (mode == ARPSEL_UP) {
-    display.drawLine(10, y, 30, y - 20, SSD1306_WHITE);
-    display.drawLine(30, y - 20, 50, y, SSD1306_WHITE);
-    display.drawLine(50, y, 70, y - 20, SSD1306_WHITE);
-  } else if (mode == ARPSEL_DOWN) {
-    display.drawLine(10, y - 20, 30, y, SSD1306_WHITE);
-    display.drawLine(30, y, 50, y - 20, SSD1306_WHITE);
-    display.drawLine(50, y - 20, 70, y, SSD1306_WHITE);
-  } else if (mode == ARPSEL_TRIGGER) {
-    for (uint8_t i = 0; i < 4; ++i) display.drawLine(18 + i * 22, 34, 18 + i * 22, 44, SSD1306_WHITE);
-  } else if (mode == ARPSEL_RANDOM) {
-    display.drawLine(8, 42, 22, 30, SSD1306_WHITE);
-    display.drawLine(22, 30, 42, 44, SSD1306_WHITE);
-    display.drawLine(42, 44, 68, 26, SSD1306_WHITE);
-    display.drawLine(68, 26, 94, 38, SSD1306_WHITE);
-  } else if (mode == ARPSEL_OFF) {
-    display.drawLine(8, 26, 94, 42, SSD1306_WHITE);
-    display.drawLine(8, 42, 94, 26, SSD1306_WHITE);
-  } else {
-    display.drawLine(8, 42, 24, 26, SSD1306_WHITE);
-    display.drawLine(24, 26, 40, 42, SSD1306_WHITE);
-    display.drawLine(40, 42, 56, 26, SSD1306_WHITE);
-    display.drawLine(56, 26, 72, 42, SSD1306_WHITE);
-  }
-}
-
-void drawPatternPreview(uint8_t pat) {
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.print(kPatternNames[pat]);
-  const uint8_t y = 28;
-  for (uint8_t i = 0; i < 12; ++i) {
-    const PatternToken &t = kPatterns[pat][i];
-    const uint8_t x = 8 + i * 10;
-    if (t.noteIndex == TOK_REST) {
-      display.drawLine(x - 3, y, x + 3, y, SSD1306_WHITE);
-    } else if (t.noteIndex == TOK_ALL) {
-      display.drawCircle(x, y, 3, SSD1306_WHITE);
-      display.drawCircle(x, y, 1, SSD1306_WHITE);
-    } else {
-      display.fillCircle(x, y - (t.octaveOffset * 4), 2, SSD1306_WHITE);
-    }
-  }
 }
 
 void buildScaleMask(bool *mask, int16_t keyValue = -1, int16_t scaleValue = -1) {
@@ -7618,26 +7425,6 @@ void drawChannelScreen(const __FlashStringHelper *title, int channel, bool allow
     display.setTextSize(3);
     display.setCursor(0, 18);
     display.print(F("OFF"));
-  } else if (channel == ARP_CH_1_PLUS_10) {
-    display.setTextSize(3);
-    display.setCursor(0, 18);
-    display.print(F("1+10"));
-  } else if (channel == ARP_CH_1_PLUS_10_AFTERTOUCH) {
-    display.setTextSize(3);
-    display.setCursor(0, 18);
-    display.print(F("1+10-A"));
-  } else if (channel == ARP_CH_1_TO_10_SPLIT_24) {
-    display.setTextSize(3);
-    display.setCursor(0, 18);
-    display.print(F("1-10 24"));
-  } else if (channel == ARP_CH_1_TO_10_SPLIT_36) {
-    display.setTextSize(3);
-    display.setCursor(0, 18);
-    display.print(F("1-10 36"));
-  } else if (channel == ARP_CH_1_TO_10_SPLIT_48) {
-    display.setTextSize(3);
-    display.setCursor(0, 18);
-    display.print(F("1-10 48"));
   } else {
     display.setTextSize(3);
     display.setCursor(0, 18);
@@ -7805,20 +7592,6 @@ void drawRouterScreen(uint8_t cursor) {
       display.print(firmware3Settings.routerHighNotes[routerEditChannel]);
     } else display.print(F("TRANSPOSE"));
   }
-}
-
-void drawLoopBarsScreen(uint8_t value) {
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(kLoopBarsNames[value]);
-  display.setTextSize(1);
-  display.setCursor(0, 18);
-  display.print(F("Auto Overdub"));
-  display.setCursor(0, 30);
-  display.print(settings.loopAutoOverdub ? F("On") : F("Off"));
-  display.setCursor(0, 40);
-  display.print(F("(Push)"));
 }
 
 void drawDivNotesScreen(uint8_t cursor) {
@@ -8619,9 +8392,6 @@ void renderMainTop() {
     case SET_CC_OUT_CH:
       drawCcChannelScreen(v);
       break;
-    case SET_REMOTE_CH:
-      drawChannelScreen(F("REMOTE"), v);
-      break;
     case SET_FOUR_BUTTON:
       drawFourButtonScreen();
       break;
@@ -8647,10 +8417,6 @@ void renderMainTop() {
       break;
     case SET_FORCE_SCALE:
       drawScaleMenuScreen();
-      break;
-    case SET_REMOTE1:
-    case SET_REMOTE2:
-      drawRemoteActionScreen(v);
       break;
     case SET_LIVE_CC:
       drawLiveCcScreen();
@@ -8722,14 +8488,6 @@ void renderDisplayIfNeeded() {
   drawModeIndicator();
   display.display();
   ui.lastRenderMs = now;
-}
-
-void showBusyHourglass() {
-  const int y = SETTING_AREA_Y + 23;
-  display.fillRect(116, y, 12, 18, SSD1306_BLACK);
-  display.drawTriangle(118, y + 1, 126, y + 1, 122, y + 8, SSD1306_WHITE);
-  display.drawTriangle(118, y + 16, 126, y + 16, 122, y + 9, SSD1306_WHITE);
-  display.display();
 }
 
 void processDeferredUiActions() {
@@ -8836,7 +8594,6 @@ void setupSensor() {
 void setupDinMidi() {
   DinSerial.setRX(PIN_DIN_MIDI_RX);
   DinSerial.setTX(PIN_DIN_MIDI_TX);
-  DinSerial.begin(31250);
   DinMIDI.begin(MIDI_CHANNEL_OMNI);
   DinMIDI.turnThruOff();
   DinMIDI.setHandleNoteOn(handleDinNoteOn);
@@ -9017,7 +8774,12 @@ void loop() {
 #endif
   pollEncoder();
   pollButtons();
-  DinMIDI.read();
+  // The inter-brain UART is intentionally faster than a physical MIDI cable.
+  // Drain a bounded byte batch so USB/CC bursts cannot sit behind one-byte MIDI
+  // Library parsing, while still returning promptly to musical scheduling.
+  for (uint8_t parsed = 0; parsed < 32 && DinSerial.available() > 0; ++parsed) {
+    DinMIDI.read();
+  }
   pumpUsbDeviceMidiInput();
   for (uint8_t sent = 0; sent < 4 && musicalClock.takeInternalClock(time_us_64()); ++sent) {
     sendFanout(255, 0xF8, 0, 0);
