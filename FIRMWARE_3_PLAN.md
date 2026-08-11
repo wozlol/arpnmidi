@@ -96,7 +96,21 @@ history, which prevents recursive growth.
 ## Arpeggiator and drums
 
 The Arp submenu contains Mode, Division, Arp Velocity, Arp Length, Octave Range,
-Retrigger, Note Order, Custom Length, Learn Custom, Clear Custom, and Back.
+Retrig, Order, Length, Learn Custom, Clear Custom, and Back.
+
+## OLED language conventions
+
+- Prefer short yellow titles that fit the screen, with longer descriptions only
+  on summary screens when the title alone is not clear.
+- Mono Retrig uses yellow title `MONO` and summary description
+  `Retrig last key`.
+- Per-note parameter lock uses yellow title `PLOCK` and summary description
+  `Per-Note Parameter Lock`.
+- Submenu selector pages use `BACK` to leave the submenu. Keep `BACK` where it
+  reads naturally as navigation; do not rename every exit to `CANCEL`.
+- Parameter edit pages that need rollback should use `CANCEL`, restore the value
+  from when the user entered that edit, and keep live editing behavior while the
+  value is being changed.
 
 Custom arp capture:
 

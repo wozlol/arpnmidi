@@ -297,6 +297,7 @@ enum SettingId : uint8_t {
   SET_DRUM_MAGIC,
   SET_DIV_NOTES,
   SET_BASS_CH,
+  SET_LEGATO_CH,
   SET_THRU_OUT_CH,
   SET_RND_RBN,
   SET_ROUTER,
@@ -304,7 +305,6 @@ enum SettingId : uint8_t {
   SET_CC_MAP,
   SET_NOTE_CC,
   SET_CC_OUT_CH,
-  SET_LEGATO_CH,
   SET_SCREEN_SAVER,
   SET_SENSOR_CH,
   SET_SENSOR_MODE,
@@ -1115,8 +1115,8 @@ const int8_t kEncoderTransitionTable[16] = {
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 SWING", "3 ARP", "4 VELOCITY", "5 NOTELENGT", "6 STUTTER", "7 ECHO",
   "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 ARP OUT", "11 DRUMROLL",
-  "12 DRUMDIV", "13 BASS", "14 THRU OUT", "15 RNDRBN", "16 ROUTER", "17 FEATURES",
-  "18 CC MAP", "19 NOTE>CC", "20 IN CC >", "21 MONO RETRIG", "22 SCRNSVR",
+  "12 DRUMDIV", "13 BASS", "14 MONO", "15 THRU OUT", "16 RNDRBN", "17 ROUTER",
+  "18 FEATURES", "19 CC MAP", "20 NOTE>CC", "21 IN CC >", "22 SCRNSVR",
   "23 EYE/PUSH", "24 EYE MODE", "25 PUSH", "26 4BUTTON", "27 LOOPER",
   "28 LOOP MIX", "29 PLOCK", "30 CHORD", "31 KEY", "32 SCALE",
   "33 GIT/KEYS", "34 LIVE CC", "35 GLOBAL", "36 LOAD", "37 SAVE", "38 PANIC"
@@ -7376,8 +7376,8 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
   switch (ui.selectedSetting) {
     case SET_ARP_MODE: {
       static const char *const names[] = {
-        "MODE", "DIVISION", "ARP VEL", "ARP LENGTH", "OCTAVES", "RETRIGGER",
-        "NOTE ORDER", "CUSTOM LEN", "LEARN ARP", "CLEAR ARP", "BACK"
+        "MODE", "DIVISION", "ARP VEL", "ARP LENGTH", "OCTAVES", "RETRIG",
+        "ORDER", "LENGTH", "LEARN ARP", "CLEAR ARP", "BACK"
       };
       index = arpMenuUi.cursor; label = names[index]; return true;
     }
@@ -7435,7 +7435,7 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
       }
       return false;
     case SET_PARAMETER_LOCK: {
-      static const char *const names[] = {"CHANNEL", "CLEAR LOCKS", "BACK"};
+      static const char *const names[] = {"CHANNEL", "CLEAR", "BACK"};
       index = parameterLockUi.cursor; label = names[index]; return true;
     }
     case SET_CHORD: {
@@ -7713,6 +7713,8 @@ bool parameterEditActive() {
     case SET_QUICK_JUMP: return quickJumpUi.editing;
     case SET_DRUM_MAGIC: return drumMagicUi.editing;
     case SET_BASS_CH: return bassUi.editing;
+    case SET_LOOP_BARS:
+      return looperSettingsUi.editing && looperSettingsUi.cursor < 8;
     case SET_ROUTER: return routerEditStage != ROUTER_STAGE_LIST;
     case SET_CC_MAP: return ccRemapUiStage != CC_REMAP_UI_LIST;
     case SET_NOTE_CC:
@@ -8355,7 +8357,7 @@ String customArpLengthName(uint8_t selection) {
 void drawArpMenuScreen() {
   static const char *const names[] = {
     "MODE", "DIVISION", "ARP VEL", "ARP LENGTH", "OCTAVES",
-    "RETRIGGER", "NOTE ORDER", "CUSTOM LEN", "LEARN ARP", "CLEAR ARP", "BACK"
+    "RETRIG", "ORDER", "LENGTH", "LEARN ARP", "CLEAR ARP", "BACK"
   };
   const uint8_t cursor = arpMenuUi.cursor;
   if (ui.menuMode == MENU_SELECT) {
@@ -8488,6 +8490,20 @@ void drawBassMenuScreen() {
   if (bassUi.cursor == 0) value = bassLabel(settings.bassMode);
   else if (bassUi.cursor == 1) value = String(firmware3Settings.bassHighestNote);
   drawSubmenuField(names[bassUi.cursor], value, bassUi.editing);
+}
+
+void drawMonoRetrigScreen(uint8_t channel) {
+  if (ui.menuMode == MENU_SELECT) {
+    display.setTextSize(1);
+    display.setCursor(0, 5);
+    display.print(F("Retrig last key"));
+    display.setTextSize(2);
+    display.setCursor(0, 29);
+    display.print(channel == 0 ? F("OFF") : F("CH "));
+    if (channel != 0) display.print(channel);
+    return;
+  }
+  drawChannelScreen(F("MONO"), channel, true);
 }
 
 void drawScaleMenuScreen() {
@@ -8639,7 +8655,7 @@ void drawLooperSettingsScreen() {
 }
 
 void drawParameterLockScreen() {
-  static const char *const names[] = {"CHANNEL", "CLEAR LOCKS", "BACK"};
+  static const char *const names[] = {"CHANNEL", "CLEAR", "BACK"};
   if (ui.menuMode == MENU_SELECT) {
     display.setTextSize(1);
     display.setCursor(0, 5);
@@ -8822,7 +8838,7 @@ void renderMainTop() {
       drawNoteCcScreen();
       break;
     case SET_LEGATO_CH:
-      drawChannelScreen(F("MONO RETRIG"), v, true);
+      drawMonoRetrigScreen(v);
       break;
     case SET_CC_OUT_CH:
       drawCcChannelScreen(v);

@@ -167,24 +167,24 @@ The current top-level screens are:
 8. Quick Jump
 9. Main Input
 10. Arp Out
-11. Drum Magic
-12. Bass
-13. Thru Out
-14. Round Robin
-15. Router
-16. Drum Roll
-17. Features
-18. CC Map
-19. Note to CC
-20. In CC Out
-21. Mono Retrig
+11. Drumroll
+12. DrumDiv
+13. Bass
+14. Mono
+15. Thru Out
+16. Round Robin
+17. Router
+18. Features
+19. CC Map
+20. Note to CC
+21. In CC Out
 22. Screen Saver
 23. Eye/Push
 24. Eye Mode
 25. Push
 26. 4Button
 27. Looper
-28. Mute/Solo
+28. Loop Mix
 29. Parameter Lock
 30. Chord
 31. Key
