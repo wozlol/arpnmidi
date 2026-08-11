@@ -403,6 +403,9 @@ constexpr uint8_t FOUR_BUTTON_CANCEL_NUMBER = 128;
 constexpr uint8_t FOUR_BUTTON_CANCEL_BEHAVIOR = 3;
 constexpr uint8_t DIRECT_CANCEL_CHANNEL = 17;
 constexpr uint8_t DIRECT_CANCEL_CC_CHANNEL = 18;
+constexpr uint8_t BASS_CANCEL_CHANNEL = 13;
+constexpr uint8_t BASS_CANCEL_OCTAVE = 4;
+constexpr uint8_t BASS_CANCEL_HIGH_NOTE = 128;
 constexpr uint8_t FOUR_BUTTON_CUSTOM_DONE_SLOT = 4;
 constexpr uint8_t FOUR_BUTTON_CUSTOM_BACK_SLOT = 5;
 constexpr uint8_t FOUR_BUTTON_LOOPER_DONE_SLOT = 5;
@@ -1800,6 +1803,13 @@ int8_t bassModeOctaveOffset(uint8_t value) {
     case 2: return 0;
     default: return 1;
   }
+}
+
+uint8_t bassModeFromChannelOctave(uint8_t channel, int8_t octaves) {
+  if (channel == 0) return 0;
+  channel = clampU8(channel, 1, 12);
+  octaves = constrain(octaves, -2, 1);
+  return static_cast<uint8_t>((channel - 1U) * 4U + (octaves + 2) + 1U);
 }
 
 String bassLabel(uint8_t value) {
@@ -3936,8 +3946,10 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (drumMagicUi.cursor == 6) return DRUM_DIVISION_FREE;
       return 120;
     case SET_BASS_CH:
-      if (!bassUi.editing) return 2;
-      return bassUi.cursor == 0 ? 49 : 128;
+      if (!bassUi.editing) return 3;
+      if (bassUi.cursor == 0) return BASS_CANCEL_CHANNEL;
+      if (bassUi.cursor == 1) return BASS_CANCEL_OCTAVE;
+      return BASS_CANCEL_HIGH_NOTE;
     case SET_THRU_OUT_CH: return DIRECT_CANCEL_CHANNEL;
     case SET_RND_RBN: return RND_RBN_BACK_SLOT;
     case SET_ROUTER:
@@ -4077,7 +4089,9 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       return firmware3Settings.drumDivision;
     case SET_BASS_CH:
       if (!bassUi.editing) return bassUi.cursor;
-      return bassUi.cursor == 0 ? settings.bassMode : firmware3Settings.bassHighestNote;
+      if (bassUi.cursor == 0) return bassModeChannel(settings.bassMode);
+      if (bassUi.cursor == 1) return bassModeOctaveOffset(settings.bassMode) + 2;
+      return firmware3Settings.bassHighestNote;
     case SET_THRU_OUT_CH: return settings.thruOutChannel;
     case SET_RND_RBN: return roundRobinMenuCursor;
     case SET_ROUTER:
@@ -4344,9 +4358,17 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       }
       break;
     case SET_BASS_CH:
-      if (!bassUi.editing) bassUi.cursor = clampU8(value, 0, 2);
-      else if (bassUi.cursor == 0) settings.bassMode = clampU8(value, 0, 48);
-      else firmware3Settings.bassHighestNote = clampU8(value, 0, 127);
+      if (!bassUi.editing) bassUi.cursor = clampU8(value, 0, 3);
+      else if (bassUi.cursor == 0) {
+        const uint8_t channel = clampU8(value, 0, 12);
+        const int8_t octaves = settings.bassMode == 0 ? 0 : bassModeOctaveOffset(settings.bassMode);
+        settings.bassMode = bassModeFromChannelOctave(channel, octaves);
+      } else if (bassUi.cursor == 1) {
+        const uint8_t channel = bassModeChannel(settings.bassMode);
+        settings.bassMode = bassModeFromChannelOctave(channel, static_cast<int8_t>(clampU8(value, 0, 3)) - 2);
+      } else {
+        firmware3Settings.bassHighestNote = clampU8(value, 0, 127);
+      }
       break;
     case SET_THRU_OUT_CH: settings.thruOutChannel = clampU8(value, 0, 16); break;
     case SET_RND_RBN: roundRobinMenuCursor = clampU8(value, 0, RND_RBN_BACK_SLOT); break;
@@ -5290,7 +5312,7 @@ bool handleFirmware3SubmenuClick() {
     case SET_ECHO: return finishSubmenuOrEdit(echoUi, 6);
     case SET_QUICK_JUMP: return finishSubmenuOrEdit(quickJumpUi, 4);
     case SET_DRUM_MAGIC: return finishSubmenuOrEdit(drumMagicUi, 7);
-    case SET_BASS_CH: return finishSubmenuOrEdit(bassUi, 2);
+    case SET_BASS_CH: return finishSubmenuOrEdit(bassUi, 3);
     case SET_LOOP_BARS: return finishSubmenuOrEdit(looperSettingsUi, 8);
     case SET_PARAMETER_LOCK:
       if (parameterLockUi.editing) {
@@ -7637,7 +7659,7 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
       index = quickJumpUi.cursor; label = names[index]; return true;
     }
     case SET_BASS_CH: {
-      static const char *const names[] = {"CH/OCTAVE", "HIGH NOTE", "BACK"};
+      static const char *const names[] = {"CH", "OCTAVE", "HIGH NOTE", "BACK"};
       index = bassUi.cursor; label = names[index]; return true;
     }
     case SET_DRUM_MAGIC: {
@@ -7909,7 +7931,7 @@ bool submenuBackSelected() {
     case SET_ECHO: return echoUi.cursor == 6;
     case SET_QUICK_JUMP: return quickJumpUi.cursor == 4;
     case SET_DRUM_MAGIC: return drumMagicUi.cursor == 7;
-    case SET_BASS_CH: return bassUi.cursor == 2;
+    case SET_BASS_CH: return bassUi.cursor == 3;
     case SET_RND_RBN: return roundRobinMenuCursor == RND_RBN_BACK_SLOT;
     case SET_ROUTER:
       return routerEditStage == ROUTER_STAGE_LIST && routerMenuCursor == ROUTER_BACK_SLOT;
@@ -8767,11 +8789,16 @@ void drawBassMenuScreen() {
     display.print(firmware3Settings.bassHighestNote);
     return;
   }
-  static const char *const names[] = {"CH/OCTAVE", "HIGH NOTE", "BACK"};
+  static const char *const names[] = {"CH", "OCTAVE", "HIGH NOTE", "BACK"};
   String value;
   if (bassUi.editing && cancelSelectedFor(SET_BASS_CH)) value = "CANCEL";
-  else if (bassUi.cursor == 0) value = bassLabel(settings.bassMode);
-  else if (bassUi.cursor == 1) value = String(firmware3Settings.bassHighestNote);
+  else if (bassUi.cursor == 0) {
+    const uint8_t channel = bassModeChannel(settings.bassMode);
+    value = channel == 0 ? String(F("OFF")) : String("CH ") + String(channel);
+  } else if (bassUi.cursor == 1) {
+    const int8_t octave = bassModeOctaveOffset(settings.bassMode);
+    value = octave > 0 ? String("+") + String(octave) : String(octave);
+  } else if (bassUi.cursor == 2) value = String(firmware3Settings.bassHighestNote);
   drawSubmenuField(names[bassUi.cursor], value, bassUi.editing);
 }
 
