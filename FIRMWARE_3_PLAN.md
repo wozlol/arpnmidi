@@ -110,7 +110,8 @@ Retrig, Order, Length, Learn Custom, Clear Custom, and Back.
   reads naturally as navigation; do not rename every exit to `CANCEL`.
 - Parameter edit pages that need rollback should use `CANCEL`, restore the value
   from when the user entered that edit, and keep live editing behavior while the
-  value is being changed.
+  value is being changed. `CANCEL` is a selectable item and should only act when
+  pressed; rolling onto it must not cancel automatically.
 
 Custom arp capture:
 

@@ -403,6 +403,12 @@ constexpr uint8_t FOUR_BUTTON_CANCEL_NUMBER = 128;
 constexpr uint8_t FOUR_BUTTON_CANCEL_BEHAVIOR = 3;
 constexpr uint8_t DIRECT_CANCEL_CHANNEL = 17;
 constexpr uint8_t DIRECT_CANCEL_CC_CHANNEL = 18;
+constexpr uint8_t FOUR_BUTTON_CUSTOM_DONE_SLOT = 4;
+constexpr uint8_t FOUR_BUTTON_CUSTOM_BACK_SLOT = 5;
+constexpr uint8_t FOUR_BUTTON_LOOPER_DONE_SLOT = 5;
+constexpr uint8_t FOUR_BUTTON_LOOPER_BACK_SLOT = 6;
+constexpr uint8_t FOUR_BUTTON_CHORD_DONE_SLOT = 2;
+constexpr uint8_t FOUR_BUTTON_CHORD_BACK_SLOT = 3;
 
 enum FeatureKnobId : uint8_t {
   FEATURE_KNOB_VELOCITY_BASE = 0,
@@ -1053,6 +1059,9 @@ bool submenuEditBackupValid = false;
 uint8_t submenuEditBackupSetting = 0;
 uint8_t submenuEditBackupCursor = 0;
 int16_t submenuEditBackupValue = 0;
+bool editCancelSelected = false;
+uint8_t editCancelSetting = 0;
+uint8_t editCancelCursor = 0;
 uint8_t liveVelocityTarget = 0;
 uint8_t liveNoteLengthTarget = 0;
 uint8_t stutterTarget = 0;
@@ -3962,13 +3971,13 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_FOUR_BUTTON:
       if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) return 4;
       if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) return FOUR_BUTTON_MODE_COUNT - 1;
-      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) return 4;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) return FOUR_BUTTON_CUSTOM_BACK_SLOT;
       if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) return FOUR_BUTTON_CANCEL_CHANNEL;
       if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) return FOUR_BUTTON_CANCEL_KIND;
       if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) return FOUR_BUTTON_CANCEL_NUMBER;
       if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_BEHAVIOR) return FOUR_BUTTON_CANCEL_BEHAVIOR;
-      if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) return 5;
-      return 2;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) return FOUR_BUTTON_LOOPER_BACK_SLOT;
+      return FOUR_BUTTON_CHORD_BACK_SLOT;
     case SET_LOOP_BARS:
       if (!looperSettingsUi.editing) return 8;
       if (looperSettingsUi.cursor == 0) return arpnmidi3::kLoopTrackCount - 1;
@@ -3979,7 +3988,7 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_MUTE_SOLO: return 7;
     case SET_PARAMETER_LOCK:
       if (!parameterLockUi.editing) return 2;
-      return 16;
+      return 17;
     case SET_CHORD:
       if (!chordUi.editing) return 5;
       if (chordUi.cursor == 0) return 1;
@@ -3987,7 +3996,7 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_FORCE_KEY: return 24;
     case SET_FORCE_SCALE:
       if (!scaleUi.editing) return 13;
-      return FORCE_SCALE_COUNT - 1;
+      return FORCE_SCALE_COUNT;
     case SET_GUITAR_PIANO: return 1;
     case SET_LIVE_CC:
       if (!liveCcEditing) return 2;
@@ -4005,6 +4014,7 @@ int16_t settingRangeMax(uint8_t settingId) {
 }
 
 int16_t getSettingValueRaw(uint8_t settingId) {
+  if (cancelSelectedFor(settingId)) return settingRangeMax(settingId);
   switch (settingId) {
     case SET_BPM: return settings.manualBpm;
     case SET_SWING: return firmware3Settings.swing;
@@ -4095,18 +4105,23 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       if (noteCcUiStage == NOTE_CC_UI_SLOT_ACTION) return noteCcSlotActionCursor;
       if (noteCcCursor >= NOTE_CC_SLOT_COUNT) return 0;
       if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
+        if (cancelSelectedFor(settingId)) return NOTE_CC_CANCEL_CHANNEL;
         return max<uint8_t>(1, featureControls.noteCcMaps[noteCcCursor].inputChannel);
       }
       if (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE) {
+        if (cancelSelectedFor(settingId)) return NOTE_CC_CANCEL_VALUE;
         return featureControls.noteCcMaps[noteCcCursor].inputNote <= 127
             ? featureControls.noteCcMaps[noteCcCursor].inputNote : 0;
       }
       if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) {
+        if (cancelSelectedFor(settingId)) return NOTE_CC_CANCEL_CHANNEL;
         return featureControls.noteCcMaps[noteCcCursor].outputChannel;
       }
       if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) {
+        if (cancelSelectedFor(settingId)) return NOTE_CC_CANCEL_VALUE;
         return featureControls.noteCcMaps[noteCcCursor].outputCc;
       }
+      if (cancelSelectedFor(settingId)) return NOTE_CC_CANCEL_BEHAVIOR;
       return featureControls.noteCcMaps[noteCcCursor].behavior;
     case SET_LEGATO_CH: return settings.legatoChannel;
     case SET_CC_OUT_CH: return settings.ccOutChannel;
@@ -4120,14 +4135,18 @@ int16_t getSettingValueRaw(uint8_t settingId) {
           fourButtonUiStage == FOUR_BUTTON_UI_CHORD) return fourButtonUiCursor;
       if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) return featureControls.fourButtonMode;
       if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
+        if (cancelSelectedFor(settingId)) return FOUR_BUTTON_CANCEL_CHANNEL;
         return featureControls.customButtons[fourButtonEditButton].channel;
       }
       if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) {
+        if (cancelSelectedFor(settingId)) return FOUR_BUTTON_CANCEL_KIND;
         return featureControls.customButtons[fourButtonEditButton].kind == TRIGGER_BINDING_NOTE ? 1 : 0;
       }
       if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
+        if (cancelSelectedFor(settingId)) return FOUR_BUTTON_CANCEL_NUMBER;
         return featureControls.customButtons[fourButtonEditButton].number;
       }
+      if (cancelSelectedFor(settingId)) return FOUR_BUTTON_CANCEL_BEHAVIOR;
       return featureControls.customButtons[fourButtonEditButton].behavior;
     case SET_LOOP_BARS:
       if (!looperSettingsUi.editing) return looperSettingsUi.cursor;
@@ -4187,6 +4206,7 @@ void cancelNoteCcEdit() {
   noteCcLearnActive = false;
   noteCcUiStage = NOTE_CC_UI_LIST;
   noteCcSlotActionCursor = 0;
+  clearEditCancelSelection();
   ui.dirty = true;
 }
 
@@ -4197,24 +4217,38 @@ void cancelFourButtonCustomEdit() {
   fourButtonLearnActive = false;
   fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_LIST;
   fourButtonUiCursor = fourButtonEditButton;
+  clearEditCancelSelection();
   ui.dirty = true;
 }
 
+uint8_t cancelContextCursor(uint8_t settingId) {
+  if (settingId == SET_ARP_MODE) return arpMenuUi.cursor;
+  if (settingId == SET_QUICK_JUMP) return quickJumpUi.cursor;
+  if (settingId == SET_STUTTER) return stutterUi.cursor;
+  if (settingId == SET_ECHO) return echoUi.cursor;
+  if (settingId == SET_BASS_CH) return bassUi.cursor;
+  if (settingId == SET_FOUR_BUTTON) return fourButtonUiStage;
+  if (settingId == SET_PARAMETER_LOCK) return parameterLockUi.cursor;
+  if (settingId == SET_FORCE_SCALE) return scaleUi.cursor;
+  return 0;
+}
+
+bool cancelSelectedFor(uint8_t settingId) {
+  return editCancelSelected && editCancelSetting == settingId &&
+         editCancelCursor == cancelContextCursor(settingId);
+}
+
+void selectCancelFor(uint8_t settingId) {
+  editCancelSelected = true;
+  editCancelSetting = settingId;
+  editCancelCursor = cancelContextCursor(settingId);
+}
+
+void clearEditCancelSelection() {
+  editCancelSelected = false;
+}
+
 void setSettingValueRaw(uint8_t settingId, int16_t value) {
-  if (submenuCancelEnabled(settingId) && ui.menuMode == MENU_EDIT) {
-    SubmenuUiState *state = submenuStateForSetting(settingId);
-    if (state && state->editing && value == settingRangeMax(settingId)) {
-      cancelSubmenuParameterEdit(*state);
-      return;
-    }
-  }
-  if (directCancelEnabled(settingId) && ui.menuMode == MENU_EDIT &&
-      value == settingRangeMax(settingId)) {
-    ui.hasPendingEdit = false;
-    ui.menuMode = MENU_SELECT;
-    ui.dirty = true;
-    return;
-  }
   switch (settingId) {
     case SET_BPM:
       settings.manualBpm = constrain(value, 20, 300);
@@ -4363,23 +4397,6 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       } else if (noteCcUiStage == NOTE_CC_UI_SLOT_ACTION) {
         noteCcSlotActionCursor = clampU8(value, 0, 2);
       } else if (noteCcCursor < NOTE_CC_SLOT_COUNT) {
-        if ((noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL ||
-             noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) &&
-            value == NOTE_CC_CANCEL_CHANNEL) {
-          cancelNoteCcEdit();
-          break;
-        }
-        if ((noteCcUiStage == NOTE_CC_UI_INPUT_NOTE ||
-             noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) &&
-            value == NOTE_CC_CANCEL_VALUE) {
-          cancelNoteCcEdit();
-          break;
-        }
-        if (noteCcUiStage == NOTE_CC_UI_BEHAVIOR &&
-            value == NOTE_CC_CANCEL_BEHAVIOR) {
-          cancelNoteCcEdit();
-          break;
-        }
         NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
         if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
           entry.inputChannel = clampU8(value, 1, 16);
@@ -4445,29 +4462,13 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) {
         featureControls.fourButtonMode = clampU8(value, 0, FOUR_BUTTON_MODE_COUNT - 1);
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
-        if (value == FOUR_BUTTON_CANCEL_CHANNEL) {
-          cancelFourButtonCustomEdit();
-          break;
-        }
         featureControls.customButtons[fourButtonEditButton].channel = clampU8(value, 1, 16);
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) {
-        if (value == FOUR_BUTTON_CANCEL_KIND) {
-          cancelFourButtonCustomEdit();
-          break;
-        }
         featureControls.customButtons[fourButtonEditButton].kind = value
             ? TRIGGER_BINDING_NOTE : TRIGGER_BINDING_CC;
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
-        if (value == FOUR_BUTTON_CANCEL_NUMBER) {
-          cancelFourButtonCustomEdit();
-          break;
-        }
         featureControls.customButtons[fourButtonEditButton].number = clampU8(value, 0, 127);
       } else {
-        if (value == FOUR_BUTTON_CANCEL_BEHAVIOR) {
-          cancelFourButtonCustomEdit();
-          break;
-        }
         featureControls.customButtons[fourButtonEditButton].behavior =
             clampU8(value, 0, CUSTOM_BUTTON_BEHAVIOR_COUNT - 1);
       }
@@ -4694,8 +4695,8 @@ Firmware3Settings defaultFirmware3Settings() {
 
 FeatureControlSettings defaultFeatureControlSettings() {
   FeatureControlSettings controls{};
-  controls.fourButtonMode = FOUR_BUTTON_CUSTOM;
-  controls.looperButtonActions = LOOPER_BUTTON_SELECT;
+  controls.fourButtonMode = FOUR_BUTTON_LOOPER;
+  controls.looperButtonActions = LOOPER_BUTTON_SELECT | LOOPER_BUTTON_DELETE;
   for (uint8_t button = 0; button < 4; ++button) {
     controls.customButtons[button].channel = 1;
     controls.customButtons[button].number = 60 + button;
@@ -5058,7 +5059,9 @@ void applySettingDelta(int delta, bool fastStep) {
   }
   const int fast = fastStep ? 10 : 1;
   const int step = delta * fast;
-  const int oldValue = (ui.hasPendingEdit && ui.pendingSetting == id) ? ui.pendingValue : getSettingValueRaw(id);
+  const int oldValue = cancelSelectedFor(id)
+      ? settingRangeMax(id)
+      : ((ui.hasPendingEdit && ui.pendingSetting == id) ? ui.pendingValue : getSettingValueRaw(id));
   int next = oldValue + step;
   const int maxValue = settingRangeMax(id);
 
@@ -5126,13 +5129,27 @@ void applySettingDelta(int delta, bool fastStep) {
   else next = wrapIndex(next, maxValue + 1);
 
   if (next == oldValue) return;
-  if (ui.menuMode == MENU_EDIT && directCancelEnabled(id) && next == maxValue) {
-    ui.hasPendingEdit = false;
-    ui.menuMode = MENU_SELECT;
+  const bool cancelSelectable =
+      (submenuCancelEnabled(id) && ui.menuMode == MENU_EDIT &&
+       submenuStateForSetting(id) && submenuStateForSetting(id)->editing) ||
+      (directCancelEnabled(id) && ui.menuMode == MENU_EDIT) ||
+      (id == SET_FOUR_BUTTON && ui.menuMode == MENU_EDIT &&
+       fourButtonUiStage >= FOUR_BUTTON_UI_CUSTOM_CHANNEL &&
+       fourButtonUiStage <= FOUR_BUTTON_UI_CUSTOM_BEHAVIOR) ||
+      (id == SET_NOTE_CC && ui.menuMode == MENU_EDIT &&
+       noteCcUiStage >= NOTE_CC_UI_INPUT_CHANNEL &&
+       noteCcUiStage <= NOTE_CC_UI_BEHAVIOR) ||
+      (id == SET_PARAMETER_LOCK && ui.menuMode == MENU_EDIT &&
+       parameterLockUi.editing && parameterLockUi.cursor == 0) ||
+      (id == SET_FORCE_SCALE && ui.menuMode == MENU_EDIT &&
+       scaleUi.editing && scaleUi.cursor == 0);
+  if (cancelSelectable && next == maxValue) {
+    selectCancelFor(id);
     ui.dirty = true;
     markActivity();
     return;
   }
+  clearEditCancelSelection();
   if (settingNeedsPanic(id) && ui.menuMode == MENU_EDIT) {
     ui.hasPendingEdit = true;
     ui.pendingSetting = id;
@@ -5192,6 +5209,7 @@ void beginSubmenuParameterEdit(SubmenuUiState &state) {
 
 void finishSubmenuParameterEdit() {
   submenuEditBackupValid = false;
+  clearEditCancelSelection();
 }
 
 void cancelSubmenuParameterEdit(SubmenuUiState &state) {
@@ -5200,9 +5218,11 @@ void cancelSubmenuParameterEdit(SubmenuUiState &state) {
       submenuEditBackupCursor == state.cursor) {
     const int16_t restoreValue = submenuEditBackupValue;
     submenuEditBackupValid = false;
+    clearEditCancelSelection();
     setSettingValueRaw(ui.selectedSetting, restoreValue);
   }
   state.editing = false;
+  clearEditCancelSelection();
   ui.dirty = true;
 }
 
@@ -5217,8 +5237,13 @@ SubmenuUiState *submenuStateForSetting(uint8_t settingId) {
 
 bool finishSubmenuOrEdit(SubmenuUiState &state, uint8_t backCursor) {
   if (state.editing) {
+    if (cancelSelectedFor(ui.selectedSetting)) {
+      cancelSubmenuParameterEdit(state);
+      return true;
+    }
     state.editing = false;
     finishSubmenuParameterEdit();
+    clearEditCancelSelection();
     return true;
   }
   if (state.cursor != backCursor) {
@@ -5230,12 +5255,24 @@ bool finishSubmenuOrEdit(SubmenuUiState &state, uint8_t backCursor) {
   return true;
 }
 
+void cancelDirectEdit() {
+  ui.hasPendingEdit = false;
+  ui.menuMode = MENU_SELECT;
+  clearEditCancelSelection();
+  ui.dirty = true;
+}
+
 bool handleFirmware3SubmenuClick() {
   switch (ui.selectedSetting) {
     case SET_ARP_MODE:
       if (arpMenuUi.editing) {
+        if (cancelSelectedFor(SET_ARP_MODE)) {
+          cancelSubmenuParameterEdit(arpMenuUi);
+          return true;
+        }
         arpMenuUi.editing = false;
         finishSubmenuParameterEdit();
+        clearEditCancelSelection();
       }
       else if (arpMenuUi.cursor == 8) {
         if (customArpLearning) finishCustomArpLearn();
@@ -5256,8 +5293,15 @@ bool handleFirmware3SubmenuClick() {
     case SET_BASS_CH: return finishSubmenuOrEdit(bassUi, 2);
     case SET_LOOP_BARS: return finishSubmenuOrEdit(looperSettingsUi, 8);
     case SET_PARAMETER_LOCK:
-      if (parameterLockUi.editing) parameterLockUi.editing = false;
-      else if (parameterLockUi.cursor == 0) parameterLockUi.editing = true;
+      if (parameterLockUi.editing) {
+        if (cancelSelectedFor(SET_PARAMETER_LOCK)) {
+          firmware3Settings.parameterLockChannel =
+              clampU8(submenuEditBackupValue, 0, 16);
+        }
+        parameterLockUi.editing = false;
+        finishSubmenuParameterEdit();
+      }
+      else if (parameterLockUi.cursor == 0) beginSubmenuParameterEdit(parameterLockUi);
       else if (parameterLockUi.cursor == 1) {
         parameterLockCount = 0;
         for (ParameterLockEntry &entry : parameterLocks) entry = ParameterLockEntry{};
@@ -5269,9 +5313,13 @@ bool handleFirmware3SubmenuClick() {
     case SET_CHORD: return finishSubmenuOrEdit(chordUi, 5);
     case SET_FORCE_SCALE:
       if (scaleUi.editing) {
+        if (cancelSelectedFor(SET_FORCE_SCALE)) {
+          settings.forceScale = clampU8(submenuEditBackupValue, 0, FORCE_SCALE_COUNT - 1);
+        }
         scaleUi.editing = false;
+        finishSubmenuParameterEdit();
       } else if (scaleUi.cursor == 0) {
-        scaleUi.editing = true;
+        beginSubmenuParameterEdit(scaleUi);
       } else if (scaleUi.cursor <= 12) {
         const uint16_t bit = static_cast<uint16_t>(1U << (scaleUi.cursor - 1U));
         if ((firmware3Settings.userScaleMask & bit) == 0 ||
@@ -5330,6 +5378,13 @@ void activateClickAction() {
     return;
   }
   if (ui.menuMode == MENU_EDIT) {
+    if (directCancelEnabled(ui.selectedSetting) && cancelSelectedFor(ui.selectedSetting)) {
+      cancelDirectEdit();
+      encoder.switchIgnoreUntilMs = millis() + 120;
+      ui.dirty = true;
+      markActivity();
+      return;
+    }
     if (handleFirmware3SubmenuClick()) {
       encoder.switchIgnoreUntilMs = millis() + 120;
       ui.dirty = true;
@@ -5428,22 +5483,37 @@ void activateClickAction() {
           cancelNoteCcEdit();
         }
       } else if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
-        noteCcUiStage = NOTE_CC_UI_INPUT_NOTE;
-        noteCcLearnActive = true;
+        if (cancelSelectedFor(SET_NOTE_CC)) cancelNoteCcEdit();
+        else {
+          noteCcUiStage = NOTE_CC_UI_INPUT_NOTE;
+          noteCcLearnActive = true;
+        }
       } else if (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE) {
-        noteCcLearnActive = false;
-        noteCcUiStage = NOTE_CC_UI_OUTPUT_CHANNEL;
-        noteCcLearnActive = true;
+        if (cancelSelectedFor(SET_NOTE_CC)) cancelNoteCcEdit();
+        else {
+          noteCcLearnActive = false;
+          noteCcUiStage = NOTE_CC_UI_OUTPUT_CHANNEL;
+          noteCcLearnActive = true;
+        }
       } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) {
-        noteCcUiStage = NOTE_CC_UI_OUTPUT_CC;
-        noteCcLearnActive = true;
+        if (cancelSelectedFor(SET_NOTE_CC)) cancelNoteCcEdit();
+        else {
+          noteCcUiStage = NOTE_CC_UI_OUTPUT_CC;
+          noteCcLearnActive = true;
+        }
       } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) {
-        noteCcLearnActive = false;
-        noteCcUiStage = NOTE_CC_UI_BEHAVIOR;
+        if (cancelSelectedFor(SET_NOTE_CC)) cancelNoteCcEdit();
+        else {
+          noteCcLearnActive = false;
+          noteCcUiStage = NOTE_CC_UI_BEHAVIOR;
+        }
       } else {
-        noteCcUiStage = NOTE_CC_UI_LIST;
-        noteCcSlotActionCursor = 0;
-        saveStorageIfAuto();
+        if (cancelSelectedFor(SET_NOTE_CC)) cancelNoteCcEdit();
+        else {
+          noteCcUiStage = NOTE_CC_UI_LIST;
+          noteCcSlotActionCursor = 0;
+          saveStorageIfAuto();
+        }
       }
       encoder.switchIgnoreUntilMs = millis() + 120;
       ui.dirty = true;
@@ -5473,21 +5543,35 @@ void activateClickAction() {
           fourButtonEditButton = fourButtonUiCursor;
           fourButtonEditBackup = featureControls.customButtons[fourButtonEditButton];
           fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_CHANNEL;
+        } else if (fourButtonUiCursor == FOUR_BUTTON_CUSTOM_DONE_SLOT) {
+          featureControls.fourButtonMode = FOUR_BUTTON_CUSTOM;
+          fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+          fourButtonUiCursor = 0;
         } else {
           fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
           fourButtonUiCursor = 0;
         }
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
-        fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_KIND;
+        if (cancelSelectedFor(SET_FOUR_BUTTON)) cancelFourButtonCustomEdit();
+        else fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_KIND;
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) {
-        fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_NUMBER;
-        fourButtonLearnActive = true;
+        if (cancelSelectedFor(SET_FOUR_BUTTON)) cancelFourButtonCustomEdit();
+        else {
+          fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_NUMBER;
+          fourButtonLearnActive = true;
+        }
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
-        fourButtonLearnActive = false;
-        fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_BEHAVIOR;
+        if (cancelSelectedFor(SET_FOUR_BUTTON)) cancelFourButtonCustomEdit();
+        else {
+          fourButtonLearnActive = false;
+          fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_BEHAVIOR;
+        }
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_BEHAVIOR) {
-        fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_LIST;
-        fourButtonUiCursor = fourButtonEditButton;
+        if (cancelSelectedFor(SET_FOUR_BUTTON)) cancelFourButtonCustomEdit();
+        else {
+          fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_LIST;
+          fourButtonUiCursor = fourButtonEditButton;
+        }
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) {
         if (fourButtonUiCursor < 5) {
           static constexpr uint8_t masks[5] = {
@@ -5495,19 +5579,27 @@ void activateClickAction() {
             LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
           };
           featureControls.looperButtonActions ^= masks[fourButtonUiCursor];
+        } else if (fourButtonUiCursor == FOUR_BUTTON_LOOPER_DONE_SLOT) {
+          featureControls.fourButtonMode = FOUR_BUTTON_LOOPER;
+          fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+          fourButtonUiCursor = 0;
         } else {
           fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
           fourButtonUiCursor = 0;
         }
       } else {
         if (fourButtonUiCursor == 0) {
-          featureControls.fourButtonMode = FOUR_BUTTON_CHORD_MEMORY;
           chordLearnArmed = true;
           chordClearArmed = false;
         } else if (fourButtonUiCursor == 1) {
-          featureControls.fourButtonMode = FOUR_BUTTON_CHORD_MEMORY;
           chordClearArmed = true;
           chordLearnArmed = false;
+        } else if (fourButtonUiCursor == FOUR_BUTTON_CHORD_DONE_SLOT) {
+          featureControls.fourButtonMode = FOUR_BUTTON_CHORD_MEMORY;
+          chordLearnArmed = false;
+          chordClearArmed = false;
+          fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+          fourButtonUiCursor = 0;
         } else {
           chordLearnArmed = false;
           chordClearArmed = false;
@@ -7453,6 +7545,7 @@ void pollPush() {
 }
 
 String settingValueString(uint8_t id) {
+  if (cancelSelectedFor(id)) return "CANCEL";
   const int16_t v = effectiveSettingValue(id);
   switch (id) {
     case SET_BPM: {
@@ -7835,9 +7928,14 @@ bool submenuBackSelected() {
       return noteCcUiStage == NOTE_CC_UI_LIST && noteCcCursor > NOTE_CC_SLOT_COUNT;
     case SET_FOUR_BUTTON:
       if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) return fourButtonUiCursor == 4;
-      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) return fourButtonUiCursor >= 4;
-      if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) return fourButtonUiCursor == 5;
-      return fourButtonUiStage == FOUR_BUTTON_UI_CHORD && fourButtonUiCursor == 2;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) {
+        return fourButtonUiCursor == FOUR_BUTTON_CUSTOM_BACK_SLOT;
+      }
+      if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) {
+        return fourButtonUiCursor == FOUR_BUTTON_LOOPER_BACK_SLOT;
+      }
+      return fourButtonUiStage == FOUR_BUTTON_UI_CHORD &&
+             fourButtonUiCursor == FOUR_BUTTON_CHORD_BACK_SLOT;
     case SET_LOOP_BARS: return looperSettingsUi.cursor == 8;
     case SET_PARAMETER_LOCK: return parameterLockUi.cursor == 2;
     case SET_MUTE_SOLO: return muteSoloCursor == 7;
@@ -7937,6 +8035,12 @@ void drawLoopStatusIcon() {
 }
 
 void drawChannelScreen(const __FlashStringHelper *, int channel, bool allowOff = false) {
+  if (channel == DIRECT_CANCEL_CHANNEL) {
+    display.setTextSize(2);
+    display.setCursor(0, 15);
+    display.print(F("CANCEL"));
+    return;
+  }
   if (allowOff && channel == 0) {
     display.setTextSize(3);
     display.setCursor(0, 11);
@@ -7973,6 +8077,12 @@ void drawBassScreen(uint8_t mode) {
 }
 
 void drawCcChannelScreen(uint8_t channel) {
+  if (channel == DIRECT_CANCEL_CC_CHANNEL) {
+    display.setTextSize(2);
+    display.setCursor(0, 15);
+    display.print(F("CANCEL"));
+    return;
+  }
   if (channel == 17) {
     display.setTextSize(3);
     display.setCursor(0, 11);
@@ -8348,6 +8458,10 @@ void drawNoteCcScreen() {
   }
   const NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
   display.setTextSize(2); display.setCursor(0, 11);
+  if (cancelSelectedFor(SET_NOTE_CC)) {
+    display.print(F("CANCEL"));
+    return;
+  }
   if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
     display.print(F("CH ")); display.print(max<uint8_t>(1, entry.inputChannel));
     if (noteCcLearnActive) {
@@ -8397,7 +8511,9 @@ void drawFourButtonScreen() {
     return;
   }
   if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) {
-    if (fourButtonUiCursor >= 4) {
+    if (fourButtonUiCursor == FOUR_BUTTON_CUSTOM_DONE_SLOT) {
+      display.setTextSize(3); display.print(F("DONE"));
+    } else if (fourButtonUiCursor == FOUR_BUTTON_CUSTOM_BACK_SLOT) {
       display.setTextSize(3); display.print(F("BACK"));
     } else {
       display.setTextSize(2); display.print(F("BUTTON ")); display.print(fourButtonUiCursor + 1U);
@@ -8426,20 +8542,21 @@ void drawFourButtonScreen() {
     return;
   }
   if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) {
-    static const char *const names[] = {"SELECT TRK", "MUTE", "SOLO", "DELETE", "UNDO", "BACK"};
+    static const char *const names[] = {"SELECT TRK", "MUTE", "SOLO", "DELETE", "UNDO", "DONE", "BACK"};
     static constexpr uint8_t masks[] = {
       LOOPER_BUTTON_SELECT, LOOPER_BUTTON_MUTE, LOOPER_BUTTON_SOLO,
       LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
     };
-    display.setTextSize(2); display.print(names[fourButtonUiCursor]);
+    display.setTextSize(2);
+    display.print(names[fourButtonUiCursor]);
     if (fourButtonUiCursor < 5) {
-      display.setTextSize(1); display.setCursor(0, 39);
+      display.setCursor(0, 31);
       display.print((featureControls.looperButtonActions & masks[fourButtonUiCursor])
           ? F("ON") : F("OFF"));
     }
     return;
   }
-  static const char *const chordItems[] = {"LEARN", "CLEAR", "BACK"};
+  static const char *const chordItems[] = {"LEARN", "CLEAR", "DONE", "BACK"};
   display.setTextSize(2); display.print(chordItems[fourButtonUiCursor]);
   if ((chordLearnArmed && fourButtonUiCursor == 0) ||
       (chordClearArmed && fourButtonUiCursor == 1)) {
@@ -8521,6 +8638,10 @@ void drawArpMenuScreen() {
             ? String("DRUM") : String(kDivisionNames[settings.division])), false);
     return;
   }
+  if (arpMenuUi.editing && cancelSelectedFor(SET_ARP_MODE)) {
+    drawSubmenuField(names[cursor], "CANCEL", true);
+    return;
+  }
   if (cursor == 2) {
     drawNamedBarValue("", map(settings.arpVelocity, 0, 127, 0, 100), 100,
                       String(settings.arpVelocity));
@@ -8587,7 +8708,8 @@ void drawStutterScreen() {
     return;
   }
   String value;
-  if (stutterUi.cursor == 0) value = liveTargetName(stutterTarget);
+  if (stutterUi.editing && cancelSelectedFor(SET_STUTTER)) value = "CANCEL";
+  else if (stutterUi.cursor == 0) value = liveTargetName(stutterTarget);
   else if (stutterUi.cursor == 1) value = onOff(target.stutterEnabled);
   else if (stutterUi.cursor == 2) value = lengthSelectionName(target.stutterLengthSelection);
   else if (stutterUi.cursor == 3) value = String(firmware3Settings.stutterTimeoutBars) + " BARS";
@@ -8600,6 +8722,10 @@ void drawEchoScreen() {
   if (ui.menuMode == MENU_SELECT) {
     drawSubmenuField("", liveTargetName(echoTarget) + " " +
         (echo.echoEnabled ? String("WET ") + String(echo.echoWet) + "%" : String("OFF")), false);
+    return;
+  }
+  if (echoUi.editing && cancelSelectedFor(SET_ECHO)) {
+    drawSubmenuField(names[echoUi.cursor], "CANCEL", true);
     return;
   }
   if (echoUi.cursor == 2) {
@@ -8624,7 +8750,8 @@ void drawQuickJumpScreen() {
     return;
   }
   String value;
-  if (quickJumpUi.cursor == 0) value = String("CH ") + String(firmware3Settings.quickJumpInputChannel);
+  if (quickJumpUi.editing && cancelSelectedFor(SET_QUICK_JUMP)) value = "CANCEL";
+  else if (quickJumpUi.cursor == 0) value = String("CH ") + String(firmware3Settings.quickJumpInputChannel);
   else if (quickJumpUi.cursor == 1) value = String("CH ") + String(firmware3Settings.quickJumpOutputChannel);
   else if (quickJumpUi.cursor == 2) value = onOff(firmware3Settings.quickJumpEnabled);
   else if (quickJumpUi.cursor == 3) value = onOff(firmware3Settings.quickJumpHold);
@@ -8642,7 +8769,8 @@ void drawBassMenuScreen() {
   }
   static const char *const names[] = {"CH/OCTAVE", "HIGH NOTE", "BACK"};
   String value;
-  if (bassUi.cursor == 0) value = bassLabel(settings.bassMode);
+  if (bassUi.editing && cancelSelectedFor(SET_BASS_CH)) value = "CANCEL";
+  else if (bassUi.cursor == 0) value = bassLabel(settings.bassMode);
   else if (bassUi.cursor == 1) value = String(firmware3Settings.bassHighestNote);
   drawSubmenuField(names[bassUi.cursor], value, bassUi.editing);
 }
@@ -8668,7 +8796,11 @@ void drawScaleMenuScreen() {
     return;
   }
   if (scaleUi.cursor == 0) {
-    drawSubmenuField("SCALE TYPE", String(kForceScaleNames[settings.forceScale]), scaleUi.editing);
+    drawSubmenuField("SCALE TYPE",
+                     cancelSelectedFor(SET_FORCE_SCALE)
+                         ? String("CANCEL")
+                         : String(kForceScaleNames[settings.forceScale]),
+                     scaleUi.editing);
     return;
   }
   if (scaleUi.cursor == 13) {
@@ -8830,6 +8962,7 @@ void drawParameterLockScreen() {
   if (parameterLockUi.cursor == 0) value = firmware3Settings.parameterLockChannel == 0
       ? "OFF" : String("CH ") + String(firmware3Settings.parameterLockChannel);
   else if (parameterLockUi.cursor == 1) value = String(parameterLockCount) + " STORED";
+  if (parameterLockUi.cursor == 0 && cancelSelectedFor(SET_PARAMETER_LOCK)) value = "CANCEL";
   drawSubmenuField(names[parameterLockUi.cursor], value, parameterLockUi.editing);
 }
 
@@ -9171,15 +9304,15 @@ void processDeferredUiActions() {
       if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN && fourButtonUiCursor == 4) {
         fourButtonUiCursor = 0;
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST &&
-                 fourButtonUiCursor >= 4) {
+                 fourButtonUiCursor >= FOUR_BUTTON_CUSTOM_DONE_SLOT) {
         fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
         fourButtonUiCursor = 0;
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER &&
-                 fourButtonUiCursor == 5) {
+                 fourButtonUiCursor >= FOUR_BUTTON_LOOPER_DONE_SLOT) {
         fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
         fourButtonUiCursor = 0;
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CHORD &&
-                 fourButtonUiCursor == 2) {
+                 fourButtonUiCursor >= FOUR_BUTTON_CHORD_DONE_SLOT) {
         fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
         fourButtonUiCursor = 0;
       }
