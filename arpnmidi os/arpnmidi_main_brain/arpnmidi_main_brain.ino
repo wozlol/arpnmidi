@@ -4419,7 +4419,7 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       else firmware3Settings.looperMidiTransport = value ? 1 : 0;
       break;
     case SET_MUTE_SOLO:
-      muteSoloCursor = clampU8(value, 0, 6);
+      muteSoloCursor = clampU8(value, 0, 7);
       break;
     case SET_PARAMETER_LOCK:
       if (!parameterLockUi.editing) parameterLockUi.cursor = clampU8(value, 0, 2);
@@ -8316,7 +8316,7 @@ void drawMuteSoloScreen() {
     const int x = i * 32;
     const int y = 28;
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(x + (i < 2 ? 4 : 1), y);
+    display.setCursor(x + (i == 3 ? 4 : (i < 2 ? 4 : 1)), y);
     display.print(actions[i]);
     if ((muteSoloModeSolo && i == 0) || (!muteSoloModeSolo && i == 1)) {
       display.drawLine(x + 2, y + 9, x + 29, y + 9, SSD1306_WHITE);
