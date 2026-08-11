@@ -8963,7 +8963,7 @@ String loopLengthSelectionName(uint8_t selection) {
 
 const char *loopLengthSummaryName(uint8_t selection) {
   static const char *const names[] = {
-    "1/4Br", "1/2Br", "1Br", "2Br", "4Br", "8Br", "Free"
+    "1/4 Bar", "1/2 Bar", "1 Bar", "2 Bars", "4 Bars", "8 Bars", "Free"
   };
   return names[clampU8(selection, 0, 6)];
 }
@@ -8975,6 +8975,14 @@ char looperTrackModeSummaryLetter() {
     case arpnmidi3::LoopTrackMode::Manual: return 'M';
   }
   return 'M';
+}
+
+void drawLooperFlagBox(uint8_t x, uint8_t y, char label, bool enabled) {
+  display.drawRect(x, y, 13, 11, SSD1306_WHITE);
+  if (!enabled) return;
+  display.setTextSize(1);
+  display.setCursor(x + 4, y + 2);
+  display.print(label);
 }
 
 void drawLooperSettingsScreen() {
@@ -8989,15 +8997,17 @@ void drawLooperSettingsScreen() {
       display.setCursor(0, 2 + i * 10);
       display.print(i == track ? F(">") : F(" "));
       display.print(i + 1U);
-      display.print(F(" "));
+      display.print(F("-"));
       display.print(loopLengthSummaryName(loopTrackLengthSelection[i]));
-      display.print(F(" "));
-      if (firmware3Settings.looperAutoRec) display.print(F("R"));
-      if (firmware3Settings.looperTimeTravel) display.print(F("T"));
-      display.print(looperTrackModeSummaryLetter());
-      if (firmware3Settings.looperQuantize) display.print(F("Q"));
-      if (firmware3Settings.looperRecordCc) display.print(F("C"));
     }
+    drawLooperFlagBox(86, 1, 'R', firmware3Settings.looperAutoRec);
+    drawLooperFlagBox(101, 1, 'T', firmware3Settings.looperTimeTravel);
+    drawLooperFlagBox(86, 14, 'Q', firmware3Settings.looperQuantize);
+    drawLooperFlagBox(101, 14, 'C', firmware3Settings.looperRecordCc);
+    display.drawRect(116, 1, 12, 24, SSD1306_WHITE);
+    display.setTextSize(2);
+    display.setCursor(117, 6);
+    display.print(looperTrackModeSummaryLetter());
     return;
   }
   String value;
