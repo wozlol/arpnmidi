@@ -3181,7 +3181,8 @@ void selectNextAutoLooperTrackAfterCapture() {
   uint8_t target = multitrackLooper.selectedTrack();
   bool foundEmpty = false;
   for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
-    if (multitrackLooper.track(i).count == 0) {
+    const arpnmidi3::LoopTrackState &state = multitrackLooper.track(i);
+    if (state.count == 0 || state.hidden) {
       target = i;
       foundEmpty = true;
       break;
@@ -6332,8 +6333,10 @@ void featureLoopClearUndo() {
     }
   } else if (multitrackLooper.track(selected).hidden) {
     multitrackLooper.undoClear(selected);
+    multitrackLooper.selectTrack(selected);
   } else {
     multitrackLooper.safeClear(selected, releaseMultitrackOutput, nullptr);
+    multitrackLooper.selectTrack(selected);
   }
   loopStorageDirty = true;
   refreshLoopUiState();
@@ -7183,8 +7186,10 @@ void handleLooperButton(uint8_t button) {
     }
   } else if (selectedAction == LOOPER_BUTTON_DELETE) {
     multitrackLooper.safeClear(button, releaseMultitrackOutput, nullptr);
+    multitrackLooper.selectTrack(button);
   } else if (selectedAction == LOOPER_BUTTON_UNDO) {
     multitrackLooper.undoClear(button);
+    multitrackLooper.selectTrack(button);
   }
   if (selectedAction != 0) loopStorageDirty = true;
   refreshLoopUiState();
@@ -9049,6 +9054,8 @@ void drawLooperSettingsScreen() {
       display.print(i + 1U);
       display.print(F("-"));
       display.print(loopLengthSummaryName(loopTrackLengthSelection[i]));
+      const arpnmidi3::LoopTrackState &state = multitrackLooper.track(i);
+      if (state.count > 0 && !state.hidden) display.fillCircle(64, 5 + i * 10, 2, SSD1306_WHITE);
     }
     drawLooperFlagBox(70, 1, 'R', firmware3Settings.looperAutoRec);
     drawLooperFlagBox(85, 1, 'T', firmware3Settings.looperTimeTravel);
