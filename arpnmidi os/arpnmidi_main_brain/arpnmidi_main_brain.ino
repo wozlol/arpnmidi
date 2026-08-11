@@ -8961,6 +8961,22 @@ String loopLengthSelectionName(uint8_t selection) {
   return names[clampU8(selection, 0, 6)];
 }
 
+const char *loopLengthSummaryName(uint8_t selection) {
+  static const char *const names[] = {
+    "1/4Br", "1/2Br", "1Br", "2Br", "4Br", "8Br", "Free"
+  };
+  return names[clampU8(selection, 0, 6)];
+}
+
+char looperTrackModeSummaryLetter() {
+  switch (static_cast<arpnmidi3::LoopTrackMode>(firmware3Settings.looperTrackMode)) {
+    case arpnmidi3::LoopTrackMode::Layers: return 'L';
+    case arpnmidi3::LoopTrackMode::PartsAutoSolo: return 'P';
+    case arpnmidi3::LoopTrackMode::Manual: return 'M';
+  }
+  return 'M';
+}
+
 void drawLooperSettingsScreen() {
   static const char *const names[] = {
     "TRACK", "LENGTH", "AUTO REC", "TIME TRAV", "NEW TRACK",
@@ -8970,14 +8986,17 @@ void drawLooperSettingsScreen() {
   if (ui.menuMode == MENU_SELECT) {
     display.setTextSize(1);
     for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
-      const arpnmidi3::LoopTrackState &state = multitrackLooper.track(i);
       display.setCursor(0, 2 + i * 10);
       display.print(i == track ? F(">") : F(" "));
       display.print(i + 1U);
       display.print(F(" "));
-      display.print(loopLengthSelectionName(loopTrackLengthSelection[i]));
-      if (state.solo) display.print(F(" S"));
-      else if (state.muted) display.print(F(" M"));
+      display.print(loopLengthSummaryName(loopTrackLengthSelection[i]));
+      display.print(F(" "));
+      if (firmware3Settings.looperAutoRec) display.print(F("R"));
+      if (firmware3Settings.looperTimeTravel) display.print(F("T"));
+      display.print(looperTrackModeSummaryLetter());
+      if (firmware3Settings.looperQuantize) display.print(F("Q"));
+      if (firmware3Settings.looperRecordCc) display.print(F("C"));
     }
     return;
   }
