@@ -940,7 +940,7 @@ uint64_t stutterStopUs[LIVE_TARGET_COUNT];
 uint8_t multitrackPlaybackHeld[arpnmidi3::kLoopTrackCount][16][16];
 bool loopStorageDirty = false;
 bool loopStorageError = false;
-uint8_t loopTrackLengthSelection[arpnmidi3::kLoopTrackCount] = {2, 2, 2, 2};
+uint8_t loopTrackLengthSelection[arpnmidi3::kLoopTrackCount] = {2, 3, 4, 5};
 LoopCcPruneState loopCcPrune[64];
 uint32_t loopCcPruneOverflowCount = 0;
 
@@ -3590,8 +3590,9 @@ void saveLoopStorageIfAny() {
 
 void loadSavedLoopStorage() {
   multitrackLooper.reset();
+  static constexpr uint8_t defaultLoopLengths[arpnmidi3::kLoopTrackCount] = {2, 3, 4, 5};
   for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
-    loopTrackLengthSelection[track] = 2;
+    loopTrackLengthSelection[track] = defaultLoopLengths[track];
   }
   if (!littleFsReady) return;
   File file = LittleFS.open("/loops.f3", "r");
@@ -4723,7 +4724,8 @@ Firmware3Settings defaultFirmware3Settings() {
 FeatureControlSettings defaultFeatureControlSettings() {
   FeatureControlSettings controls{};
   controls.fourButtonMode = FOUR_BUTTON_LOOPER;
-  controls.looperButtonActions = LOOPER_BUTTON_SELECT | LOOPER_BUTTON_DELETE;
+  controls.looperButtonActions = LOOPER_BUTTON_SELECT | LOOPER_BUTTON_DELETE |
+      LOOPER_BUTTON_UNDO;
   for (uint8_t button = 0; button < 4; ++button) {
     controls.customButtons[button].channel = 1;
     controls.customButtons[button].number = 60 + button;
@@ -4881,6 +4883,10 @@ bool loadExtendedPreset(uint8_t slot) {
       FOUR_BUTTON_MODE_COUNT - 1);
   featureControls.looperButtonActions &= LOOPER_BUTTON_SELECT | LOOPER_BUTTON_MUTE |
       LOOPER_BUTTON_SOLO | LOOPER_BUTTON_DELETE | LOOPER_BUTTON_UNDO;
+  if (featureControls.looperButtonActions ==
+      (LOOPER_BUTTON_SELECT | LOOPER_BUTTON_DELETE)) {
+    featureControls.looperButtonActions |= LOOPER_BUTTON_UNDO;
+  }
   if (featureControls.looperButtonActions == 0) {
     featureControls.looperButtonActions = LOOPER_BUTTON_SELECT;
   }

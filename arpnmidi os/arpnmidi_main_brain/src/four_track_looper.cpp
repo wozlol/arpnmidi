@@ -365,9 +365,9 @@ void FourTrackLooper::releaseIfAudibilityChanged(uint8_t track, bool wasAudible,
 
 void FourTrackLooper::safeClear(uint8_t track, ReleaseFn release, void *context) {
   if (track >= kLoopTrackCount) return;
-  const bool wasAudible = audible(track);
+  if ((recording_ || recordingArmed_) && recordingTrack_ == track) cancelRecording();
   tracks_[track].hidden = true;
-  releaseIfAudibilityChanged(track, wasAudible, release, context);
+  if (release) release(context, track);
 }
 
 void FourTrackLooper::undoClear(uint8_t track) {
