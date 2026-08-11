@@ -8318,6 +8318,8 @@ void drawDivNotesScreen(uint8_t cursor) {
   const uint8_t mapNote = settings.divNoteNotes[cursor];
   const uint8_t bindingKind = featureControls.drumRollKinds[cursor];
   if (bindingKind == TRIGGER_BINDING_OFF || mapCh == 0 || mapNote == 0xFF) {
+    display.setTextSize(1);
+    display.setCursor(0, 32);
     display.print(F("LEARN NOTE/CC"));
   } else if (bindingKind == TRIGGER_BINDING_CC) {
     display.print(F("CH "));
