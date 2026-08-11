@@ -8292,6 +8292,10 @@ void drawFourButtonScreen() {
 
 void drawMuteSoloScreen() {
   display.setTextSize(1);
+  const bool editingLoopMix = ui.menuMode == MENU_EDIT;
+  const uint8_t highlightedTrack = editingLoopMix
+      ? muteSoloCursor
+      : multitrackLooper.selectedTrack();
   for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
     const int x = track * 32;
     const int y = 1;
@@ -8309,8 +8313,9 @@ void drawMuteSoloScreen() {
     display.setCursor(x + 13, y + 5);
     display.print(track + 1U);
     display.setTextColor(SSD1306_WHITE);
-    if (muteSoloCursor == track) display.drawRect(x + 1, y + 1, 29, 15, SSD1306_WHITE);
+    if (highlightedTrack == track) display.drawRect(x + 1, y + 1, 29, 15, SSD1306_WHITE);
   }
+  if (!editingLoopMix) return;
   static const char *const actions[] = {"SOLO", "MUTE", "CLEAR", "BACK"};
   for (uint8_t i = 0; i < 4; ++i) {
     const int x = i * 32;
