@@ -4611,6 +4611,7 @@ int16_t applyDivisionOverlayMode(int16_t base, int16_t maxValue, uint8_t mode,
 }
 
 int16_t effectiveSettingValue(uint8_t settingId) {
+  if (cancelSelectedFor(settingId)) return settingRangeMax(settingId);
   if (ui.hasPendingEdit && ui.pendingSetting == settingId) return ui.pendingValue;
   int16_t base = getSettingValueRaw(settingId);
   if (!sensorParamEligible(settingId)) return base;
