@@ -9000,14 +9000,18 @@ void drawLooperSettingsScreen() {
       display.print(F("-"));
       display.print(loopLengthSummaryName(loopTrackLengthSelection[i]));
     }
-    drawLooperFlagBox(86, 1, 'R', firmware3Settings.looperAutoRec);
-    drawLooperFlagBox(101, 1, 'T', firmware3Settings.looperTimeTravel);
-    drawLooperFlagBox(86, 14, 'Q', firmware3Settings.looperQuantize);
-    drawLooperFlagBox(101, 14, 'C', firmware3Settings.looperRecordCc);
-    display.drawRect(116, 1, 12, 24, SSD1306_WHITE);
+    drawLooperFlagBox(70, 1, 'R', firmware3Settings.looperAutoRec);
+    drawLooperFlagBox(85, 1, 'T', firmware3Settings.looperTimeTravel);
+    drawLooperFlagBox(70, 14, 'Q', firmware3Settings.looperQuantize);
+    drawLooperFlagBox(85, 14, 'C', firmware3Settings.looperRecordCc);
+    display.drawRect(101, 1, 24, 24, SSD1306_WHITE);
     display.setTextSize(2);
-    display.setCursor(117, 6);
+    display.setCursor(107, 6);
     display.print(looperTrackModeSummaryLetter());
+    display.setTextSize(1);
+    display.setCursor(90, 31);
+    static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
+    display.print(quantize[firmware3Settings.looperQuantize]);
     return;
   }
   String value;
