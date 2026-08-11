@@ -1084,6 +1084,7 @@ bool customButtonLatch[4];
 uint8_t customButtonFlappyValue[4];
 uint32_t customButtonFlappyMs[4];
 uint8_t looperButtonStep[4];
+uint8_t lastLooperButton = 0xFF;
 bool chordButtonPlaying[4];
 bool chordLearnArmed = false;
 bool chordClearArmed = false;
@@ -3173,6 +3174,36 @@ void armSelectedMultitrack(bool overdub) {
   ui.dirty = true;
 }
 
+void selectNextAutoLooperTrackAfterCapture() {
+  const auto mode = multitrackLooper.trackMode();
+  if (mode == arpnmidi3::LoopTrackMode::Manual) return;
+
+  uint8_t target = multitrackLooper.selectedTrack();
+  bool foundEmpty = false;
+  for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+    if (multitrackLooper.track(i).count == 0) {
+      target = i;
+      foundEmpty = true;
+      break;
+    }
+  }
+  if (!foundEmpty) target = multitrackLooper.oldestPopulatedTrack();
+  multitrackLooper.selectTrack(target);
+}
+
+bool finishActiveMultitrackRecording(uint64_t nowUs, bool startIfStopped) {
+  if (!multitrackLooper.recording() && !multitrackLooper.recordingArmed()) return false;
+  flushLoopCcPruning(true);
+  const bool captured = multitrackLooper.finishRecording(nowUs);
+  loopStorageDirty |= captured;
+  if (captured && multitrackLooper.recordingTrack() == 0) adoptFreeTrackOneTempo();
+  if (captured && startIfStopped && !multitrackLooper.playing()) {
+    multitrackLooper.start(nowUs);
+  }
+  if (captured) selectNextAutoLooperTrackAfterCapture();
+  return captured;
+}
+
 bool beginTimeTravelImport() {
   const uint8_t track = multitrackLooper.selectedTrack();
   uint32_t lengthUs = multitrackFixedLengthUs(track);
@@ -3281,38 +3312,20 @@ void handleMultitrackRecPlay() {
     return;
   }
   if (multitrackLooper.recordingArmed() || multitrackLooper.recording()) {
-    flushLoopCcPruning(true);
-    const bool captured = multitrackLooper.finishRecording(nowUs);
-    loopStorageDirty |= captured;
-    if (captured && multitrackLooper.recordingTrack() == 0) adoptFreeTrackOneTempo();
-    if (captured && !multitrackLooper.playing()) multitrackLooper.start(nowUs);
+    finishActiveMultitrackRecording(nowUs, true);
   } else if (!multitrackLooper.hasAnyData()) {
     armSelectedMultitrack(false);
   } else if (!multitrackLooper.playing()) {
     multitrackLooper.start(nowUs);
   } else {
-    uint8_t target = multitrackLooper.selectedTrack();
     const auto mode = multitrackLooper.trackMode();
-    if (mode == arpnmidi3::LoopTrackMode::Layers) {
-      bool foundEmpty = false;
+    const uint8_t target = multitrackLooper.selectedTrack();
+    armSelectedMultitrack(multitrackLooper.track(target).count > 0);
+    if (mode == arpnmidi3::LoopTrackMode::PartsAutoSolo) {
       for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
-        if (multitrackLooper.track(i).count == 0) {
-          target = i;
-          foundEmpty = true;
-          break;
-        }
+        multitrackLooper.setSolo(i, i == target, releaseMultitrackOutput, nullptr);
       }
-      if (!foundEmpty) target = multitrackLooper.oldestPopulatedTrack();
-      multitrackLooper.selectTrack(target);
-      armSelectedMultitrack(!foundEmpty);
-    } else {
-      armSelectedMultitrack(multitrackLooper.track(target).count > 0);
-      if (mode == arpnmidi3::LoopTrackMode::PartsAutoSolo) {
-        for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
-          multitrackLooper.setSolo(i, i == target, releaseMultitrackOutput, nullptr);
-        }
-        loopStorageDirty = true;
-      }
+      loopStorageDirty = true;
     }
   }
   refreshLoopUiState();
@@ -3322,8 +3335,7 @@ void handleMultitrackRecPlay() {
 void handleMultitrackStopDelete() {
   const uint8_t track = multitrackLooper.selectedTrack();
   if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
-    flushLoopCcPruning(true);
-    loopStorageDirty |= multitrackLooper.finishRecording(time_us_64());
+    finishActiveMultitrackRecording(time_us_64(), false);
   }
   if (multitrackLooper.playing()) {
     multitrackLooper.stop(releaseMultitrackOutput, nullptr);
@@ -3380,6 +3392,7 @@ void tickLooper() {
   if (wasRecording && !multitrackLooper.recording()) {
     loopStorageDirty = true;
     if (multitrackLooper.recordingTrack() == 0) adoptFreeTrackOneTempo();
+    selectNextAutoLooperTrackAfterCapture();
     refreshLoopUiState();
   }
 }
@@ -3864,7 +3877,7 @@ void applyIncomingTransport(arpnmidi3::TransportEvent event) {
     }
     if (firmware3Settings.looperMidiTransport) {
       if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
-        loopStorageDirty |= multitrackLooper.finishRecording(nowUs);
+        finishActiveMultitrackRecording(nowUs, false);
       }
       multitrackLooper.pause(nowUs, releaseMultitrackOutput, nullptr);
     }
@@ -6337,7 +6350,7 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
   if (!pressed) return;
   if (id == FEATURE_BUTTON_LOOP_RECORD) {
     if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
-      loopStorageDirty |= multitrackLooper.finishRecording(time_us_64());
+      finishActiveMultitrackRecording(time_us_64(), false);
     } else {
       const uint8_t track = multitrackLooper.selectedTrack();
       armSelectedMultitrack(multitrackLooper.track(track).count > 0);
@@ -6719,12 +6732,7 @@ void handleSongSelect(byte song) {
 }
 
 void finishMidiTransportRecording() {
-  if (!multitrackLooper.recording() && !multitrackLooper.recordingArmed()) return;
-  flushLoopCcPruning(true);
-  const bool captured = multitrackLooper.finishRecording(time_us_64());
-  loopStorageDirty |= captured;
-  if (captured && multitrackLooper.recordingTrack() == 0) adoptFreeTrackOneTempo();
-  if (captured && !multitrackLooper.playing()) multitrackLooper.start(time_us_64());
+  finishActiveMultitrackRecording(time_us_64(), true);
 }
 
 void selectAdjacentLooperTrack(int8_t direction) {
@@ -7117,6 +7125,10 @@ void handleCustomButton(uint8_t button, bool pressed) {
 }
 
 void handleLooperButton(uint8_t button) {
+  if (button != lastLooperButton) {
+    memset(looperButtonStep, 0, sizeof(looperButtonStep));
+    lastLooperButton = button;
+  }
   const uint8_t actions = featureControls.looperButtonActions;
   static constexpr uint8_t orderedActions[5] = {
     LOOPER_BUTTON_SELECT, LOOPER_BUTTON_MUTE, LOOPER_BUTTON_SOLO,
