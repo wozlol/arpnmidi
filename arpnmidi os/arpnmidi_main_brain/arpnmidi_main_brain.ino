@@ -123,7 +123,7 @@ constexpr uint16_t PUSH_RAW_OFF = 1023;   // no-touch/off region starts here
 constexpr uint8_t PUSH_CURVE_POWER = 2;   // >1 makes light presses less aggressive
 
 constexpr uint32_t SCREEN_SAVER_REFRESH_MS = 4000UL;
-constexpr uint8_t SCREEN_SAVER_CANCEL_SLOT = 6;
+constexpr uint8_t SCREEN_SAVER_CANCEL_SLOT = 11;
 constexpr uint32_t LONG_HOLD_PANIC_MS = 2000UL;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 25UL;
 
@@ -1662,7 +1662,8 @@ String ccChannelLabel(uint8_t value) {
 
 uint32_t screenSaverTimeoutMs(uint8_t selection) {
   static constexpr uint32_t timeouts[] = {
-    0UL, 900000UL, 1800000UL, 3600000UL, 10800000UL, 18000000UL
+    0UL, 30000UL, 60000UL, 120000UL, 300000UL, 600000UL,
+    900000UL, 1800000UL, 3600000UL, 10800000UL, 18000000UL
   };
   if (selection >= SCREEN_SAVER_CANCEL_SLOT) return 0;
   return timeouts[selection];
@@ -1670,7 +1671,8 @@ uint32_t screenSaverTimeoutMs(uint8_t selection) {
 
 String screenSaverLabel(uint8_t selection) {
   static const char *const labels[] = {
-    "OFF", "15 MIN", "30 MIN", "1 HR", "3 HR", "5 HR", "CANCEL"
+    "OFF", "30S", "1 MIN", "2 MIN", "5 MIN", "10 MIN",
+    "15 MIN", "30 MIN", "1 HR", "3 HR", "5 HR", "CANCEL"
   };
   return labels[clampU8(selection, 0, SCREEN_SAVER_CANCEL_SLOT)];
 }
