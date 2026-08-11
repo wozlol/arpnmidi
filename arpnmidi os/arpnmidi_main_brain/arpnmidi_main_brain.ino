@@ -255,6 +255,7 @@ enum CcRemapUiStage : uint8_t {
 
 enum NoteCcUiStage : uint8_t {
   NOTE_CC_UI_LIST = 0,
+  NOTE_CC_UI_SLOT_ACTION,
   NOTE_CC_UI_INPUT_CHANNEL,
   NOTE_CC_UI_INPUT_NOTE,
   NOTE_CC_UI_OUTPUT_CHANNEL,
@@ -393,6 +394,9 @@ constexpr uint8_t STUTTER_LENGTH_DEFAULT =
     STUTTER_LENGTH_DIVISION_BASE + DIV_1_4;
 constexpr uint8_t CC_REMAP_SLOT_COUNT = 16;
 constexpr uint8_t NOTE_CC_SLOT_COUNT = 16;
+constexpr uint8_t NOTE_CC_CANCEL_CHANNEL = 17;
+constexpr uint8_t NOTE_CC_CANCEL_VALUE = 128;
+constexpr uint8_t NOTE_CC_CANCEL_BEHAVIOR = 2;
 
 enum FeatureKnobId : uint8_t {
   FEATURE_KNOB_VELOCITY_BASE = 0,
@@ -1020,8 +1024,10 @@ uint8_t ccRemapCursor = 0;
 bool ccRemapLearnActive = false;
 uint8_t noteCcUiStage = NOTE_CC_UI_LIST;
 uint8_t noteCcCursor = 0;
+uint8_t noteCcSlotActionCursor = 0;
 bool noteCcLearnActive = false;
 bool noteCcToggleState[NOTE_CC_SLOT_COUNT];
+NoteCcMapEntry noteCcEditBackup{};
 uint8_t muteSoloCursor = 0;
 bool muteSoloModeSolo = false;
 SubmenuUiState arpMenuUi;
@@ -1112,7 +1118,7 @@ const char *const kSettingNames[SETTING_COUNT] = {
   "12 DRUMDIV", "13 BASS", "14 THRU OUT", "15 RNDRBN", "16 ROUTER", "17 FEATURES",
   "18 CC MAP", "19 NOTE>CC", "20 IN CC >", "21 MONO RETRIG", "22 SCRNSVR",
   "23 EYE/PUSH", "24 EYE MODE", "25 PUSH", "26 4BUTTON", "27 LOOPER",
-  "28 MUTE/SOLO", "29 PARAM LOCK", "30 CHORD", "31 KEY", "32 SCALE",
+  "28 LOOP MIX", "29 PLOCK", "30 CHORD", "31 KEY", "32 SCALE",
   "33 GIT/KEYS", "34 LIVE CC", "35 GLOBAL", "36 LOAD", "37 SAVE", "38 PANIC"
 };
 
@@ -3916,10 +3922,11 @@ int16_t settingRangeMax(uint8_t settingId) {
       return 127;
     case SET_NOTE_CC:
       if (noteCcUiStage == NOTE_CC_UI_LIST) return NOTE_CC_SLOT_COUNT + 1;
+      if (noteCcUiStage == NOTE_CC_UI_SLOT_ACTION) return 2;
       if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL ||
-          noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) return 16;
-      if (noteCcUiStage == NOTE_CC_UI_BEHAVIOR) return 1;
-      return 127;
+          noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) return NOTE_CC_CANCEL_CHANNEL;
+      if (noteCcUiStage == NOTE_CC_UI_BEHAVIOR) return NOTE_CC_CANCEL_BEHAVIOR;
+      return NOTE_CC_CANCEL_VALUE;
     case SET_LEGATO_CH: return 16;
     case SET_CC_OUT_CH: return 17;
     case SET_SENSOR_CH: return 16;
@@ -3942,7 +3949,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (looperSettingsUi.cursor == 4) return static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual);
       if (looperSettingsUi.cursor == 5) return 5;
       return 1;
-    case SET_MUTE_SOLO: return 6;
+    case SET_MUTE_SOLO: return 7;
     case SET_PARAMETER_LOCK:
       if (!parameterLockUi.editing) return 2;
       return 16;
@@ -4058,6 +4065,7 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       return featureControls.ccRemaps[ccRemapCursor].outputCc;
     case SET_NOTE_CC:
       if (noteCcUiStage == NOTE_CC_UI_LIST) return noteCcCursor;
+      if (noteCcUiStage == NOTE_CC_UI_SLOT_ACTION) return noteCcSlotActionCursor;
       if (noteCcCursor >= NOTE_CC_SLOT_COUNT) return 0;
       if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
         return max<uint8_t>(1, featureControls.noteCcMaps[noteCcCursor].inputChannel);
@@ -4141,6 +4149,16 @@ int16_t getSettingValueRaw(uint8_t settingId) {
     case SET_SCREEN_SAVER: return screenSaverForceNow ? 2 : settings.screenSaver;
     default: return 0;
   }
+}
+
+void cancelNoteCcEdit() {
+  if (noteCcCursor < NOTE_CC_SLOT_COUNT) {
+    featureControls.noteCcMaps[noteCcCursor] = noteCcEditBackup;
+  }
+  noteCcLearnActive = false;
+  noteCcUiStage = NOTE_CC_UI_LIST;
+  noteCcSlotActionCursor = 0;
+  ui.dirty = true;
 }
 
 void setSettingValueRaw(uint8_t settingId, int16_t value) {
@@ -4289,7 +4307,26 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_NOTE_CC:
       if (noteCcUiStage == NOTE_CC_UI_LIST) {
         noteCcCursor = clampU8(value, 0, NOTE_CC_SLOT_COUNT + 1);
+      } else if (noteCcUiStage == NOTE_CC_UI_SLOT_ACTION) {
+        noteCcSlotActionCursor = clampU8(value, 0, 2);
       } else if (noteCcCursor < NOTE_CC_SLOT_COUNT) {
+        if ((noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL ||
+             noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) &&
+            value == NOTE_CC_CANCEL_CHANNEL) {
+          cancelNoteCcEdit();
+          break;
+        }
+        if ((noteCcUiStage == NOTE_CC_UI_INPUT_NOTE ||
+             noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) &&
+            value == NOTE_CC_CANCEL_VALUE) {
+          cancelNoteCcEdit();
+          break;
+        }
+        if (noteCcUiStage == NOTE_CC_UI_BEHAVIOR &&
+            value == NOTE_CC_CANCEL_BEHAVIOR) {
+          cancelNoteCcEdit();
+          break;
+        }
         NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
         if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
           entry.inputChannel = clampU8(value, 1, 16);
@@ -4942,7 +4979,9 @@ void applySettingDelta(int delta, bool fastStep) {
   if (id == SET_PANIC) return;
   if (id == SET_MAP_CC) featuresLearnActive = false;
   if (id == SET_CC_MAP && ccRemapUiStage == CC_REMAP_UI_INPUT) ccRemapLearnActive = false;
-  if (id == SET_NOTE_CC && (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE ||
+  if (id == SET_NOTE_CC && (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL ||
+                            noteCcUiStage == NOTE_CC_UI_INPUT_NOTE ||
+                            noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL ||
                             noteCcUiStage == NOTE_CC_UI_OUTPUT_CC)) {
     noteCcLearnActive = false;
   }
@@ -4976,7 +5015,14 @@ void applySettingDelta(int delta, bool fastStep) {
   }
   else if (id == SET_NOTE_CC && (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL ||
                                  noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL)) {
-    next = wrapIndex(next - 1, 16) + 1;
+    next = wrapIndex(next - 1, NOTE_CC_CANCEL_CHANNEL) + 1;
+  }
+  else if (id == SET_NOTE_CC && (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE ||
+                                 noteCcUiStage == NOTE_CC_UI_OUTPUT_CC)) {
+    next = wrapIndex(next, NOTE_CC_CANCEL_VALUE + 1);
+  }
+  else if (id == SET_NOTE_CC && noteCcUiStage == NOTE_CC_UI_BEHAVIOR) {
+    next = wrapIndex(next, NOTE_CC_CANCEL_BEHAVIOR + 1);
   }
   else if ((id == SET_QUICK_JUMP && quickJumpUi.editing && quickJumpUi.cursor < 2) ||
            (id == SET_DRUM_MAGIC && drumMagicUi.editing && drumMagicUi.cursor == 2)) {
@@ -5218,7 +5264,9 @@ void activateClickAction() {
     } else if (ui.selectedSetting == SET_NOTE_CC) {
       if (noteCcUiStage == NOTE_CC_UI_LIST) {
         if (noteCcCursor < NOTE_CC_SLOT_COUNT) {
-          noteCcUiStage = NOTE_CC_UI_INPUT_CHANNEL;
+          noteCcEditBackup = featureControls.noteCcMaps[noteCcCursor];
+          noteCcSlotActionCursor = 0;
+          noteCcUiStage = NOTE_CC_UI_SLOT_ACTION;
         } else if (noteCcCursor == NOTE_CC_SLOT_COUNT) {
           for (NoteCcMapEntry &entry : featureControls.noteCcMaps) entry = NoteCcMapEntry{};
           memset(noteCcToggleState, 0, sizeof(noteCcToggleState));
@@ -5227,12 +5275,26 @@ void activateClickAction() {
           ui.menuMode = MENU_SELECT;
           ui.deferredExitWork = true;
         }
+      } else if (noteCcUiStage == NOTE_CC_UI_SLOT_ACTION) {
+        if (noteCcSlotActionCursor == 0) {
+          noteCcUiStage = NOTE_CC_UI_INPUT_CHANNEL;
+          noteCcLearnActive = true;
+        } else if (noteCcSlotActionCursor == 1) {
+          featureControls.noteCcMaps[noteCcCursor] = NoteCcMapEntry{};
+          noteCcToggleState[noteCcCursor] = false;
+          noteCcUiStage = NOTE_CC_UI_LIST;
+          noteCcSlotActionCursor = 0;
+          saveStorageIfAuto();
+        } else {
+          cancelNoteCcEdit();
+        }
       } else if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
         noteCcUiStage = NOTE_CC_UI_INPUT_NOTE;
         noteCcLearnActive = true;
       } else if (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE) {
         noteCcLearnActive = false;
         noteCcUiStage = NOTE_CC_UI_OUTPUT_CHANNEL;
+        noteCcLearnActive = true;
       } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) {
         noteCcUiStage = NOTE_CC_UI_OUTPUT_CC;
         noteCcLearnActive = true;
@@ -5241,6 +5303,7 @@ void activateClickAction() {
         noteCcUiStage = NOTE_CC_UI_BEHAVIOR;
       } else {
         noteCcUiStage = NOTE_CC_UI_LIST;
+        noteCcSlotActionCursor = 0;
         saveStorageIfAuto();
       }
       encoder.switchIgnoreUntilMs = millis() + 120;
@@ -5329,8 +5392,10 @@ void activateClickAction() {
         }
         loopStorageDirty = true;
       } else if (muteSoloCursor == 4) {
-        muteSoloModeSolo = !muteSoloModeSolo;
+        muteSoloModeSolo = true;
       } else if (muteSoloCursor == 5) {
+        muteSoloModeSolo = false;
+      } else if (muteSoloCursor == 6) {
         for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
           multitrackLooper.setMuted(track, false, releaseMultitrackOutput, nullptr);
           multitrackLooper.setSolo(track, false, releaseMultitrackOutput, nullptr);
@@ -5484,6 +5549,7 @@ void activateClickAction() {
     if (ui.selectedSetting == SET_NOTE_CC) {
       noteCcUiStage = NOTE_CC_UI_LIST;
       noteCcCursor = 0;
+      noteCcSlotActionCursor = 0;
       noteCcLearnActive = false;
     }
     if (ui.selectedSetting == SET_MUTE_SOLO) {
@@ -6130,12 +6196,14 @@ bool captureFourButtonCcAssignment(uint8_t channel, uint8_t cc) {
 
 bool captureNoteCcOutputAssignment(uint8_t channel, uint8_t cc) {
   if (ui.selectedSetting != SET_NOTE_CC || ui.menuMode != MENU_EDIT ||
-      noteCcUiStage != NOTE_CC_UI_OUTPUT_CC || !noteCcLearnActive ||
+      (noteCcUiStage != NOTE_CC_UI_OUTPUT_CHANNEL &&
+       noteCcUiStage != NOTE_CC_UI_OUTPUT_CC) || !noteCcLearnActive ||
       noteCcCursor >= NOTE_CC_SLOT_COUNT) return false;
   NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
   entry.outputChannel = channel;
   entry.outputCc = cc;
   noteCcLearnActive = false;
+  noteCcUiStage = NOTE_CC_UI_OUTPUT_CC;
   ui.dirty = true;
   markActivity(false);
   return true;
@@ -6169,12 +6237,14 @@ bool captureFourButtonNoteAssignment(uint8_t channel, uint8_t note, bool pressed
 
 bool captureNoteCcInputAssignment(uint8_t channel, uint8_t note, bool pressed) {
   if (!pressed || ui.selectedSetting != SET_NOTE_CC || ui.menuMode != MENU_EDIT ||
-      noteCcUiStage != NOTE_CC_UI_INPUT_NOTE || !noteCcLearnActive ||
+      (noteCcUiStage != NOTE_CC_UI_INPUT_CHANNEL &&
+       noteCcUiStage != NOTE_CC_UI_INPUT_NOTE) || !noteCcLearnActive ||
       noteCcCursor >= NOTE_CC_SLOT_COUNT) return false;
   NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
   entry.inputChannel = channel;
   entry.inputNote = note;
   noteCcLearnActive = false;
+  noteCcUiStage = NOTE_CC_UI_INPUT_NOTE;
   ui.dirty = true;
   markActivity(false);
   return true;
@@ -7277,7 +7347,7 @@ String settingValueString(uint8_t id) {
     case SET_FOUR_BUTTON:
       return "4BUTTON";
     case SET_MUTE_SOLO:
-      return "MUTE/SOLO";
+      return "LOOP MIX";
     case SET_LEGATO_CH: return midiChannelLabel(v, true);
     case SET_CC_OUT_CH: return ccChannelLabel(v);
     case SET_SENSOR_CH: return midiChannelLabel(v);
@@ -7343,11 +7413,27 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
     }
     case SET_LOOP_BARS: {
       static const char *const names[] = {
-        "TRACK", "LENGTH", "AUTO REC", "TIME TRAVEL", "TRACK MODE",
-        "AUTO QUANT", "RECORD CCS", "MIDI TRANS", "BACK"
+        "TRACK", "LENGTH", "AUTO REC", "TIME TRAV", "NEW TRACK",
+        "QUANT", "RECORD CC", "MIDI TRANS", "BACK"
       };
       index = looperSettingsUi.cursor; label = names[index]; return true;
     }
+    case SET_NOTE_CC:
+      if (noteCcUiStage == NOTE_CC_UI_SLOT_ACTION) {
+        static const char *const names[] = {"EDIT", "CLEAR", "CANCEL"};
+        index = noteCcSlotActionCursor;
+        label = names[index];
+        return true;
+      }
+      if (noteCcUiStage != NOTE_CC_UI_LIST) {
+        static const char *const names[] = {
+          "INPUT CH", "INPUT NOTE", "OUTPUT CH", "OUTPUT CC", "BEHAVIOR"
+        };
+        index = noteCcUiStage - NOTE_CC_UI_INPUT_CHANNEL;
+        label = names[index];
+        return true;
+      }
+      return false;
     case SET_PARAMETER_LOCK: {
       static const char *const names[] = {"CHANNEL", "CLEAR LOCKS", "BACK"};
       index = parameterLockUi.cursor; label = names[index]; return true;
@@ -7607,7 +7693,7 @@ bool submenuBackSelected() {
       return fourButtonUiStage == FOUR_BUTTON_UI_CHORD && fourButtonUiCursor == 2;
     case SET_LOOP_BARS: return looperSettingsUi.cursor == 8;
     case SET_PARAMETER_LOCK: return parameterLockUi.cursor == 2;
-    case SET_MUTE_SOLO: return muteSoloCursor == 6;
+    case SET_MUTE_SOLO: return muteSoloCursor == 7;
     case SET_CHORD: return chordUi.cursor == 5;
     case SET_FORCE_SCALE: return scaleUi.cursor == 13;
     case SET_LIVE_CC: return liveCcCursor == 2;
@@ -7629,7 +7715,9 @@ bool parameterEditActive() {
     case SET_BASS_CH: return bassUi.editing;
     case SET_ROUTER: return routerEditStage != ROUTER_STAGE_LIST;
     case SET_CC_MAP: return ccRemapUiStage != CC_REMAP_UI_LIST;
-    case SET_NOTE_CC: return noteCcUiStage != NOTE_CC_UI_LIST;
+    case SET_NOTE_CC:
+      return noteCcUiStage != NOTE_CC_UI_LIST &&
+             noteCcUiStage != NOTE_CC_UI_SLOT_ACTION;
     case SET_FOUR_BUTTON:
       return fourButtonUiStage == FOUR_BUTTON_UI_MODE ||
              (fourButtonUiStage >= FOUR_BUTTON_UI_CUSTOM_CHANNEL &&
@@ -7654,15 +7742,15 @@ bool parameterEditActive() {
 }
 
 void drawBackNavigationArrow() {
-  // Large down-then-left return mark in the blue setting area.
-  const int downX = 88;
-  const int pathY = 29;
-  display.drawLine(downX, 4, downX, pathY - 7, SSD1306_WHITE);
-  display.drawLine(downX, pathY - 7, downX - 6, pathY - 13, SSD1306_WHITE);
-  display.drawLine(downX, pathY - 7, downX + 6, pathY - 13, SSD1306_WHITE);
-  display.drawLine(downX, pathY, 28, pathY, SSD1306_WHITE);
-  display.drawLine(28, pathY, 40, pathY - 10, SSD1306_WHITE);
-  display.drawLine(28, pathY, 40, pathY + 10, SSD1306_WHITE);
+  const int downX = 116;
+  const int cornerY = 26;
+  const int leftX = 98;
+  display.drawLine(downX, 10, downX, cornerY - 4, SSD1306_WHITE);
+  display.drawLine(downX, cornerY - 4, downX - 3, cornerY - 7, SSD1306_WHITE);
+  display.drawLine(downX, cornerY - 4, downX + 3, cornerY - 7, SSD1306_WHITE);
+  display.drawLine(downX, cornerY, leftX, cornerY, SSD1306_WHITE);
+  display.drawLine(leftX, cornerY, leftX + 6, cornerY - 5, SSD1306_WHITE);
+  display.drawLine(leftX, cornerY, leftX + 6, cornerY + 5, SSD1306_WHITE);
 }
 
 void drawModeIndicator() {
@@ -7988,7 +8076,7 @@ String featureButtonName(uint8_t id) {
   if (id == FEATURE_BUTTON_DRUM_AFTERTOUCH_VELOCITY) return "DRUM AT>VELOCITY";
   if (id == FEATURE_BUTTON_CHORD) return "CHORD";
   if (id == FEATURE_BUTTON_LOOP_AUTO_REC) return "LOOP AUTO REC";
-  if (id == FEATURE_BUTTON_LOOP_TIME_TRAVEL) return "LOOP TIME TRAVEL";
+  if (id == FEATURE_BUTTON_LOOP_TIME_TRAVEL) return "LOOP TIME TRAV";
   if (id == FEATURE_BUTTON_LOOP_RECORD_CC) return "LOOP RECORD CC";
   if (id == FEATURE_BUTTON_LOOP_MIDI_TRANSPORT) return "LOOP MIDI TRANSPORT";
   if (id == FEATURE_BUTTON_CLOCK_INPUT) return "CLOCK INPUT";
@@ -8098,24 +8186,39 @@ void drawNoteCcScreen() {
     }
     return;
   }
+  if (noteCcUiStage == NOTE_CC_UI_SLOT_ACTION) {
+    static const char *const actions[] = {"EDIT", "CLEAR", "CANCEL"};
+    display.setTextSize(1); display.setCursor(0, 5);
+    display.print(F("SLOT ")); display.print(noteCcCursor + 1U);
+    display.setTextSize(actions[noteCcSlotActionCursor][0] == 'C' ? 2 : 3);
+    display.setCursor(0, actions[noteCcSlotActionCursor][0] == 'C' ? 18 : 11);
+    display.print(actions[noteCcSlotActionCursor]);
+    return;
+  }
   const NoteCcMapEntry &entry = featureControls.noteCcMaps[noteCcCursor];
-  display.setTextSize(1); display.setCursor(0, 8);
+  display.setTextSize(2); display.setCursor(0, 11);
   if (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL) {
-    display.print(F("INPUT CHANNEL: ")); display.print(max<uint8_t>(1, entry.inputChannel));
-  } else if (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE) {
-    display.print(F("INPUT NOTE: ")); display.print(entry.inputNote <= 127 ? entry.inputNote : 0);
+    display.print(F("CH ")); display.print(max<uint8_t>(1, entry.inputChannel));
     if (noteCcLearnActive) {
-      display.setCursor(0, 34); display.print(F("PLAY NOTE TO LEARN"));
+      display.setTextSize(1); display.setCursor(0, 34); display.print(F("PLAY NOTE TO LEARN"));
+    }
+  } else if (noteCcUiStage == NOTE_CC_UI_INPUT_NOTE) {
+    display.print(F("N ")); display.print(entry.inputNote <= 127 ? entry.inputNote : 0);
+    if (noteCcLearnActive) {
+      display.setTextSize(1); display.setCursor(0, 34); display.print(F("PLAY NOTE TO LEARN"));
     }
   } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL) {
-    display.print(F("OUTPUT CHANNEL: ")); display.print(entry.outputChannel);
-  } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) {
-    display.print(F("OUTPUT CC: ")); display.print(entry.outputCc);
+    display.print(F("CH ")); display.print(entry.outputChannel);
     if (noteCcLearnActive) {
-      display.setCursor(0, 34); display.print(F("MOVE CC TO LEARN"));
+      display.setTextSize(1); display.setCursor(0, 34); display.print(F("MOVE CC TO LEARN"));
+    }
+  } else if (noteCcUiStage == NOTE_CC_UI_OUTPUT_CC) {
+    display.print(F("CC ")); display.print(entry.outputCc);
+    if (noteCcLearnActive) {
+      display.setTextSize(1); display.setCursor(0, 34); display.print(F("MOVE CC TO LEARN"));
     }
   } else {
-    display.print(F("BEHAVIOR")); display.setCursor(0, 34); display.setTextSize(2);
+    display.setCursor(0, 18);
     display.print(entry.behavior == NOTE_CC_TOGGLE ? F("TOGGLE") : F("MOMENTARY"));
   }
 }
@@ -8190,27 +8293,36 @@ void drawFourButtonScreen() {
 void drawMuteSoloScreen() {
   display.setTextSize(1);
   for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
-    const int y = 2 + track * 10;
+    const int x = track * 32;
+    const int y = 1;
     const arpnmidi3::LoopTrackState &state = multitrackLooper.track(track);
-    display.drawRect(4, y, 40, 8, SSD1306_WHITE);
+    display.drawRect(x, y, 31, 17, SSD1306_WHITE);
     if (state.solo) {
-      display.fillRect(5, y + 1, 38, 6, SSD1306_WHITE);
+      display.fillRect(x + 1, y + 1, 29, 15, SSD1306_WHITE);
       display.setTextColor(SSD1306_BLACK);
     } else if (state.muted) {
-      for (uint8_t x = 6; x < 42; x += 4) display.drawPixel(x, y + 3, SSD1306_WHITE);
+      for (uint8_t px = x + 3; px < x + 28; px += 4) {
+        display.drawPixel(px, y + 8, SSD1306_WHITE);
+        display.drawPixel(px + 1, y + 9, SSD1306_WHITE);
+      }
     }
-    display.setCursor(8, y);
-    display.print(F("TRACK ")); display.print(track + 1U);
+    display.setCursor(x + 13, y + 5);
+    display.print(track + 1U);
     display.setTextColor(SSD1306_WHITE);
-    if (muteSoloCursor == track) display.drawRect(1, y - 1, 46, 10, SSD1306_WHITE);
+    if (muteSoloCursor == track) display.drawRect(x + 1, y + 1, 29, 15, SSD1306_WHITE);
   }
-  display.setCursor(72, 3);
-  display.print(muteSoloModeSolo ? F("SOLO") : F("MUTE"));
-  if (muteSoloCursor == 4) display.drawRect(68, 0, 56, 11, SSD1306_WHITE);
-  display.setCursor(72, 18); display.print(F("CLEAR"));
-  if (muteSoloCursor == 5) display.drawRect(68, 15, 56, 11, SSD1306_WHITE);
-  display.setCursor(72, 33); display.print(F("BACK"));
-  if (muteSoloCursor == 6) display.drawRect(68, 30, 56, 11, SSD1306_WHITE);
+  static const char *const actions[] = {"SOLO", "MUTE", "CLEAR", "BACK"};
+  for (uint8_t i = 0; i < 4; ++i) {
+    const int x = i * 32;
+    const int y = 28;
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(x + (i < 2 ? 4 : 1), y);
+    display.print(actions[i]);
+    if ((muteSoloModeSolo && i == 0) || (!muteSoloModeSolo && i == 1)) {
+      display.drawLine(x + 2, y + 9, x + 29, y + 9, SSD1306_WHITE);
+    }
+    if (muteSoloCursor == i + 4) display.drawRect(x, y - 3, 31, 13, SSD1306_WHITE);
+  }
 }
 
 void drawSubmenuField(const String &, const String &value, bool) {
@@ -8487,13 +8599,22 @@ String loopLengthSelectionName(uint8_t selection) {
 
 void drawLooperSettingsScreen() {
   static const char *const names[] = {
-    "TRACK", "LENGTH", "AUTO REC", "TIME TRAVEL", "TRACK MODE",
-    "AUTO QUANT", "RECORD CCS", "MIDI TRANS", "BACK"
+    "TRACK", "LENGTH", "AUTO REC", "TIME TRAV", "NEW TRACK",
+    "QUANT", "RECORD CC", "MIDI TRANS", "BACK"
   };
   const uint8_t track = multitrackLooper.selectedTrack();
   if (ui.menuMode == MENU_SELECT) {
-    drawSubmenuField("", String("TRK ") + String(track + 1U) + " " +
-        loopLengthSelectionName(loopTrackLengthSelection[track]), false);
+    display.setTextSize(1);
+    for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+      const arpnmidi3::LoopTrackState &state = multitrackLooper.track(i);
+      display.setCursor(0, 2 + i * 10);
+      display.print(i == track ? F(">") : F(" "));
+      display.print(i + 1U);
+      display.print(F(" "));
+      display.print(loopLengthSelectionName(loopTrackLengthSelection[i]));
+      if (state.solo) display.print(F(" S"));
+      else if (state.muted) display.print(F(" M"));
+    }
     return;
   }
   String value;
@@ -8515,8 +8636,18 @@ void drawLooperSettingsScreen() {
 void drawParameterLockScreen() {
   static const char *const names[] = {"CHANNEL", "CLEAR LOCKS", "BACK"};
   if (ui.menuMode == MENU_SELECT) {
-    drawSubmenuField("", firmware3Settings.parameterLockChannel == 0
-        ? String("OFF") : String("CH ") + String(firmware3Settings.parameterLockChannel), false);
+    display.setTextSize(1);
+    display.setCursor(0, 5);
+    display.print(F("Per-Note"));
+    display.setCursor(0, 15);
+    display.print(F("Parameter Lock"));
+    display.setTextSize(2);
+    display.setCursor(0, 29);
+    display.print(firmware3Settings.parameterLockChannel == 0
+        ? F("OFF") : F("CH "));
+    if (firmware3Settings.parameterLockChannel != 0) {
+      display.print(firmware3Settings.parameterLockChannel);
+    }
     return;
   }
   String value;
@@ -8844,6 +8975,20 @@ void processDeferredUiActions() {
         routerEditStage == ROUTER_STAGE_LIST &&
         routerMenuCursor == ROUTER_BACK_SLOT) {
       routerMenuCursor = 0;
+    }
+    if (ui.selectedSetting == SET_NOTE_CC &&
+        noteCcUiStage == NOTE_CC_UI_LIST &&
+        noteCcCursor > NOTE_CC_SLOT_COUNT) {
+      noteCcCursor = 0;
+    }
+    if (ui.selectedSetting == SET_CC_MAP &&
+        ccRemapUiStage == CC_REMAP_UI_LIST &&
+        ccRemapCursor > CC_REMAP_SLOT_COUNT) {
+      ccRemapCursor = 0;
+    }
+    if (ui.selectedSetting == SET_MUTE_SOLO &&
+        muteSoloCursor == 7) {
+      muteSoloCursor = 0;
     }
     saveStorageIfAuto();
   }
