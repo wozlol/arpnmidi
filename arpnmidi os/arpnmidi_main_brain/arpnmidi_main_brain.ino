@@ -5243,6 +5243,15 @@ bool directCancelEnabled(uint8_t settingId) {
          settingId == SET_PUSH_MODE;
 }
 
+bool settingStoredInCurrentPreset(uint8_t settingId) {
+  return settingId != SET_PANIC && settingId != SET_LOAD_PRESET &&
+         settingId != SET_SAVE_PRESET;
+}
+
+void saveCurrentPresetIfSettingStored(uint8_t settingId) {
+  if (settingStoredInCurrentPreset(settingId)) saveStorageIfAuto();
+}
+
 void beginSubmenuParameterEdit(SubmenuUiState &state) {
   state.editing = true;
   if (submenuCancelEnabled(ui.selectedSetting)) {
@@ -5290,6 +5299,7 @@ bool finishSubmenuOrEdit(SubmenuUiState &state, uint8_t backCursor) {
     state.editing = false;
     finishSubmenuParameterEdit();
     clearEditCancelSelection();
+    saveCurrentPresetIfSettingStored(ui.selectedSetting);
     return true;
   }
   if (state.cursor != backCursor) {
@@ -5319,12 +5329,14 @@ bool handleFirmware3SubmenuClick() {
         arpMenuUi.editing = false;
         finishSubmenuParameterEdit();
         clearEditCancelSelection();
+        saveCurrentPresetIfSettingStored(SET_ARP_MODE);
       }
       else if (arpMenuUi.cursor == 8) {
         if (customArpLearning) finishCustomArpLearn();
         else startCustomArpLearn();
       } else if (arpMenuUi.cursor == 9) {
         clearCustomArpPattern();
+        saveCurrentPresetIfSettingStored(SET_ARP_MODE);
       } else if (arpMenuUi.cursor == 10) {
         ui.menuMode = MENU_SELECT;
         ui.deferredExitWork = true;
@@ -5346,11 +5358,13 @@ bool handleFirmware3SubmenuClick() {
         }
         parameterLockUi.editing = false;
         finishSubmenuParameterEdit();
+        saveCurrentPresetIfSettingStored(SET_PARAMETER_LOCK);
       }
       else if (parameterLockUi.cursor == 0) beginSubmenuParameterEdit(parameterLockUi);
       else if (parameterLockUi.cursor == 1) {
         parameterLockCount = 0;
         for (ParameterLockEntry &entry : parameterLocks) entry = ParameterLockEntry{};
+        saveCurrentPresetIfSettingStored(SET_PARAMETER_LOCK);
       } else {
         ui.menuMode = MENU_SELECT;
         ui.deferredExitWork = true;
@@ -5364,6 +5378,7 @@ bool handleFirmware3SubmenuClick() {
         }
         scaleUi.editing = false;
         finishSubmenuParameterEdit();
+        saveCurrentPresetIfSettingStored(SET_FORCE_SCALE);
       } else if (scaleUi.cursor == 0) {
         beginSubmenuParameterEdit(scaleUi);
       } else if (scaleUi.cursor <= 12) {
@@ -5371,6 +5386,7 @@ bool handleFirmware3SubmenuClick() {
         if ((firmware3Settings.userScaleMask & bit) == 0 ||
             firmware3Settings.userScaleMask != bit) {
           firmware3Settings.userScaleMask ^= bit;
+          saveCurrentPresetIfSettingStored(SET_FORCE_SCALE);
         }
       } else {
         ui.menuMode = MENU_SELECT;
@@ -5378,7 +5394,10 @@ bool handleFirmware3SubmenuClick() {
       }
       return true;
     case SET_LIVE_CC:
-      if (liveCcEditing) liveCcEditing = false;
+      if (liveCcEditing) {
+        liveCcEditing = false;
+        saveCurrentPresetIfSettingStored(SET_LIVE_CC);
+      }
       else if (liveCcCursor < 2) liveCcEditing = true;
       else {
         ui.menuMode = MENU_SELECT;
@@ -5395,7 +5414,10 @@ bool handleFirmware3SubmenuClick() {
       ui.menuMode = MENU_SELECT;
       return true;
     case SET_GLOBAL:
-      if (globalUi.editing) globalUi.editing = false;
+      if (globalUi.editing) {
+        globalUi.editing = false;
+        saveCurrentPresetIfSettingStored(SET_GLOBAL);
+      }
       else if (globalUi.cursor == 8) resetCurrentPresetToFactory();
       else if (globalUi.cursor == 9) {
         ui.menuMode = MENU_SELECT;
