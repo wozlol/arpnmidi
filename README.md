@@ -159,12 +159,12 @@ The current top-level screens are:
 
 1. BPM
 2. Swing
-3. Arp
-4. Velocity
-5. Notelength
-6. Stutter
-7. Echo
-8. Quick Jump
+3. Quick Jump
+4. Stutter
+5. Echo
+6. Arp
+7. Velocity
+8. Notelength
 9. Main Input
 10. Arp Out
 11. Drumroll

@@ -283,15 +283,15 @@ struct SubmenuUiState {
 enum SettingId : uint8_t {
   SET_BPM = 0,
   SET_SWING,
+  SET_QUICK_JUMP,
+  SET_STUTTER,
+  SET_ECHO,
   SET_ARP_MODE,
   SET_LIVE_VELOCITY,
   SET_LIVE_NOTE_LENGTH,
-  SET_STUTTER,
-  SET_ECHO,
   SET_DIVISION,
   SET_VELOCITY,
   SET_LENGTH,
-  SET_QUICK_JUMP,
   SET_INPUT_CH,
   SET_ARP_OUT_CH,
   SET_DRUM_MAGIC,
@@ -397,6 +397,12 @@ constexpr uint8_t NOTE_CC_SLOT_COUNT = 16;
 constexpr uint8_t NOTE_CC_CANCEL_CHANNEL = 17;
 constexpr uint8_t NOTE_CC_CANCEL_VALUE = 128;
 constexpr uint8_t NOTE_CC_CANCEL_BEHAVIOR = 2;
+constexpr uint8_t FOUR_BUTTON_CANCEL_CHANNEL = 17;
+constexpr uint8_t FOUR_BUTTON_CANCEL_KIND = 2;
+constexpr uint8_t FOUR_BUTTON_CANCEL_NUMBER = 128;
+constexpr uint8_t FOUR_BUTTON_CANCEL_BEHAVIOR = 3;
+constexpr uint8_t DIRECT_CANCEL_CHANNEL = 17;
+constexpr uint8_t DIRECT_CANCEL_CC_CHANNEL = 18;
 
 enum FeatureKnobId : uint8_t {
   FEATURE_KNOB_VELOCITY_BASE = 0,
@@ -1043,6 +1049,10 @@ SubmenuUiState parameterLockUi;
 SubmenuUiState chordUi;
 SubmenuUiState scaleUi;
 SubmenuUiState globalUi;
+bool submenuEditBackupValid = false;
+uint8_t submenuEditBackupSetting = 0;
+uint8_t submenuEditBackupCursor = 0;
+int16_t submenuEditBackupValue = 0;
 uint8_t liveVelocityTarget = 0;
 uint8_t liveNoteLengthTarget = 0;
 uint8_t stutterTarget = 0;
@@ -1055,6 +1065,7 @@ uint8_t fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
 uint8_t fourButtonUiCursor = 0;
 uint8_t fourButtonEditButton = 0;
 bool fourButtonLearnActive = false;
+CustomButtonConfig fourButtonEditBackup{};
 bool physicalButtonState[4];
 uint32_t physicalButtonChangeMs[4];
 bool customButtonLatch[4];
@@ -1114,8 +1125,8 @@ const int8_t kEncoderTransitionTable[16] = {
 };
 
 const char *const kSettingNames[SETTING_COUNT] = {
-  "1 BPM", "2 SWING", "3 ARP", "4 VELOCITY", "5 NOTELENGT", "6 STUTTER", "7 ECHO",
-  "", "", "", "8 QUICK JUMP", "9 MAIN INPUT", "10 ARP OUT", "11 DRUMROLL",
+  "1 BPM", "2 SWING", "3 QUICK JUMP", "4 STUTTER", "5 ECHO", "6 ARP",
+  "7 VELOCITY", "8 NOTELENGT", "", "", "", "9 MAIN INPUT", "10 ARP OUT", "11 DRUMROLL",
   "12 DRUMDIV", "13 BASS", "14 MONO", "15 THRU OUT", "16 RNDRBN", "17 ROUTER",
   "18 FEATURES", "19 CC MAP", "20 NOTE>CC", "21 IN CC >", "22 SCRNSVR",
   "23 EYE/PUSH", "24 EYE MODE", "25 PUSH", "26 4BUTTON", "27 LOOPER",
@@ -3870,13 +3881,13 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_SWING: return 75;
     case SET_ARP_MODE:
       if (!arpMenuUi.editing) return 10;
-      if (arpMenuUi.cursor == 0) return ARP_SELECTION_COUNT - 1;
-      if (arpMenuUi.cursor == 1) return ARP_DIVISION_FOLLOW_DRUM;
-      if (arpMenuUi.cursor == 2) return 127;
-      if (arpMenuUi.cursor == 3) return 100;
-      if (arpMenuUi.cursor == 4) return 4;
-      if (arpMenuUi.cursor == 7) return 5;
-      return 1;
+      if (arpMenuUi.cursor == 0) return ARP_SELECTION_COUNT;
+      if (arpMenuUi.cursor == 1) return ARP_DIVISION_FOLLOW_DRUM + 1;
+      if (arpMenuUi.cursor == 2) return 128;
+      if (arpMenuUi.cursor == 3) return 101;
+      if (arpMenuUi.cursor == 4) return 5;
+      if (arpMenuUi.cursor == 7) return 6;
+      return 2;
     case SET_LIVE_VELOCITY:
       if (!liveVelocityUi.editing) return 3;
       if (liveVelocityUi.cursor == 0) return LIVE_TARGET_COUNT - 1;
@@ -3889,26 +3900,26 @@ int16_t settingRangeMax(uint8_t settingId) {
       return 200;
     case SET_STUTTER:
       if (!stutterUi.editing) return 4;
-      if (stutterUi.cursor == 0) return LIVE_TARGET_COUNT - 1;
-      if (stutterUi.cursor == 1) return 1;
-      if (stutterUi.cursor == 2) return STUTTER_LENGTH_COUNT - 1;
-      return 16;
+      if (stutterUi.cursor == 0) return LIVE_TARGET_COUNT;
+      if (stutterUi.cursor == 1) return 2;
+      if (stutterUi.cursor == 2) return STUTTER_LENGTH_COUNT;
+      return 17;
     case SET_ECHO:
       if (!echoUi.editing) return 6;
-      if (echoUi.cursor == 0) return LIVE_TARGET_COUNT - 1;
-      if (echoUi.cursor == 1) return 1;
-      if (echoUi.cursor == 2) return 100;
-      if (echoUi.cursor == 5) return 32;
-      return STUTTER_LENGTH_COUNT - 1;
+      if (echoUi.cursor == 0) return LIVE_TARGET_COUNT;
+      if (echoUi.cursor == 1) return 2;
+      if (echoUi.cursor == 2) return 101;
+      if (echoUi.cursor == 5) return 33;
+      return STUTTER_LENGTH_COUNT;
     case SET_DIVISION: return ARP_DIVISION_FOLLOW_DRUM;
     case SET_VELOCITY: return 127;
     case SET_LENGTH: return 100;
     case SET_QUICK_JUMP:
       if (!quickJumpUi.editing) return 4;
-      if (quickJumpUi.cursor < 2) return 16;
-      return 1;
-    case SET_INPUT_CH: return 16;
-    case SET_ARP_OUT_CH: return 16;
+      if (quickJumpUi.cursor < 2) return 17;
+      return 2;
+    case SET_INPUT_CH: return DIRECT_CANCEL_CHANNEL;
+    case SET_ARP_OUT_CH: return DIRECT_CANCEL_CHANNEL;
     case SET_DRUM_MAGIC:
       if (!drumMagicUi.editing) return 7;
       if (drumMagicUi.cursor == 0 || drumMagicUi.cursor == 1 || drumMagicUi.cursor == 5) return 1;
@@ -3917,8 +3928,8 @@ int16_t settingRangeMax(uint8_t settingId) {
       return 120;
     case SET_BASS_CH:
       if (!bassUi.editing) return 2;
-      return bassUi.cursor == 0 ? 48 : 127;
-    case SET_THRU_OUT_CH: return 16;
+      return bassUi.cursor == 0 ? 49 : 128;
+    case SET_THRU_OUT_CH: return DIRECT_CANCEL_CHANNEL;
     case SET_RND_RBN: return RND_RBN_BACK_SLOT;
     case SET_ROUTER:
       if (routerEditStage == ROUTER_STAGE_DEST) return 16;
@@ -3944,18 +3955,18 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (noteCcUiStage == NOTE_CC_UI_BEHAVIOR) return NOTE_CC_CANCEL_BEHAVIOR;
       return NOTE_CC_CANCEL_VALUE;
     case SET_LEGATO_CH: return 16;
-    case SET_CC_OUT_CH: return 17;
-    case SET_SENSOR_CH: return 16;
-    case SET_SENSOR_MODE: return SENSOR_MODE_COUNT - 1;
-    case SET_PUSH_MODE: return SENSOR_MODE_COUNT - 1;
+    case SET_CC_OUT_CH: return DIRECT_CANCEL_CC_CHANNEL;
+    case SET_SENSOR_CH: return DIRECT_CANCEL_CHANNEL;
+    case SET_SENSOR_MODE: return SENSOR_MODE_COUNT;
+    case SET_PUSH_MODE: return SENSOR_MODE_COUNT;
     case SET_FOUR_BUTTON:
       if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) return 4;
       if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) return FOUR_BUTTON_MODE_COUNT - 1;
       if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) return 4;
-      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) return 16;
-      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) return 1;
-      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) return 127;
-      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_BEHAVIOR) return CUSTOM_BUTTON_BEHAVIOR_COUNT - 1;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) return FOUR_BUTTON_CANCEL_CHANNEL;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) return FOUR_BUTTON_CANCEL_KIND;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) return FOUR_BUTTON_CANCEL_NUMBER;
+      if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_BEHAVIOR) return FOUR_BUTTON_CANCEL_BEHAVIOR;
       if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) return 5;
       return 2;
     case SET_LOOP_BARS:
@@ -4179,7 +4190,31 @@ void cancelNoteCcEdit() {
   ui.dirty = true;
 }
 
+void cancelFourButtonCustomEdit() {
+  if (fourButtonEditButton < 4) {
+    featureControls.customButtons[fourButtonEditButton] = fourButtonEditBackup;
+  }
+  fourButtonLearnActive = false;
+  fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_LIST;
+  fourButtonUiCursor = fourButtonEditButton;
+  ui.dirty = true;
+}
+
 void setSettingValueRaw(uint8_t settingId, int16_t value) {
+  if (submenuCancelEnabled(settingId) && ui.menuMode == MENU_EDIT) {
+    SubmenuUiState *state = submenuStateForSetting(settingId);
+    if (state && state->editing && value == settingRangeMax(settingId)) {
+      cancelSubmenuParameterEdit(*state);
+      return;
+    }
+  }
+  if (directCancelEnabled(settingId) && ui.menuMode == MENU_EDIT &&
+      value == settingRangeMax(settingId)) {
+    ui.hasPendingEdit = false;
+    ui.menuMode = MENU_SELECT;
+    ui.dirty = true;
+    return;
+  }
   switch (settingId) {
     case SET_BPM:
       settings.manualBpm = constrain(value, 20, 300);
@@ -4410,13 +4445,29 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) {
         featureControls.fourButtonMode = clampU8(value, 0, FOUR_BUTTON_MODE_COUNT - 1);
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
+        if (value == FOUR_BUTTON_CANCEL_CHANNEL) {
+          cancelFourButtonCustomEdit();
+          break;
+        }
         featureControls.customButtons[fourButtonEditButton].channel = clampU8(value, 1, 16);
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_KIND) {
+        if (value == FOUR_BUTTON_CANCEL_KIND) {
+          cancelFourButtonCustomEdit();
+          break;
+        }
         featureControls.customButtons[fourButtonEditButton].kind = value
             ? TRIGGER_BINDING_NOTE : TRIGGER_BINDING_CC;
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
+        if (value == FOUR_BUTTON_CANCEL_NUMBER) {
+          cancelFourButtonCustomEdit();
+          break;
+        }
         featureControls.customButtons[fourButtonEditButton].number = clampU8(value, 0, 127);
       } else {
+        if (value == FOUR_BUTTON_CANCEL_BEHAVIOR) {
+          cancelFourButtonCustomEdit();
+          break;
+        }
         featureControls.customButtons[fourButtonEditButton].behavior =
             clampU8(value, 0, CUSTOM_BUTTON_BEHAVIOR_COUNT - 1);
       }
@@ -5012,8 +5063,8 @@ void applySettingDelta(int delta, bool fastStep) {
   const int maxValue = settingRangeMax(id);
 
   if (id == SET_BPM) next = constrain(next, 20, 300);
-  else if (id == SET_INPUT_CH || id == SET_SENSOR_CH) next = constrain(next, 1, 16);
-  else if (id == SET_CC_OUT_CH) next = wrapIndex(next - 1, 17) + 1;
+  else if (id == SET_INPUT_CH || id == SET_SENSOR_CH) next = wrapIndex(next - 1, maxValue) + 1;
+  else if (id == SET_CC_OUT_CH) next = wrapIndex(next - 1, maxValue) + 1;
   else if (id == SET_ROUTER && routerEditStage == ROUTER_STAGE_DEST) next = wrapIndex(next - 1, 16) + 1;
   else if (id == SET_ROUTER && routerEditStage == ROUTER_STAGE_TRANSPOSE) {
     next = constrain(next, 0, ROUTER_TRANSPOSE_MAX - ROUTER_TRANSPOSE_MIN);
@@ -5028,7 +5079,10 @@ void applySettingDelta(int delta, bool fastStep) {
     next = wrapIndex(next - 1, 16) + 1;
   }
   else if (id == SET_FOUR_BUTTON && fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_CHANNEL) {
-    next = wrapIndex(next - 1, 16) + 1;
+    next = wrapIndex(next - 1, FOUR_BUTTON_CANCEL_CHANNEL) + 1;
+  }
+  else if (id == SET_FOUR_BUTTON && fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
+    next = wrapIndex(next, FOUR_BUTTON_CANCEL_NUMBER + 1);
   }
   else if (id == SET_NOTE_CC && (noteCcUiStage == NOTE_CC_UI_INPUT_CHANNEL ||
                                  noteCcUiStage == NOTE_CC_UI_OUTPUT_CHANNEL)) {
@@ -5043,7 +5097,7 @@ void applySettingDelta(int delta, bool fastStep) {
   }
   else if ((id == SET_QUICK_JUMP && quickJumpUi.editing && quickJumpUi.cursor < 2) ||
            (id == SET_DRUM_MAGIC && drumMagicUi.editing && drumMagicUi.cursor == 2)) {
-    next = wrapIndex(next - 1, 16) + 1;
+    next = wrapIndex(next - 1, maxValue) + 1;
   }
   else if ((id == SET_ARP_MODE && arpMenuUi.editing &&
             (arpMenuUi.cursor == 2 || arpMenuUi.cursor == 3 || arpMenuUi.cursor == 4)) ||
@@ -5072,6 +5126,13 @@ void applySettingDelta(int delta, bool fastStep) {
   else next = wrapIndex(next, maxValue + 1);
 
   if (next == oldValue) return;
+  if (ui.menuMode == MENU_EDIT && directCancelEnabled(id) && next == maxValue) {
+    ui.hasPendingEdit = false;
+    ui.menuMode = MENU_SELECT;
+    ui.dirty = true;
+    markActivity();
+    return;
+  }
   if (settingNeedsPanic(id) && ui.menuMode == MENU_EDIT) {
     ui.hasPendingEdit = true;
     ui.pendingSetting = id;
@@ -5106,13 +5167,62 @@ void resetCurrentPresetToFactory() {
   ui.dirty = true;
 }
 
+bool submenuCancelEnabled(uint8_t settingId) {
+  return settingId == SET_QUICK_JUMP || settingId == SET_ARP_MODE ||
+         settingId == SET_STUTTER || settingId == SET_ECHO ||
+         settingId == SET_BASS_CH;
+}
+
+bool directCancelEnabled(uint8_t settingId) {
+  return settingId == SET_INPUT_CH || settingId == SET_ARP_OUT_CH ||
+         settingId == SET_THRU_OUT_CH || settingId == SET_CC_OUT_CH ||
+         settingId == SET_SENSOR_CH || settingId == SET_SENSOR_MODE ||
+         settingId == SET_PUSH_MODE;
+}
+
+void beginSubmenuParameterEdit(SubmenuUiState &state) {
+  state.editing = true;
+  if (submenuCancelEnabled(ui.selectedSetting)) {
+    submenuEditBackupSetting = ui.selectedSetting;
+    submenuEditBackupCursor = state.cursor;
+    submenuEditBackupValue = getSettingValueRaw(ui.selectedSetting);
+    submenuEditBackupValid = true;
+  }
+}
+
+void finishSubmenuParameterEdit() {
+  submenuEditBackupValid = false;
+}
+
+void cancelSubmenuParameterEdit(SubmenuUiState &state) {
+  if (submenuEditBackupValid &&
+      submenuEditBackupSetting == ui.selectedSetting &&
+      submenuEditBackupCursor == state.cursor) {
+    const int16_t restoreValue = submenuEditBackupValue;
+    submenuEditBackupValid = false;
+    setSettingValueRaw(ui.selectedSetting, restoreValue);
+  }
+  state.editing = false;
+  ui.dirty = true;
+}
+
+SubmenuUiState *submenuStateForSetting(uint8_t settingId) {
+  if (settingId == SET_QUICK_JUMP) return &quickJumpUi;
+  if (settingId == SET_ARP_MODE) return &arpMenuUi;
+  if (settingId == SET_STUTTER) return &stutterUi;
+  if (settingId == SET_ECHO) return &echoUi;
+  if (settingId == SET_BASS_CH) return &bassUi;
+  return nullptr;
+}
+
 bool finishSubmenuOrEdit(SubmenuUiState &state, uint8_t backCursor) {
   if (state.editing) {
     state.editing = false;
+    finishSubmenuParameterEdit();
     return true;
   }
   if (state.cursor != backCursor) {
-    state.editing = true;
+    beginSubmenuParameterEdit(state);
     return true;
   }
   ui.menuMode = MENU_SELECT;
@@ -5123,7 +5233,10 @@ bool finishSubmenuOrEdit(SubmenuUiState &state, uint8_t backCursor) {
 bool handleFirmware3SubmenuClick() {
   switch (ui.selectedSetting) {
     case SET_ARP_MODE:
-      if (arpMenuUi.editing) arpMenuUi.editing = false;
+      if (arpMenuUi.editing) {
+        arpMenuUi.editing = false;
+        finishSubmenuParameterEdit();
+      }
       else if (arpMenuUi.cursor == 8) {
         if (customArpLearning) finishCustomArpLearn();
         else startCustomArpLearn();
@@ -5132,7 +5245,7 @@ bool handleFirmware3SubmenuClick() {
       } else if (arpMenuUi.cursor == 10) {
         ui.menuMode = MENU_SELECT;
         ui.deferredExitWork = true;
-      } else arpMenuUi.editing = true;
+      } else beginSubmenuParameterEdit(arpMenuUi);
       return true;
     case SET_LIVE_VELOCITY: return finishSubmenuOrEdit(liveVelocityUi, 3);
     case SET_LIVE_NOTE_LENGTH: return finishSubmenuOrEdit(liveNoteLengthUi, 3);
@@ -5358,6 +5471,7 @@ void activateClickAction() {
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) {
         if (fourButtonUiCursor < 4) {
           fourButtonEditButton = fourButtonUiCursor;
+          fourButtonEditBackup = featureControls.customButtons[fourButtonEditButton];
           fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_CHANNEL;
         } else {
           fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
@@ -8263,6 +8377,12 @@ void drawNoteCcScreen() {
 void drawFourButtonScreen() {
   display.setTextSize(1);
   display.setCursor(0, 8);
+  if (ui.menuMode == MENU_SELECT) {
+    static const char *const modes[] = {"CUSTOM", "LOOPER", "CHORD MEM"};
+    display.setTextSize(2);
+    display.print(modes[featureControls.fourButtonMode]);
+    return;
+  }
   if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) {
     static const char *const items[] = {"MODE", "CUSTOM", "LOOPER", "CHORD MEM", "BACK"};
     display.setTextSize(2);
@@ -9046,6 +9166,23 @@ void processDeferredUiActions() {
     if (ui.selectedSetting == SET_MUTE_SOLO &&
         muteSoloCursor == 7) {
       muteSoloCursor = 0;
+    }
+    if (ui.selectedSetting == SET_FOUR_BUTTON) {
+      if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN && fourButtonUiCursor == 4) {
+        fourButtonUiCursor = 0;
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST &&
+                 fourButtonUiCursor >= 4) {
+        fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+        fourButtonUiCursor = 0;
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER &&
+                 fourButtonUiCursor == 5) {
+        fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+        fourButtonUiCursor = 0;
+      } else if (fourButtonUiStage == FOUR_BUTTON_UI_CHORD &&
+                 fourButtonUiCursor == 2) {
+        fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
+        fourButtonUiCursor = 0;
+      }
     }
     saveStorageIfAuto();
   }
