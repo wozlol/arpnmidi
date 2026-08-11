@@ -122,8 +122,8 @@ constexpr uint16_t PUSH_RAW_FAR = 682;    // lightest press that should still re
 constexpr uint16_t PUSH_RAW_OFF = 1023;   // no-touch/off region starts here
 constexpr uint8_t PUSH_CURVE_POWER = 2;   // >1 makes light presses less aggressive
 
-constexpr uint32_t SCREEN_SAVER_IDLE_MS = 60000UL;
 constexpr uint32_t SCREEN_SAVER_REFRESH_MS = 4000UL;
+constexpr uint8_t SCREEN_SAVER_BACK_SLOT = 6;
 constexpr uint32_t LONG_HOLD_PANIC_MS = 2000UL;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 25UL;
 
@@ -1069,6 +1069,7 @@ uint8_t chordLearnSlot = 0;
 bool extendedPresetDirty = false;
 bool screenSaverSeeded = false;
 bool screenSaverForceNow = false;
+uint8_t screenSaverCursor = 0;
 uint32_t panicConfirmedUntilMs = 0;
 uint8_t usbSysexBuffer[16];
 uint8_t usbSysexLength = 0;
@@ -1634,6 +1635,21 @@ String midiChannelLabel(uint8_t value, bool allowOff = false) {
 String ccChannelLabel(uint8_t value) {
   if (value == 17) return "ALL3";
   return midiChannelLabel(value);
+}
+
+uint32_t screenSaverTimeoutMs(uint8_t selection) {
+  static constexpr uint32_t timeouts[] = {
+    0UL, 30000UL, 60000UL, 120000UL, 300000UL, 600000UL
+  };
+  if (selection >= SCREEN_SAVER_BACK_SLOT) return 0;
+  return timeouts[selection];
+}
+
+String screenSaverLabel(uint8_t selection) {
+  static const char *const labels[] = {
+    "OFF", "30S", "1 MIN", "2 MIN", "5 MIN", "10 MIN", "BACK"
+  };
+  return labels[clampU8(selection, 0, SCREEN_SAVER_BACK_SLOT)];
 }
 
 uint8_t divNoteSlotToDivision(uint8_t slot) {
@@ -3972,7 +3988,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       return 0;
     case SET_LOAD_PRESET: return PRESET_COUNT - 1;
     case SET_SAVE_PRESET: return PRESET_COUNT - 1;
-    case SET_SCREEN_SAVER: return 2;
+    case SET_SCREEN_SAVER: return SCREEN_SAVER_BACK_SLOT;
     default: return 0;
   }
 }
@@ -4146,7 +4162,9 @@ int16_t getSettingValueRaw(uint8_t settingId) {
     case SET_SAVE_PRESET:
       if (ui.menuMode == MENU_SELECT && ui.selectedSetting == SET_SAVE_PRESET) return storage.currentPreset;
       return settings.savePreset;
-    case SET_SCREEN_SAVER: return screenSaverForceNow ? 2 : settings.screenSaver;
+    case SET_SCREEN_SAVER:
+      return ui.menuMode == MENU_EDIT && ui.selectedSetting == SET_SCREEN_SAVER
+          ? screenSaverCursor : settings.screenSaver;
     default: return 0;
   }
 }
@@ -4473,11 +4491,10 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_LOAD_PRESET: settings.loadPreset = clampU8(value, 0, PRESET_COUNT - 1); break;
     case SET_SAVE_PRESET: settings.savePreset = clampU8(value, 0, PRESET_COUNT - 1); break;
     case SET_SCREEN_SAVER:
-      if (value >= 2) {
-        screenSaverForceNow = true;
-      } else {
+      screenSaverCursor = clampU8(value, 0, SCREEN_SAVER_BACK_SLOT);
+      if (screenSaverCursor < SCREEN_SAVER_BACK_SLOT) {
         screenSaverForceNow = false;
-        settings.screenSaver = clampU8(value, 0, 1);
+        settings.screenSaver = screenSaverCursor;
       }
       break;
     default: break;
@@ -4554,7 +4571,7 @@ void sanitizeSettings(Settings &s) {
   s.loadPreset = clampU8(s.loadPreset, 0, PRESET_COUNT - 1);
   s.savePreset = clampU8(s.savePreset, 0, PRESET_COUNT - 1);
   s.reserved = 0;
-  s.screenSaver = clampU8(s.screenSaver, 0, 1);
+  s.screenSaver = clampU8(s.screenSaver, 0, SCREEN_SAVER_BACK_SLOT - 1);
   for (uint8_t i = 0; i < DIV_NOTE_SLOT_COUNT; ++i) {
     if (s.divNoteChannels[i] > 16) s.divNoteChannels[i] = 0;
     if (s.divNoteNotes[i] > 127) s.divNoteNotes[i] = 0xFF;
@@ -4931,7 +4948,7 @@ Settings defaultSettings() {
   s.loadPreset = 0;
   s.savePreset = 0;
   s.reserved = 0;
-  s.screenSaver = 1;
+  s.screenSaver = 2;
   for (uint8_t i = 0; i < DIV_NOTE_SLOT_COUNT; ++i) {
     s.divNoteChannels[i] = 0;
     s.divNoteNotes[i] = 0xFF;
@@ -5159,6 +5176,15 @@ bool handleFirmware3SubmenuClick() {
       else {
         ui.menuMode = MENU_SELECT;
         ui.deferredExitWork = true;
+      }
+      return true;
+    case SET_SCREEN_SAVER:
+      if (screenSaverCursor == SCREEN_SAVER_BACK_SLOT) {
+        ui.menuMode = MENU_SELECT;
+        ui.deferredExitWork = true;
+      } else {
+        settings.screenSaver = screenSaverCursor;
+        screenSaverForceNow = false;
       }
       return true;
     case SET_GLOBAL:
@@ -5526,6 +5552,10 @@ void activateClickAction() {
     if (ui.selectedSetting == SET_CHORD) chordUi = SubmenuUiState{};
     if (ui.selectedSetting == SET_FORCE_SCALE) scaleUi = SubmenuUiState{};
     if (ui.selectedSetting == SET_GLOBAL) globalUi = SubmenuUiState{};
+    if (ui.selectedSetting == SET_SCREEN_SAVER) {
+      screenSaverCursor = clampU8(settings.screenSaver, 0, SCREEN_SAVER_BACK_SLOT - 1);
+      screenSaverForceNow = false;
+    }
     if (ui.selectedSetting == SET_LIVE_CC) {
       liveCcCursor = 0;
       liveCcEditing = false;
@@ -7363,9 +7393,7 @@ String settingValueString(uint8_t id) {
     case SET_LOAD_PRESET: return String(v + 1);
     case SET_SAVE_PRESET: return String(v + 1);
     case SET_SCREEN_SAVER:
-      if (v == 0) return "OFF";
-      if (v == 1) return "AUTO";
-      return "NOW";
+      return screenSaverLabel(v);
     case SET_PANIC: return "PANIC";
     default: return "";
   }
@@ -7437,6 +7465,11 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
     case SET_PARAMETER_LOCK: {
       static const char *const names[] = {"CHANNEL", "CLEAR", "BACK"};
       index = parameterLockUi.cursor; label = names[index]; return true;
+    }
+    case SET_SCREEN_SAVER: {
+      index = screenSaverCursor;
+      label = screenSaverLabel(index);
+      return true;
     }
     case SET_CHORD: {
       static const char *const names[] = {"ON/OFF", "POSITION 1", "POSITION 2", "POSITION 3", "POSITION 4", "BACK"};
@@ -7698,6 +7731,7 @@ bool submenuBackSelected() {
     case SET_FORCE_SCALE: return scaleUi.cursor == 13;
     case SET_LIVE_CC: return liveCcCursor == 2;
     case SET_GLOBAL: return globalUi.cursor == 9;
+    case SET_SCREEN_SAVER: return screenSaverCursor == SCREEN_SAVER_BACK_SLOT;
     default: return false;
   }
 }
@@ -7735,6 +7769,7 @@ bool parameterEditActive() {
     case SET_RND_RBN:
     case SET_DIV_NOTES:
     case SET_MUTE_SOLO:
+    case SET_SCREEN_SAVER:
       return false;
     default:
       // Plain top-level settings enter MENU_EDIT directly to change their
@@ -8918,7 +8953,8 @@ void drawScreenSaver() {
 
 void renderDisplayIfNeeded() {
   const uint32_t now = millis();
-  if (screenSaverForceNow || (settings.screenSaver && (now - ui.lastActivityMs) > SCREEN_SAVER_IDLE_MS)) {
+  const uint32_t saverTimeout = screenSaverTimeoutMs(settings.screenSaver);
+  if (screenSaverForceNow || (saverTimeout && (now - ui.lastActivityMs) > saverTimeout)) {
     if (!ui.inSaver || (now - ui.lastRenderMs) > SCREEN_SAVER_REFRESH_MS) {
       ui.inSaver = true;
       drawScreenSaver();
