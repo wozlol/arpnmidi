@@ -5603,6 +5603,7 @@ void activateClickAction() {
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_MODE) {
         fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
         fourButtonUiCursor = 0;
+        saveStorageIfAuto();
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_LIST) {
         if (fourButtonUiCursor < 4) {
           fourButtonEditButton = fourButtonUiCursor;
@@ -5612,6 +5613,7 @@ void activateClickAction() {
           featureControls.fourButtonMode = FOUR_BUTTON_CUSTOM;
           fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
           fourButtonUiCursor = 0;
+          saveStorageIfAuto();
         } else {
           fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
           fourButtonUiCursor = 0;
@@ -5636,6 +5638,7 @@ void activateClickAction() {
         else {
           fourButtonUiStage = FOUR_BUTTON_UI_CUSTOM_LIST;
           fourButtonUiCursor = fourButtonEditButton;
+          saveStorageIfAuto();
         }
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) {
         if (fourButtonUiCursor < 5) {
@@ -5644,10 +5647,12 @@ void activateClickAction() {
             LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
           };
           featureControls.looperButtonActions ^= masks[fourButtonUiCursor];
+          saveStorageIfAuto();
         } else if (fourButtonUiCursor == FOUR_BUTTON_LOOPER_DONE_SLOT) {
           featureControls.fourButtonMode = FOUR_BUTTON_LOOPER;
           fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
           fourButtonUiCursor = 0;
+          saveStorageIfAuto();
         } else {
           fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
           fourButtonUiCursor = 0;
@@ -5665,6 +5670,7 @@ void activateClickAction() {
           chordClearArmed = false;
           fourButtonUiStage = FOUR_BUTTON_UI_MAIN;
           fourButtonUiCursor = 0;
+          saveStorageIfAuto();
         } else {
           chordLearnArmed = false;
           chordClearArmed = false;
