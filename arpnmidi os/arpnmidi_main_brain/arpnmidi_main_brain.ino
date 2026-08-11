@@ -7709,7 +7709,7 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
     case SET_LOOP_BARS: {
       static const char *const names[] = {
         "TRACK", "LENGTH", "AUTO REC", "TIME TRAV", "NEW TRACK",
-        "QUANT", "REC CC", "MIDI TRANS", "BACK"
+        "QUANT", "REC CC", "TRNSPRT", "BACK"
       };
       index = looperSettingsUi.cursor; label = names[index]; return true;
     }
@@ -8964,7 +8964,7 @@ String loopLengthSelectionName(uint8_t selection) {
 void drawLooperSettingsScreen() {
   static const char *const names[] = {
     "TRACK", "LENGTH", "AUTO REC", "TIME TRAV", "NEW TRACK",
-    "QUANT", "REC CC", "MIDI TRANS", "BACK"
+    "QUANT", "REC CC", "TRNSPRT", "BACK"
   };
   const uint8_t track = multitrackLooper.selectedTrack();
   if (ui.menuMode == MENU_SELECT) {
