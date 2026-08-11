@@ -5541,6 +5541,25 @@ void activateClickAction() {
       ui.dirty = true;
       markActivity();
       return;
+    } else if (ui.selectedSetting == SET_DIV_NOTES) {
+      if (divNotesCursor == DIV_NOTE_RESET_SLOT) {
+        clearDivNoteAssignments();
+        divNotesCursor = 0;
+        saveStorageIfAuto();
+        encoder.switchIgnoreUntilMs = millis() + 120;
+        ui.dirty = true;
+        markActivity();
+        return;
+      }
+      if (divNotesCursor == DIV_NOTE_BACK_SLOT) {
+        divNotesCursor = 0;
+        ui.menuMode = MENU_SELECT;
+        ui.deferredExitWork = true;
+        encoder.switchIgnoreUntilMs = millis() + 120;
+        ui.dirty = true;
+        markActivity();
+        return;
+      }
     } else if (ui.selectedSetting == SET_FOUR_BUTTON) {
       if (fourButtonUiStage == FOUR_BUTTON_UI_MAIN) {
         if (fourButtonUiCursor == 0) fourButtonUiStage = FOUR_BUTTON_UI_MODE;
@@ -5942,6 +5961,20 @@ bool captureDivNoteAssignment(uint8_t channel1, uint8_t note, bool on) {
   ui.dirty = true;
   markActivity(false);
   return true;
+}
+
+void clearDivNoteAssignments() {
+  for (uint8_t i = 0; i < DIV_NOTE_SLOT_COUNT; ++i) {
+    settings.divNoteChannels[i] = 0;
+    settings.divNoteNotes[i] = 0xFF;
+    featureControls.drumRollKinds[i] = TRIGGER_BINDING_OFF;
+    divNoteHeld[i] = false;
+    physicalDivNoteHeld[i] = false;
+    loopDivNoteHeld[i] = false;
+    divNoteHeldStamp[i] = 0;
+  }
+  settings.divNotePlusNote = 0xFF;
+  divNotePressCounter = 0;
 }
 
 uint8_t handleDivNoteOverride(uint8_t sourcePort, uint8_t channel1, uint8_t &note,
@@ -7593,7 +7626,7 @@ String settingValueString(uint8_t id) {
       if (routerEditStage == ROUTER_STAGE_LIST && v == ROUTER_BACK_SLOT) return "BACK";
       return "";
     case SET_DIV_NOTES:
-      if (v == DIV_NOTE_PLUS_SLOT) return "+NOTE";
+      if (v == DIV_NOTE_PLUS_SLOT) return "+HAT NOTE";
       if (v == DIV_NOTE_RESET_SLOT) return "RESET";
       if (v == DIV_NOTE_BACK_SLOT) return "BACK";
       return kDivisionNames[divNoteSlotToDivision(v)];
@@ -8232,9 +8265,9 @@ void drawDivNotesScreen(uint8_t cursor) {
   if (cursor == DIV_NOTE_PLUS_SLOT) {
     display.setTextSize(2);
     display.setCursor(0, 8);
-    display.print(F("+NOTE"));
-    display.setTextSize(1);
-    display.setCursor(0, 38);
+    display.print(F("+HAT NOTE"));
+    display.setTextSize(2);
+    display.setCursor(0, 34);
     if (settings.divNotePlusNote == 0xFF) {
       display.print(F("BLANK"));
     } else {
@@ -8261,7 +8294,7 @@ void drawDivNotesScreen(uint8_t cursor) {
   display.setTextSize(2);
   display.setCursor(0, 3);
   display.print(kDivisionNames[divId]);
-  display.setTextSize(1);
+  display.setTextSize(2);
   display.setCursor(0, 28);
   const uint8_t mapCh = settings.divNoteChannels[cursor];
   const uint8_t mapNote = settings.divNoteNotes[cursor];
@@ -8271,7 +8304,7 @@ void drawDivNotesScreen(uint8_t cursor) {
   } else if (bindingKind == TRIGGER_BINDING_CC) {
     display.print(F("CH "));
     display.print(mapCh);
-    display.print(F(" CC "));
+    display.print(F(" CC"));
     display.print(mapNote);
   } else {
     display.print(F("CH "));
@@ -8279,8 +8312,6 @@ void drawDivNotesScreen(uint8_t cursor) {
     display.print(F(" "));
     display.print(kNoteNames[mapNote % 12]);
     display.print(mapNote / 12);
-    display.print(F(" "));
-    display.print(mapNote);
   }
 }
 
@@ -9278,17 +9309,8 @@ void processDeferredUiActions() {
       ui.hasPendingEdit = false;
     }
     if (ui.selectedSetting == SET_DIV_NOTES && divNotesCursor == DIV_NOTE_RESET_SLOT) {
-      for (uint8_t i = 0; i < DIV_NOTE_SLOT_COUNT; ++i) {
-        settings.divNoteChannels[i] = 0;
-        settings.divNoteNotes[i] = 0xFF;
-        featureControls.drumRollKinds[i] = TRIGGER_BINDING_OFF;
-        divNoteHeld[i] = false;
-        physicalDivNoteHeld[i] = false;
-        loopDivNoteHeld[i] = false;
-        divNoteHeldStamp[i] = 0;
-      }
-      settings.divNotePlusNote = 0xFF;
-      divNotePressCounter = 0;
+      clearDivNoteAssignments();
+      divNotesCursor = 0;
       ui.dirty = true;
     }
     if (ui.selectedSetting == SET_ROUTER || ui.selectedSetting == SET_BASS_CH ||
