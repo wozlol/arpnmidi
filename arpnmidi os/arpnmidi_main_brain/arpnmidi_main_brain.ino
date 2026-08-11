@@ -5660,9 +5660,11 @@ void activateClickAction() {
     } else if (ui.selectedSetting == SET_MUTE_SOLO) {
       if (muteSoloCursor < arpnmidi3::kLoopTrackCount) {
         if (muteSoloModeSolo) {
-          multitrackLooper.setSolo(muteSoloCursor,
-              !multitrackLooper.track(muteSoloCursor).solo,
-              releaseMultitrackOutput, nullptr);
+          const bool enable = !multitrackLooper.track(muteSoloCursor).solo;
+          for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+            multitrackLooper.setSolo(track, enable && track == muteSoloCursor,
+                                     releaseMultitrackOutput, nullptr);
+          }
         } else {
           multitrackLooper.setMuted(muteSoloCursor,
               !multitrackLooper.track(muteSoloCursor).muted,
