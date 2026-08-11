@@ -3024,6 +3024,7 @@ bool setLoopTrackLengthSelection(uint8_t track, uint8_t selection) {
     return false;
   }
   if (multitrackLooper.track(track).count > 0) loopStorageDirty = true;
+  saveStorageIfAuto();
   refreshLoopUiState();
   return true;
 }
@@ -4514,18 +4515,33 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       break;
     case SET_LOOP_BARS:
       if (!looperSettingsUi.editing) looperSettingsUi.cursor = clampU8(value, 0, 8);
-      else if (looperSettingsUi.cursor == 0) multitrackLooper.selectTrack(
-          clampU8(value, 0, arpnmidi3::kLoopTrackCount - 1));
+      else if (looperSettingsUi.cursor == 0) {
+        multitrackLooper.selectTrack(clampU8(value, 0, arpnmidi3::kLoopTrackCount - 1));
+        loopStorageDirty = true;
+      }
       else if (looperSettingsUi.cursor == 1) {
         const uint8_t track = multitrackLooper.selectedTrack();
         setLoopTrackLengthSelection(track, value);
-      } else if (looperSettingsUi.cursor == 2) firmware3Settings.looperAutoRec = value ? 1 : 0;
-      else if (looperSettingsUi.cursor == 3) firmware3Settings.looperTimeTravel = value ? 1 : 0;
-      else if (looperSettingsUi.cursor == 4) firmware3Settings.looperTrackMode =
+      } else if (looperSettingsUi.cursor == 2) {
+        firmware3Settings.looperAutoRec = value ? 1 : 0;
+        saveStorageIfAuto();
+      } else if (looperSettingsUi.cursor == 3) {
+        firmware3Settings.looperTimeTravel = value ? 1 : 0;
+        saveStorageIfAuto();
+      } else if (looperSettingsUi.cursor == 4) {
+        firmware3Settings.looperTrackMode =
           clampU8(value, 0, static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
-      else if (looperSettingsUi.cursor == 5) firmware3Settings.looperQuantize = clampU8(value, 0, 5);
-      else if (looperSettingsUi.cursor == 6) firmware3Settings.looperRecordCc = value ? 1 : 0;
-      else firmware3Settings.looperMidiTransport = value ? 1 : 0;
+        saveStorageIfAuto();
+      } else if (looperSettingsUi.cursor == 5) {
+        firmware3Settings.looperQuantize = clampU8(value, 0, 5);
+        saveStorageIfAuto();
+      } else if (looperSettingsUi.cursor == 6) {
+        firmware3Settings.looperRecordCc = value ? 1 : 0;
+        saveStorageIfAuto();
+      } else {
+        firmware3Settings.looperMidiTransport = value ? 1 : 0;
+        saveStorageIfAuto();
+      }
       break;
     case SET_MUTE_SOLO:
       muteSoloCursor = clampU8(value, 0, 7);
@@ -6013,6 +6029,7 @@ bool captureDivNoteAssignment(uint8_t channel1, uint8_t note, bool on) {
   } else if (divNotesCursor == DIV_NOTE_PLUS_SLOT) {
     settings.divNotePlusNote = note;
   }
+  saveStorageIfAuto();
   ui.dirty = true;
   markActivity(false);
   return true;
@@ -6505,6 +6522,7 @@ bool captureDrumRollCcAssignment(uint8_t channel, uint8_t cc) {
   settings.divNoteChannels[divNotesCursor] = channel;
   settings.divNoteNotes[divNotesCursor] = cc;
   featureControls.drumRollKinds[divNotesCursor] = TRIGGER_BINDING_CC;
+  saveStorageIfAuto();
   markActivity(false);
   ui.dirty = true;
   return true;
