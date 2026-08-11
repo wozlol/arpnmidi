@@ -26,12 +26,11 @@
   - Build this with the Arduino-Pico core, Tools->USB Stack = Adafruit TinyUSB,
     and CPU speed = 120 MHz or 240 MHz.
   - The display is only redrawn when something visible changes.
-  - Settings persist in flash-backed EEPROM and LittleFS with 16 preset slots.
+  - Settings persist in a single LittleFS state file with 16 preset slots.
 */
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <EEPROM.h>
 #include <LittleFS.h>
 #include <hardware/watchdog.h>
 #include <MIDI.h>
@@ -152,14 +151,17 @@ constexpr uint8_t STUTTER_SOURCE_BASE = 224;
 constexpr uint8_t HISTORY_OUTPUT_TARGET_BASE = 16;
 constexpr uint32_t ARP_KEY_SYNC_CAPTURE_MS = 6UL;
 constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
-// Firmware 3 is still prototype firmware, so an incompatible preset-map change deliberately
-// receives a new schema identity instead of carrying migration code. A mismatch installs all
-// factory presets. Increment this value whenever the persisted Settings layout or meaning changes.
-constexpr uint16_t PRESET_SCHEMA_MAGIC = 0xF309;
-constexpr uint32_t EXTENDED_PRESET_SCHEMA_MAGIC = 0xF3090001UL;
+// All persistent state lives in the filesystem. There is no second store: the
+// RP2040 has no real EEPROM, and its emulation rewrites a whole 4 KB flash
+// sector for any change, so a two-byte screen memory cost as much as a preset.
+//
+// Firmware 3 is still prototype firmware, so an incompatible layout change
+// deliberately receives a new schema identity instead of carrying migration
+// code. A mismatch installs all factory presets. Increment this value whenever
+// the persisted layout or meaning changes.
+constexpr uint32_t DEVICE_STATE_MAGIC = 0xF3090100UL;
 constexpr uint8_t MAX_CUSTOM_ARP_EVENTS = 32;
 constexpr uint32_t LOOP_FILE_MAGIC = 0x4C503304UL;  // "LP3" file, schema 4
-constexpr size_t EEPROM_BYTES = 4096;
 constexpr uint8_t DRUM_AFTERTOUCH_MIN_VELOCITY = 42;  // 33% floor.
 
 decltype(Serial2) &DinSerial = Serial2;
@@ -187,6 +189,8 @@ void arpNoteOffs();
 void drumArpNoteOffs();
 void saveStorage();
 void saveStorageIfAuto();
+void markLoopStorageDirty();
+void markExtendedPresetDirty();
 void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t velocity, bool on,
                  bool recordForLoop = true);
 void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2);
@@ -196,8 +200,7 @@ void clearSavedLoopStorage();
 void saveLoopStorageIfAny();
 void loadSavedLoopStorage();
 bool initializeExtendedPresetStorage(bool forceFactoryDefaults);
-bool loadExtendedPreset(uint8_t slot);
-bool saveExtendedPreset(uint8_t slot);
+bool savePresetLearnedContent(uint8_t slot);
 void noteThrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on);
 void noteArpOffPassthrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on);
 void thruOutputRefOn(uint8_t sourcePort, uint8_t outNote, uint8_t velocity);
@@ -497,6 +500,11 @@ constexpr uint8_t LOOPER_BUTTON_MUTE = 0x02;
 constexpr uint8_t LOOPER_BUTTON_SOLO = 0x04;
 constexpr uint8_t LOOPER_BUTTON_DELETE = 0x08;
 constexpr uint8_t LOOPER_BUTTON_UNDO = 0x10;
+// Two master rec/play triggers inside this window read as one double gesture.
+constexpr uint32_t LOOP_MASTER_DOUBLE_TAP_MS = 1000UL;
+// A looper button keeps stepping through its enabled actions only while it is
+// tapped repeatedly. This is how long one gesture stays open.
+constexpr uint32_t LOOPER_BUTTON_CYCLE_MS = 1500;
 
 struct FeatureKnobBinding {
   uint8_t channel = 0;
@@ -728,11 +736,16 @@ struct Firmware3Settings {
   LiveTargetSettings liveTargets[LIVE_TARGET_COUNT];
 };
 
-struct StorageImage {
-  uint16_t magic;
-  uint8_t currentPreset;
-  Settings presets[PRESET_COUNT];
-  uint8_t autoSave;
+// The file is a small header followed by one complete record per preset slot.
+// Nothing about a preset is split across two stores any more.
+struct DeviceStateHeader {
+  uint32_t magic = DEVICE_STATE_MAGIC;
+  uint16_t recordSize = 0;
+  uint8_t presetCount = PRESET_COUNT;
+  uint8_t currentPreset = 0;
+  uint8_t autoSave = 1;
+  uint8_t lastScreen = 0xFF;
+  uint8_t reserved[2] = {0, 0};
 };
 
 struct LoopFileTrack {
@@ -741,8 +754,13 @@ struct LoopFileTrack {
   uint32_t generation = 0;
   uint8_t flags = 0;
   uint8_t lengthSelection = 2;
-  uint8_t reserved[2] = {0, 0};
+  // Where this track's cycle begins inside the shared transport cycle, stored
+  // as a fraction of its own length so the field fits the space the format
+  // already reserved. An older file reads as zero, which is the top of the
+  // cycle and matches how those loops used to restart.
+  uint16_t startPhase = 0;
 };
+static_assert(sizeof(LoopFileTrack) == 16, "Loop file track layout changed");
 
 struct LoopFileHeader {
   uint32_t magic = LOOP_FILE_MAGIC;
@@ -761,11 +779,10 @@ struct LoopFileEvent {
   uint8_t data2 = 0;
 };
 
-constexpr size_t UI_SCREEN_STORAGE_OFFSET = EEPROM_BYTES - 2;
-constexpr uint8_t UI_SCREEN_STORAGE_MAGIC = 0xA7;
 constexpr uint32_t UI_SCREEN_SAVE_IDLE_MS = 2000UL;
-static_assert(sizeof(StorageImage) <= UI_SCREEN_STORAGE_OFFSET,
-              "Preset storage overlaps saved UI state");
+// The header is written raw at the front of the state file, so its layout is
+// pinned. Any change to it needs a new schema identity.
+static_assert(sizeof(DeviceStateHeader) == 12, "Device state header layout changed");
 
 struct LoopCcPruneState {
   bool used = false;
@@ -820,19 +837,14 @@ struct CustomArpVoice {
   uint64_t offUs = 0;
 };
 
-struct ExtendedPresetRecord {
+// Everything one preset slot owns, in one record.
+struct PresetRecord {
+  Settings settings;
   Firmware3Settings firmware3;
   FeatureControlSettings featureControls;
   CustomArpPattern customArp;
   uint16_t parameterLockCount = 0;
   ParameterLockEntry parameterLocks[MAX_PARAMETER_LOCKS];
-};
-
-struct ExtendedPresetFileHeader {
-  uint32_t magic = EXTENDED_PRESET_SCHEMA_MAGIC;
-  uint16_t recordSize = sizeof(ExtendedPresetRecord);
-  uint8_t presetCount = PRESET_COUNT;
-  uint8_t reserved = 0;
 };
 
 struct EncoderState {
@@ -885,7 +897,9 @@ struct UiState {
   int16_t pendingValue = 0;
 };
 
-StorageImage storage;
+DeviceStateHeader storage;
+bool storageError = false;
+bool factoryResetRequested = false;
 Settings settings;
 Firmware3Settings firmware3Settings;
 FeatureControlSettings featureControls;
@@ -938,7 +952,10 @@ bool featureButtonCcHeld[FEATURE_BUTTON_COUNT];
 uint8_t activeStutterLengthSelection[LIVE_TARGET_COUNT];
 uint64_t stutterStopUs[LIVE_TARGET_COUNT];
 uint8_t multitrackPlaybackHeld[arpnmidi3::kLoopTrackCount][16][16];
+uint16_t multitrackPlaybackHeldCount[arpnmidi3::kLoopTrackCount];
 bool loopStorageDirty = false;
+uint32_t loopStorageDirtyMs = 0;
+uint32_t loopMasterLastTriggerMs = 0;
 bool loopStorageError = false;
 uint8_t loopTrackLengthSelection[arpnmidi3::kLoopTrackCount] = {2, 3, 4, 5};
 LoopCcPruneState loopCcPrune[64];
@@ -1044,7 +1061,18 @@ bool noteCcLearnActive = false;
 bool noteCcToggleState[NOTE_CC_SLOT_COUNT];
 NoteCcMapEntry noteCcEditBackup{};
 uint8_t muteSoloCursor = 0;
-bool muteSoloModeSolo = false;
+// Loop Mix applies one action to whichever track is picked. The action itself
+// is a mode chosen from the bottom row.
+enum LoopMixMode : uint8_t {
+  LOOP_MIX_SOLO = 0,
+  LOOP_MIX_MUTE,
+  LOOP_MIX_CLEAR,
+  LOOP_MIX_ARM,
+  LOOP_MIX_MODE_COUNT
+};
+constexpr uint8_t LOOP_MIX_MODE_BASE = arpnmidi3::kLoopTrackCount;
+constexpr uint8_t LOOP_MIX_BACK_SLOT = LOOP_MIX_MODE_BASE + LOOP_MIX_MODE_COUNT;
+uint8_t loopMixMode = LOOP_MIX_MUTE;
 SubmenuUiState arpMenuUi;
 SubmenuUiState liveVelocityUi;
 SubmenuUiState liveNoteLengthUi;
@@ -1085,12 +1113,14 @@ uint8_t customButtonFlappyValue[4];
 uint32_t customButtonFlappyMs[4];
 uint8_t looperButtonStep[4];
 uint8_t lastLooperButton = 0xFF;
+uint32_t looperButtonLastMs = 0;
 bool chordButtonPlaying[4];
 bool chordLearnArmed = false;
 bool chordClearArmed = false;
 bool chordLearnActive = false;
 uint8_t chordLearnSlot = 0;
 bool extendedPresetDirty = false;
+uint32_t extendedPresetDirtyMs = 0;
 bool screenSaverSeeded = false;
 bool screenSaverForceNow = false;
 uint8_t screenSaverCursor = 0;
@@ -2413,14 +2443,14 @@ void finishCustomArpLearn() {
   customArpLearning = false;
   customArpWaitingForFirstNote = false;
   memset(customArpLearnActiveEvent, 0xFF, sizeof(customArpLearnActiveEvent));
-  extendedPresetDirty = true;
+  markExtendedPresetDirty();
   ui.dirty = true;
 }
 
 void clearCustomArpPattern() {
   customArpPattern = CustomArpPattern{};
   customArpPattern.lengthSelection = firmware3Settings.customArpLength;
-  extendedPresetDirty = true;
+  markExtendedPresetDirty();
   ui.dirty = true;
 }
 
@@ -3023,7 +3053,7 @@ bool setLoopTrackLengthSelection(uint8_t track, uint8_t selection) {
     loopTrackLengthSelection[track] = previous;
     return false;
   }
-  if (multitrackLooper.track(track).count > 0) loopStorageDirty = true;
+  if (multitrackLooper.track(track).count > 0) markLoopStorageDirty();
   saveStorageIfAuto();
   refreshLoopUiState();
   return true;
@@ -3065,19 +3095,55 @@ void releaseMultitrackOutput(void *, uint8_t track) {
       }
     }
   }
+  multitrackPlaybackHeldCount[track] = 0;
 }
 
+// Every downstream owner of a loop note (thru mapping, chord extras, arp
+// mapping, and the final output reference count) assumes one Note Off per Note
+// On for a given track, channel, and note.  Recorded material cannot guarantee
+// that on its own: overlapping duplicate notes from chords, the arp, or drum
+// generation collapse into a single stored Note Off, and an overdub pass can
+// store a Note Off whose Note On was recorded in an earlier pass.  This gate
+// makes the emitted stream balanced no matter what the track holds.
 void emitMultitrackEvent(void *, uint8_t track, const arpnmidi3::LoopMidiEvent &event) {
   if (track >= arpnmidi3::kLoopTrackCount) return;
   const uint8_t type = event.status & 0xF0;
+  const uint8_t sourcePort = LOOP_TRACK_SOURCE_BASE + track;
   if ((type == 0x90 || type == 0x80) && event.data1 <= 127) {
     uint8_t &bits = multitrackPlaybackHeld[track][event.status & 0x0F][event.data1 >> 3];
-    const uint8_t mask = 1U << (event.data1 & 0x07);
-    if (type == 0x90 && event.data2 > 0) bits |= mask;
-    else bits &= static_cast<uint8_t>(~mask);
+    const uint8_t mask = static_cast<uint8_t>(1U << (event.data1 & 0x07));
+    const bool sounding = (bits & mask) != 0;
+    if (type == 0x90 && event.data2 > 0) {
+      if (sounding) {
+        // Retrigger: release the sounding copy first so ownership stays paired.
+        routeIncomingChannelMessage(sourcePort,
+                                    static_cast<uint8_t>(0x80 | (event.status & 0x0F)),
+                                    event.data1, 0);
+      } else {
+        ++multitrackPlaybackHeldCount[track];
+      }
+      bits |= mask;
+    } else {
+      if (!sounding) return;  // Nothing is holding this note, so drop the orphan.
+      bits &= static_cast<uint8_t>(~mask);
+      if (multitrackPlaybackHeldCount[track] > 0) --multitrackPlaybackHeldCount[track];
+    }
   }
-  routeIncomingChannelMessage(LOOP_TRACK_SOURCE_BASE + track,
-                              event.status, event.data1, event.data2);
+  routeIncomingChannelMessage(sourcePort, event.status, event.data1, event.data2);
+}
+
+// A track that is no longer playable must not keep notes latched.  Clearing,
+// replacing, muting, soloing, and stopping all release through the looper, but
+// a track can also lose its events underneath a sounding note, and a silent
+// track never reaches the loop boundary that would release it.
+void releaseSilencedMultitrackOutputs() {
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    if (multitrackPlaybackHeldCount[track] == 0) continue;
+    const arpnmidi3::LoopTrackState &state = multitrackLooper.track(track);
+    if (multitrackLooper.playing() && state.count > 0 && state.lengthUs > 0 &&
+        multitrackLooper.audible(track)) continue;
+    releaseMultitrackOutput(nullptr, track);
+  }
 }
 
 void configureMultitrackLooper() {
@@ -3094,7 +3160,7 @@ bool capturePrunedLoopCcEvent(uint8_t channel, uint8_t cc, uint8_t value) {
   const arpnmidi3::LoopMidiEvent event{0,
       static_cast<uint8_t>(0xB0 | ((channel - 1) & 0x0F)), cc, value};
   if (!multitrackLooper.capture(time_us_64(), event)) return false;
-  loopStorageDirty = true;
+  markLoopStorageDirty();
   return true;
 }
 
@@ -3163,6 +3229,18 @@ void recordLoopCc(uint8_t sourcePort, uint8_t channel, uint8_t cc, uint8_t value
   if (direction != 0) state->direction = direction;
 }
 
+// A cleared track counts as free space, never as material to layer onto. It is
+// still distinct from an empty one, because Undo can bring it back.
+bool loopTrackHasContent(uint8_t track) {
+  return multitrackLooper.trackHasContent(track);
+}
+
+bool loopTrackIsCleared(uint8_t track) {
+  return track < arpnmidi3::kLoopTrackCount &&
+         multitrackLooper.track(track).count > 0 &&
+         multitrackLooper.track(track).hidden;
+}
+
 void armSelectedMultitrack(bool overdub) {
   configureMultitrackLooper();
   const uint8_t track = multitrackLooper.selectedTrack();
@@ -3175,6 +3253,24 @@ void armSelectedMultitrack(bool overdub) {
   ui.dirty = true;
 }
 
+// Every working-track change goes through here.  A record that is armed but not
+// yet started follows the selection, so the track shown on screen and the track
+// about to be written can never disagree.  A pass that is already recording
+// keeps its track: only stopping it can move the write target.
+void selectLooperTrack(uint8_t track) {
+  if (track >= arpnmidi3::kLoopTrackCount) return;
+  const bool retarget = multitrackLooper.recordingArmed() &&
+                        multitrackLooper.recordingTrack() != track;
+  multitrackLooper.selectTrack(track);
+  if (retarget) {
+    configureMultitrackLooper();
+    multitrackLooper.armRecord(track, multitrackFixedLengthUs(track), false);
+    resetLoopCcPruning();
+  }
+  refreshLoopUiState();
+  ui.dirty = true;
+}
+
 void selectNextAutoLooperTrackAfterCapture() {
   const auto mode = multitrackLooper.trackMode();
   if (mode == arpnmidi3::LoopTrackMode::Manual) return;
@@ -3182,28 +3278,98 @@ void selectNextAutoLooperTrackAfterCapture() {
   uint8_t target = multitrackLooper.selectedTrack();
   bool foundEmpty = false;
   for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
-    const arpnmidi3::LoopTrackState &state = multitrackLooper.track(i);
-    if (state.count == 0 || state.hidden) {
-      target = i;
-      foundEmpty = true;
-      break;
-    }
+    if (loopTrackHasContent(i)) continue;
+    target = i;
+    foundEmpty = true;
+    break;
   }
   if (!foundEmpty) target = multitrackLooper.oldestPopulatedTrack();
-  multitrackLooper.selectTrack(target);
+  selectLooperTrack(target);
+}
+
+// Layers treats the four tracks as one instrument, so its clear works on all of
+// them at once.  The gesture only undoes when there is nothing left to clear,
+// which keeps a single press from flipping the whole loop back after one track
+// was cleared on its own.
+void clearOrUndoAllLoopTracks() {
+  bool anyLive = false;
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    anyLive |= loopTrackHasContent(track);
+  }
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    if (anyLive) multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
+    else multitrackLooper.undoClear(track);
+  }
 }
 
 bool finishActiveMultitrackRecording(uint64_t nowUs, bool startIfStopped) {
   if (!multitrackLooper.recording() && !multitrackLooper.recordingArmed()) return false;
   flushLoopCcPruning(true);
   const bool captured = multitrackLooper.finishRecording(nowUs);
-  loopStorageDirty |= captured;
+  if (captured) markLoopStorageDirty();
   if (captured && multitrackLooper.recordingTrack() == 0) adoptFreeTrackOneTempo();
   if (captured && startIfStopped && !multitrackLooper.playing()) {
     multitrackLooper.start(nowUs);
   }
   if (captured) selectNextAutoLooperTrackAfterCapture();
   return captured;
+}
+
+// Loop Mix Arm mode. Picking a track selects it and arms a record on it, or
+// takes the arm back off if that track is already the pending target. A stopped
+// or paused transport also starts here, the same way the master trigger does,
+// so the mix screen is a complete way to work.
+void toggleLooperArmForTrack(uint8_t track) {
+  if (track >= arpnmidi3::kLoopTrackCount) return;
+  if ((multitrackLooper.recordingArmed() || multitrackLooper.recording()) &&
+      multitrackLooper.recordingTrack() == track) {
+    finishActiveMultitrackRecording(time_us_64(), true);
+    return;
+  }
+  selectLooperTrack(track);
+  if (!multitrackLooper.playing() && multitrackLooper.hasAnyData()) {
+    multitrackLooper.resume(time_us_64());
+  }
+  armSelectedMultitrack(false);
+}
+
+// Clicking Solo or Mute when that mode is already in force resets the whole
+// mix: every track comes back unmuted and unsoloed. It is the one action on
+// this screen that is not about a single picked track.
+void resetLoopMixMuteAndSolo() {
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    multitrackLooper.setMuted(track, false, releaseMultitrackOutput, nullptr);
+    multitrackLooper.setSolo(track, false, releaseMultitrackOutput, nullptr);
+  }
+  markLoopStorageDirty();
+  releaseSilencedMultitrackOutputs();
+  refreshLoopUiState();
+}
+
+void applyLoopMixModeToTrack(uint8_t track) {
+  if (track >= arpnmidi3::kLoopTrackCount) return;
+  if (loopMixMode == LOOP_MIX_SOLO) {
+    const bool enable = !multitrackLooper.track(track).solo;
+    for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+      multitrackLooper.setSolo(i, enable && i == track, releaseMultitrackOutput, nullptr);
+    }
+    markLoopStorageDirty();
+  } else if (loopMixMode == LOOP_MIX_MUTE) {
+    multitrackLooper.setMuted(track, !multitrackLooper.track(track).muted,
+                              releaseMultitrackOutput, nullptr);
+    markLoopStorageDirty();
+  } else if (loopMixMode == LOOP_MIX_CLEAR) {
+    // Clear and undo are the same gesture: a track that was cleared and not
+    // recorded over comes back on the next press.
+    if (multitrackLooper.track(track).hidden) multitrackLooper.undoClear(track);
+    else multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
+    selectLooperTrack(track);
+    markLoopStorageDirty();
+  } else {
+    toggleLooperArmForTrack(track);
+  }
+  releaseSilencedMultitrackOutputs();
+  refreshLoopUiState();
 }
 
 bool beginTimeTravelImport() {
@@ -3250,7 +3416,7 @@ void finishTimeTravelImport() {
     multitrackLooper.start(timeTravelImport.boundaryUs);
   }
   timeTravelImport.active = false;
-  loopStorageDirty = true;
+  markLoopStorageDirty();
   refreshLoopUiState();
   ui.dirty = true;
 }
@@ -3305,9 +3471,55 @@ void tickTimeTravelImport() {
   }
 }
 
+// Two triggers inside the window count as one double gesture, from whichever
+// source drove them: the push, the sensor, a mapped CC, or a button.
+bool loopMasterDoubleTap() {
+  const uint32_t now = millis();
+  const bool isDouble = loopMasterLastTriggerMs != 0 &&
+                        (now - loopMasterLastTriggerMs) <= LOOP_MASTER_DOUBLE_TAP_MS;
+  loopMasterLastTriggerMs = isDouble ? 0 : now;
+  return isDouble;
+}
+
+// The double gesture is the retake control. It safe clears a layer and arms it
+// so the part can be played again, and a second double brings the old layer
+// back and plays it. Layers steps back to the layer just recorded, because that
+// is the one a performer means. Manual and Parts Auto Solo stay on the working
+// track: moving between tracks there is the performer's decision alone.
+void handleMultitrackMasterDoubleTap() {
+  const uint64_t nowUs = time_us_64();
+  const bool layers = multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers;
+  if (multitrackLooper.recording()) finishActiveMultitrackRecording(nowUs, true);
+  else if (multitrackLooper.recordingArmed()) multitrackLooper.cancelRecording();
+
+  uint8_t target = multitrackLooper.selectedTrack();
+  if (layers && !loopTrackIsCleared(target) && !loopTrackHasContent(target)) {
+    target = multitrackLooper.newestPopulatedTrack();
+  }
+
+  if (loopTrackIsCleared(target)) {
+    multitrackLooper.undoClear(target);
+    selectLooperTrack(target);
+    if (!multitrackLooper.playing()) multitrackLooper.resume(nowUs);
+    if (layers) selectNextAutoLooperTrackAfterCapture();
+  } else {
+    selectLooperTrack(target);
+    multitrackLooper.safeClear(target, releaseMultitrackOutput, nullptr);
+    armSelectedMultitrack(false);
+  }
+  releaseSilencedMultitrackOutputs();
+  markLoopStorageDirty();
+  refreshLoopUiState();
+  ui.dirty = true;
+}
+
 void handleMultitrackRecPlay() {
   const uint64_t nowUs = time_us_64();
   configureMultitrackLooper();
+  if (loopMasterDoubleTap()) {
+    handleMultitrackMasterDoubleTap();
+    return;
+  }
   if (firmware3Settings.looperTimeTravel && !multitrackLooper.recordingArmed() &&
       !multitrackLooper.recording()) {
     beginTimeTravelImport();
@@ -3322,12 +3534,12 @@ void handleMultitrackRecPlay() {
   } else {
     const auto mode = multitrackLooper.trackMode();
     const uint8_t target = multitrackLooper.selectedTrack();
-    armSelectedMultitrack(multitrackLooper.track(target).count > 0);
+    armSelectedMultitrack(loopTrackHasContent(target));
     if (mode == arpnmidi3::LoopTrackMode::PartsAutoSolo) {
       for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
         multitrackLooper.setSolo(i, i == target, releaseMultitrackOutput, nullptr);
       }
-      loopStorageDirty = true;
+      markLoopStorageDirty();
     }
   }
   refreshLoopUiState();
@@ -3344,21 +3556,14 @@ void handleMultitrackStopDelete() {
     loopSafeClearArmed = true;
   } else if (loopSafeClearArmed && multitrackLooper.usedEvents() > 0) {
     if (multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers) {
-      bool anyHidden = false;
-      for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
-        anyHidden |= multitrackLooper.track(i).hidden;
-      }
-      for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
-        if (anyHidden) multitrackLooper.undoClear(i);
-        else multitrackLooper.safeClear(i, releaseMultitrackOutput, nullptr);
-      }
+      clearOrUndoAllLoopTracks();
     } else if (multitrackLooper.track(track).hidden) {
       multitrackLooper.undoClear(track);
     } else {
       multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
     }
     loopSafeClearArmed = false;
-    loopStorageDirty = true;
+    markLoopStorageDirty();
   } else {
     loopSafeClearArmed = multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers
         ? multitrackLooper.usedEvents() > 0 : multitrackLooper.track(track).count > 0;
@@ -3379,7 +3584,7 @@ void recordLoopNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t 
         !multitrackLooper.recording() && !multitrackLooper.recordingArmed() && on && velocity > 0) {
       armSelectedMultitrack(false);
     }
-    if (multitrackLooper.capture(nowUs, event)) loopStorageDirty = true;
+    if (multitrackLooper.capture(nowUs, event)) markLoopStorageDirty();
     refreshLoopUiState();
   }
 }
@@ -3392,11 +3597,19 @@ void tickLooper() {
   multitrackLooper.tick(time_us_64(), emitMultitrackEvent,
                         releaseMultitrackOutput, nullptr);
   if (wasRecording && !multitrackLooper.recording()) {
-    loopStorageDirty = true;
-    if (multitrackLooper.recordingTrack() == 0) adoptFreeTrackOneTempo();
-    selectNextAutoLooperTrackAfterCapture();
+    // A fixed length ran out on its own.  Treat it exactly like a hand-stopped
+    // pass: only a layer that actually captured something advances the working
+    // track, so an empty timed pass leaves the performer where they were.
+    const uint8_t recorded = multitrackLooper.recordingTrack();
+    const bool captured = multitrackLooper.track(recorded).count > 0;
+    if (captured) markLoopStorageDirty();
+    if (captured) {
+      if (recorded == 0) adoptFreeTrackOneTempo();
+      selectNextAutoLooperTrackAfterCapture();
+    }
     refreshLoopUiState();
   }
+  releaseSilencedMultitrackOutputs();
 }
 
 void tickEcho() {
@@ -3502,30 +3715,58 @@ void tickStutter() {
   }
 }
 
+// A flash write stalls the musical core, so writes wait for a quiet moment.
+// Waiting forever is worse than a short stall: a performer who leaves loops
+// running and then powers down would lose everything they changed. A write that
+// has been pending without further changes for this long therefore goes ahead
+// even while the loop plays. Recording and Time Travel import are the only
+// states that always block, because a stall there lands inside the take.
+constexpr uint32_t STORAGE_SETTLE_FORCE_MS = 5000UL;
+
+bool storageWriteAlwaysBlocked() {
+  return multitrackLooper.recording() || multitrackLooper.recordingArmed() ||
+         timeTravelImport.active;
+}
+
+bool storageWriteEngineIdle() {
+  return !multitrackLooper.playing() && !anyPhysicalInputNotesHeld() &&
+         heldDrumCount == 0 && !arpAnyPlaybackActive();
+}
+
+bool storageWriteReady(uint32_t dirtySinceMs, uint32_t minimumPendingMs) {
+  if (storageWriteAlwaysBlocked()) return false;
+  const uint32_t pending = millis() - dirtySinceMs;
+  if (pending < minimumPendingMs) return false;
+  return storageWriteEngineIdle() || pending >= STORAGE_SETTLE_FORCE_MS;
+}
+
+void markLoopStorageDirty() {
+  loopStorageDirty = true;
+  loopStorageDirtyMs = millis();
+}
+
+void markExtendedPresetDirty() {
+  extendedPresetDirty = true;
+  extendedPresetDirtyMs = millis();
+}
+
 void pollLoopStoragePersistence() {
-  if (!loopStorageDirty || multitrackLooper.recording() || multitrackLooper.recordingArmed() ||
-      multitrackLooper.playing() || timeTravelImport.active) return;
-  if (anyPhysicalInputNotesHeld() || heldDrumCount > 0 || arpAnyPlaybackActive()) return;
+  if (!loopStorageDirty || !storageWriteReady(loopStorageDirtyMs, 750UL)) return;
   saveLoopStorageIfAny();
 }
 
 void pollPresetStoragePersistence() {
-  if (!presetStorageDirty || millis() - presetStorageDirtyMs < 750UL) return;
-  if (ui.deferredExitWork || multitrackLooper.recording() ||
-      multitrackLooper.recordingArmed() || multitrackLooper.playing() ||
-      timeTravelImport.active) return;
-  if (anyPhysicalInputNotesHeld() || heldDrumCount > 0 || arpAnyPlaybackActive()) return;
+  if (!presetStorageDirty || ui.deferredExitWork) return;
+  if (!storageWriteReady(presetStorageDirtyMs, 750UL)) return;
   saveStorage();
   extendedPresetDirty = false;
 }
 
 void pollExtendedPresetPersistence() {
   if (!extendedPresetDirty || chordLearnActive || customArpLearning ||
-      ui.deferredExitWork || multitrackLooper.recording() ||
-      multitrackLooper.recordingArmed() || multitrackLooper.playing() ||
-      timeTravelImport.active) return;
-  if (anyPhysicalInputNotesHeld() || heldDrumCount > 0 || arpAnyPlaybackActive()) return;
-  if (saveExtendedPreset(storage.currentPreset)) extendedPresetDirty = false;
+      ui.deferredExitWork) return;
+  if (!storageWriteReady(extendedPresetDirtyMs, 750UL)) return;
+  if (savePresetLearnedContent(storage.currentPreset)) extendedPresetDirty = false;
 }
 
 void clearSavedLoopStorage() {
@@ -3584,6 +3825,10 @@ void saveLoopStorageIfAny() {
                                 (state.solo ? 0x02 : 0) |
                                 (state.hidden ? 0x04 : 0);
     header.tracks[track].lengthSelection = loopTrackLengthSelection[track];
+    header.tracks[track].startPhase = state.lengthUs > 0
+        ? static_cast<uint16_t>((static_cast<uint64_t>(state.startOffsetUs) * 65536ULL) /
+                                state.lengthUs)
+        : 0;
   }
   header.checksum = 0;
   bool ok = file.write(reinterpret_cast<const uint8_t *>(&header), sizeof(header)) == sizeof(header);
@@ -3634,9 +3879,11 @@ void loadSavedLoopStorage() {
   }
   for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
     const LoopFileTrack &saved = header.tracks[track];
+    const uint32_t startOffsetUs = static_cast<uint32_t>(
+        (static_cast<uint64_t>(saved.startPhase) * saved.lengthUs) / 65536ULL);
     multitrackLooper.setRestoredTrackState(track, saved.lengthUs, saved.storedLengthUs,
         saved.generation,
-        saved.flags & 0x01, saved.flags & 0x02, saved.flags & 0x04);
+        saved.flags & 0x01, saved.flags & 0x02, saved.flags & 0x04, startOffsetUs);
     loopTrackLengthSelection[track] = clampU8(saved.lengthSelection, 0, track == 0 ? 6 : 5);
   }
   multitrackLooper.selectTrack(clampU8(header.selectedTrack, 0,
@@ -3865,7 +4112,14 @@ void applyIncomingTransport(arpnmidi3::TransportEvent event) {
   if (event == arpnmidi3::TransportEvent::Start) {
     if (firmware3Settings.clockInFollow) restartArpTiming(true);
     if (firmware3Settings.looperMidiTransport) {
-      if (multitrackLooper.hasAnyData()) multitrackLooper.start(nowUs);
+      if (multitrackLooper.hasAnyData()) {
+        // Restarting from the top rewinds every cursor, so anything already
+        // sounding has to be released or it would never be closed.
+        if (multitrackLooper.playing()) {
+          multitrackLooper.stop(releaseMultitrackOutput, nullptr);
+        }
+        multitrackLooper.start(nowUs);
+      }
       multitrackLooper.beginArmedRecording(nowUs);
     }
   } else if (event == arpnmidi3::TransportEvent::Continue) {
@@ -4015,7 +4269,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (looperSettingsUi.cursor == 4) return static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual);
       if (looperSettingsUi.cursor == 5) return 5;
       return 1;
-    case SET_MUTE_SOLO: return 7;
+    case SET_MUTE_SOLO: return LOOP_MIX_BACK_SLOT;
     case SET_PARAMETER_LOCK:
       if (!parameterLockUi.editing) return 2;
       return 17;
@@ -4516,8 +4770,8 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_LOOP_BARS:
       if (!looperSettingsUi.editing) looperSettingsUi.cursor = clampU8(value, 0, 8);
       else if (looperSettingsUi.cursor == 0) {
-        multitrackLooper.selectTrack(clampU8(value, 0, arpnmidi3::kLoopTrackCount - 1));
-        loopStorageDirty = true;
+        selectLooperTrack(clampU8(value, 0, arpnmidi3::kLoopTrackCount - 1));
+        markLoopStorageDirty();
       }
       else if (looperSettingsUi.cursor == 1) {
         const uint8_t track = multitrackLooper.selectedTrack();
@@ -4544,7 +4798,7 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       }
       break;
     case SET_MUTE_SOLO:
-      muteSoloCursor = clampU8(value, 0, 7);
+      muteSoloCursor = clampU8(value, 0, LOOP_MIX_BACK_SLOT);
       break;
     case SET_PARAMETER_LOCK:
       if (!parameterLockUi.editing) parameterLockUi.cursor = clampU8(value, 0, 2);
@@ -4825,72 +5079,46 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
   }
 }
 
-constexpr const char *EXTENDED_PRESET_PATH = "/presets.f3";
+constexpr const char *DEVICE_STATE_PATH = "/state.f3";
 
-ExtendedPresetRecord currentExtendedPresetRecord() {
-  ExtendedPresetRecord record{};
+// One scratch record rather than a stack copy: a preset record is far too large
+// to build on the musical core's stack.
+PresetRecord presetScratch;
+
+size_t presetRecordOffset(uint8_t slot) {
+  return sizeof(DeviceStateHeader) + static_cast<size_t>(slot) * sizeof(PresetRecord);
+}
+
+void fillPresetRecordFromLiveState(PresetRecord &record) {
+  record.settings = settings;
   record.firmware3 = firmware3Settings;
   record.featureControls = featureControls;
   record.customArp = customArpPattern;
   record.parameterLockCount = min<uint16_t>(parameterLockCount, MAX_PARAMETER_LOCKS);
-  memcpy(record.parameterLocks, parameterLocks,
-         record.parameterLockCount * sizeof(ParameterLockEntry));
-  return record;
+  for (uint16_t i = 0; i < MAX_PARAMETER_LOCKS; ++i) {
+    record.parameterLocks[i] = i < record.parameterLockCount
+        ? parameterLocks[i] : ParameterLockEntry{};
+  }
 }
 
-bool initializeExtendedPresetStorage(bool forceFactoryDefaults) {
-  if (!littleFsReady) return false;
-  bool valid = false;
-  if (!forceFactoryDefaults) {
-    File file = LittleFS.open(EXTENDED_PRESET_PATH, "r");
-    ExtendedPresetFileHeader header{};
-    if (file && file.read(reinterpret_cast<uint8_t *>(&header), sizeof(header)) == sizeof(header)) {
-      const size_t expected = sizeof(header) + PRESET_COUNT * sizeof(ExtendedPresetRecord);
-      valid = header.magic == EXTENDED_PRESET_SCHEMA_MAGIC &&
-              header.recordSize == sizeof(ExtendedPresetRecord) &&
-              header.presetCount == PRESET_COUNT && file.size() == expected;
-    }
-    file.close();
-  }
-  if (valid) return true;
-
-  File file = LittleFS.open(EXTENDED_PRESET_PATH, "w");
-  if (!file) return false;
-  const ExtendedPresetFileHeader header{};
-  if (file.write(reinterpret_cast<const uint8_t *>(&header), sizeof(header)) != sizeof(header)) {
-    file.close();
-    return false;
-  }
-  for (uint8_t slot = 0; slot < PRESET_COUNT; ++slot) {
-    ExtendedPresetRecord record{};
-    record.firmware3 = defaultFirmware3Settings();
-    record.featureControls = defaultFeatureControlSettings();
-    record.customArp.lengthSelection = record.firmware3.customArpLength;
-    if (file.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record)) != sizeof(record)) {
-      file.close();
-      return false;
-    }
-  }
-  file.close();
-  return true;
+void fillPresetRecordWithDefaults(PresetRecord &record, uint8_t slot) {
+  record = PresetRecord{};
+  record.settings = defaultSettings();
+  record.settings.loadPreset = slot;
+  record.settings.savePreset = slot;
+  record.firmware3 = defaultFirmware3Settings();
+  record.featureControls = defaultFeatureControlSettings();
+  record.customArp = CustomArpPattern{};
+  record.customArp.lengthSelection = record.firmware3.customArpLength;
+  record.parameterLockCount = 0;
 }
 
-bool loadExtendedPreset(uint8_t slot) {
-  firmware3Settings = defaultFirmware3Settings();
-  featureControls = defaultFeatureControlSettings();
-  customArpPattern = CustomArpPattern{};
-  customArpPattern.lengthSelection = firmware3Settings.customArpLength;
-  parameterLockCount = 0;
-  if (!littleFsReady || slot >= PRESET_COUNT) return false;
-  File file = LittleFS.open(EXTENDED_PRESET_PATH, "r");
-  if (!file) return false;
-  const size_t offset = sizeof(ExtendedPresetFileHeader) + slot * sizeof(ExtendedPresetRecord);
-  ExtendedPresetRecord record{};
-  const bool ok = file.seek(offset, SeekSet) &&
-                  file.read(reinterpret_cast<uint8_t *>(&record), sizeof(record)) == sizeof(record);
-  file.close();
-  if (!ok || record.customArp.count > MAX_CUSTOM_ARP_EVENTS ||
-      record.parameterLockCount > MAX_PARAMETER_LOCKS) return false;
+// Anything read from flash is treated as untrusted until it has been clamped
+// into range, so a damaged record cannot put the engine into an impossible
+// state.
+void applyPresetRecord(const PresetRecord &record) {
+  settings = record.settings;
+  sanitizeSettings(settings);
   firmware3Settings = record.firmware3;
   sanitizeFirmware3Settings(firmware3Settings);
   featureControls = record.featureControls;
@@ -4949,27 +5177,103 @@ bool loadExtendedPreset(uint8_t slot) {
   parameterLockCount = record.parameterLockCount;
   memcpy(parameterLocks, record.parameterLocks,
          parameterLockCount * sizeof(ParameterLockEntry));
+}
+
+bool readPresetRecord(uint8_t slot, PresetRecord &record) {
+  if (!littleFsReady || slot >= PRESET_COUNT) return false;
+  File file = LittleFS.open(DEVICE_STATE_PATH, "r");
+  if (!file) return false;
+  const bool ok = file.seek(presetRecordOffset(slot), SeekSet) &&
+                  file.read(reinterpret_cast<uint8_t *>(&record), sizeof(record)) == sizeof(record);
+  file.close();
+  if (!ok || record.customArp.count > MAX_CUSTOM_ARP_EVENTS ||
+      record.parameterLockCount > MAX_PARAMETER_LOCKS) return false;
   return true;
 }
 
-bool saveExtendedPreset(uint8_t slot) {
+bool writePresetRecord(uint8_t slot, const PresetRecord &record) {
   if (!littleFsReady || slot >= PRESET_COUNT) return false;
-  File file = LittleFS.open(EXTENDED_PRESET_PATH, "r+");
+  File file = LittleFS.open(DEVICE_STATE_PATH, "r+");
   if (!file) return false;
-  const size_t offset = sizeof(ExtendedPresetFileHeader) + slot * sizeof(ExtendedPresetRecord);
-  const ExtendedPresetRecord record = currentExtendedPresetRecord();
-  const bool ok = file.seek(offset, SeekSet) &&
+  const bool ok = file.seek(presetRecordOffset(slot), SeekSet) &&
                   file.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record)) == sizeof(record);
   file.close();
+  return ok;
+}
+
+// Learned content, chord memories, custom arp, and four-button setup, is kept
+// even when Auto Save is off. It is written without disturbing the settings
+// stored in that slot, so Auto Save still governs knob changes alone. A slot
+// that cannot be read has no settings worth preserving, so the whole live state
+// is written instead and the learn is not lost to a retry loop.
+bool savePresetLearnedContent(uint8_t slot) {
+  const bool readable = readPresetRecord(slot, presetScratch);
+  const Settings stored = presetScratch.settings;
+  fillPresetRecordFromLiveState(presetScratch);
+  if (readable) presetScratch.settings = stored;
+  return writePresetRecord(slot, presetScratch);
+}
+
+// The header carries the device-global state: which preset is live, Auto Save,
+// and the screen to return to. It is twelve bytes at the front of the file, so
+// remembering a screen costs one small block write.
+bool writeDeviceStateHeader() {
+  if (!littleFsReady) return false;
+  File file = LittleFS.open(DEVICE_STATE_PATH, "r+");
+  if (!file) return false;
+  storage.magic = DEVICE_STATE_MAGIC;
+  storage.recordSize = sizeof(PresetRecord);
+  storage.presetCount = PRESET_COUNT;
+  const bool ok = file.seek(0, SeekSet) &&
+                  file.write(reinterpret_cast<const uint8_t *>(&storage), sizeof(storage)) == sizeof(storage);
+  file.close();
+  return ok;
+}
+
+bool initializeDeviceState(bool forceFactoryDefaults) {
+  if (!littleFsReady) return false;
+  if (!forceFactoryDefaults) {
+    File file = LittleFS.open(DEVICE_STATE_PATH, "r");
+    DeviceStateHeader header{};
+    bool valid = false;
+    if (file && file.read(reinterpret_cast<uint8_t *>(&header), sizeof(header)) == sizeof(header)) {
+      const size_t expected = sizeof(header) + PRESET_COUNT * sizeof(PresetRecord);
+      valid = header.magic == DEVICE_STATE_MAGIC &&
+              header.recordSize == sizeof(PresetRecord) &&
+              header.presetCount == PRESET_COUNT && file.size() == expected;
+    }
+    if (file) file.close();
+    if (valid) {
+      storage = header;
+      storage.currentPreset = clampU8(storage.currentPreset, 0, PRESET_COUNT - 1);
+      storage.autoSave = storage.autoSave ? 1 : 0;
+      return true;
+    }
+  }
+
+  File file = LittleFS.open(DEVICE_STATE_PATH, "w");
+  if (!file) return false;
+  storage = DeviceStateHeader{};
+  storage.recordSize = sizeof(PresetRecord);
+  bool ok = file.write(reinterpret_cast<const uint8_t *>(&storage), sizeof(storage)) == sizeof(storage);
+  for (uint8_t slot = 0; ok && slot < PRESET_COUNT; ++slot) {
+    fillPresetRecordWithDefaults(presetScratch, slot);
+    ok = file.write(reinterpret_cast<const uint8_t *>(&presetScratch),
+                    sizeof(presetScratch)) == sizeof(presetScratch);
+  }
+  file.close();
+  if (!ok) LittleFS.remove(DEVICE_STATE_PATH);
   return ok;
 }
 
 void loadCurrentPreset() {
   screenSaverForceNow = false;
   memset(parameterLockHeldNotes, 0, sizeof(parameterLockHeldNotes));
-  settings = storage.presets[storage.currentPreset];
-  sanitizeSettings(settings);
-  loadExtendedPreset(storage.currentPreset);
+  if (!readPresetRecord(storage.currentPreset, presetScratch)) {
+    fillPresetRecordWithDefaults(presetScratch, storage.currentPreset);
+    storageError = littleFsReady;
+  }
+  applyPresetRecord(presetScratch);
   if (settings.division == ARP_DIVISION_FOLLOW_DRUM &&
       firmware3Settings.drumDivision == DRUM_DIVISION_FOLLOW_ARP) {
     firmware3Settings.drumDivision = DIV_1_16;
@@ -5006,30 +5310,31 @@ void loadCurrentPreset() {
 
 void stagePersistedUiSetting(uint8_t settingId) {
   if (settingId >= SETTING_COUNT || !selectableSetting(settingId)) return;
-  EEPROM.write(UI_SCREEN_STORAGE_OFFSET, UI_SCREEN_STORAGE_MAGIC);
-  EEPROM.write(UI_SCREEN_STORAGE_OFFSET + 1, settingId);
+  storage.lastScreen = settingId;
   persistedUiSetting = settingId;
   uiScreenSavePending = false;
 }
 
 bool loadPersistedUiSetting(uint8_t &settingId) {
-  if (EEPROM.read(UI_SCREEN_STORAGE_OFFSET) != UI_SCREEN_STORAGE_MAGIC) return false;
-  const uint8_t stored = EEPROM.read(UI_SCREEN_STORAGE_OFFSET + 1);
+  const uint8_t stored = storage.lastScreen;
   if (stored >= SETTING_COUNT || !selectableSetting(stored)) return false;
   settingId = stored;
   persistedUiSetting = stored;
   return true;
 }
 
+// One save writes one preset record and the header. There is no second store to
+// keep in step, so a preset can no longer be half written.
 void saveStorage() {
-  storage.magic = PRESET_SCHEMA_MAGIC;
-  storage.presets[storage.currentPreset] = settings;
-  storage.presets[storage.currentPreset].loadPreset = storage.currentPreset;
-  storage.presets[storage.currentPreset].savePreset = storage.currentPreset;
-  EEPROM.put(0, storage);
+  settings.loadPreset = storage.currentPreset;
+  settings.savePreset = storage.currentPreset;
   stagePersistedUiSetting(ui.selectedSetting);
-  EEPROM.commit();
-  if (saveExtendedPreset(storage.currentPreset)) extendedPresetDirty = false;
+  fillPresetRecordFromLiveState(presetScratch);
+  const bool ok = writePresetRecord(storage.currentPreset, presetScratch) &&
+                  writeDeviceStateHeader();
+  storageError = !ok;
+  if (!ok) return;
+  extendedPresetDirty = false;
   presetStorageDirty = false;
 }
 
@@ -5074,34 +5379,9 @@ Settings defaultSettings() {
 }
 
 void initStorageIfNeeded() {
-  EEPROM.begin(EEPROM_BYTES);
-  uint16_t storedMagic = 0;
-  EEPROM.get(0, storedMagic);
-
-  const bool factoryDefaultsRequired = storedMagic != PRESET_SCHEMA_MAGIC;
-  if (!factoryDefaultsRequired) {
-    EEPROM.get(0, storage);
-  } else {
-    storage = StorageImage{};
-    storage.magic = PRESET_SCHEMA_MAGIC;
-    storage.currentPreset = 0;
-    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-      storage.presets[i] = defaultSettings();
-      storage.presets[i].loadPreset = i;
-      storage.presets[i].savePreset = i;
-    }
-    storage.autoSave = 1;
-    EEPROM.write(UI_SCREEN_STORAGE_OFFSET, 0xFF);
-    EEPROM.write(UI_SCREEN_STORAGE_OFFSET + 1, 0xFF);
-    EEPROM.put(0, storage);
-    EEPROM.commit();
-  }
-  storage.currentPreset = clampU8(storage.currentPreset, 0, PRESET_COUNT - 1);
-  storage.autoSave = storage.autoSave ? 1 : 0;
-  for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
-    sanitizeSettings(storage.presets[i]);
-  }
-  initializeExtendedPresetStorage(factoryDefaultsRequired);
+  storage = DeviceStateHeader{};
+  storageError = !initializeDeviceState(factoryResetRequested);
+  factoryResetRequested = false;
   loadCurrentPreset();
   loadSavedLoopStorage();
 }
@@ -5723,28 +6003,15 @@ void activateClickAction() {
       return;
     } else if (ui.selectedSetting == SET_MUTE_SOLO) {
       if (muteSoloCursor < arpnmidi3::kLoopTrackCount) {
-        if (muteSoloModeSolo) {
-          const bool enable = !multitrackLooper.track(muteSoloCursor).solo;
-          for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
-            multitrackLooper.setSolo(track, enable && track == muteSoloCursor,
-                                     releaseMultitrackOutput, nullptr);
-          }
+        applyLoopMixModeToTrack(muteSoloCursor);
+      } else if (muteSoloCursor < LOOP_MIX_BACK_SLOT) {
+        const uint8_t picked = muteSoloCursor - LOOP_MIX_MODE_BASE;
+        if (picked == loopMixMode &&
+            (picked == LOOP_MIX_SOLO || picked == LOOP_MIX_MUTE)) {
+          resetLoopMixMuteAndSolo();
         } else {
-          multitrackLooper.setMuted(muteSoloCursor,
-              !multitrackLooper.track(muteSoloCursor).muted,
-              releaseMultitrackOutput, nullptr);
+          loopMixMode = picked;
         }
-        loopStorageDirty = true;
-      } else if (muteSoloCursor == 4) {
-        muteSoloModeSolo = true;
-      } else if (muteSoloCursor == 5) {
-        muteSoloModeSolo = false;
-      } else if (muteSoloCursor == 6) {
-        for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
-          multitrackLooper.setMuted(track, false, releaseMultitrackOutput, nullptr);
-          multitrackLooper.setSolo(track, false, releaseMultitrackOutput, nullptr);
-        }
-        loopStorageDirty = true;
       } else {
         ui.menuMode = MENU_SELECT;
         ui.deferredExitWork = true;
@@ -5902,7 +6169,7 @@ void activateClickAction() {
     }
     if (ui.selectedSetting == SET_MUTE_SOLO) {
       muteSoloCursor = 0;
-      muteSoloModeSolo = false;
+      loopMixMode = LOOP_MIX_MUTE;
     }
     ui.menuMode = MENU_EDIT;
   }
@@ -5917,6 +6184,15 @@ void encoderTurn(int delta, bool pressed) {
     return;
   }
   markActivity();
+  // Hold and turn changes the working track from either looper screen, in the
+  // summary as well as inside the menu, so the track can be moved without
+  // walking through a submenu first.
+  if (pressed && (ui.selectedSetting == SET_LOOP_BARS ||
+                  ui.selectedSetting == SET_MUTE_SOLO)) {
+    selectLooperTrack(static_cast<uint8_t>(wrapIndex(
+        multitrackLooper.selectedTrack() + delta, arpnmidi3::kLoopTrackCount)));
+    return;
+  }
   if (ui.menuMode == MENU_SELECT) {
     ui.selectedSetting = advanceSelectableSetting(ui.selectedSetting, delta);
     ui.dirty = true;
@@ -6325,9 +6601,8 @@ void applyFeatureKnob(uint8_t id, uint8_t value) {
         (static_cast<uint16_t>(value) * 3U + 63U) / 127U);
     restartArpTiming(true);
   } else if (id == FEATURE_KNOB_LOOP_TRACK) {
-    multitrackLooper.selectTrack(static_cast<uint8_t>(
+    selectLooperTrack(static_cast<uint8_t>(
         (static_cast<uint16_t>(value) * (arpnmidi3::kLoopTrackCount - 1U) + 63U) / 127U));
-    refreshLoopUiState();
   } else if (id == FEATURE_KNOB_LOOP_LENGTH) {
     const uint8_t track = multitrackLooper.selectedTrack();
     const uint8_t maximum = track == 0 ? 6 : 5;
@@ -6340,22 +6615,13 @@ void applyFeatureKnob(uint8_t id, uint8_t value) {
 void featureLoopClearUndo() {
   const uint8_t selected = multitrackLooper.selectedTrack();
   if (multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers) {
-    bool hidden = false;
-    for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
-      hidden |= multitrackLooper.track(track).hidden;
-    }
-    for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
-      if (hidden) multitrackLooper.undoClear(track);
-      else multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
-    }
+    clearOrUndoAllLoopTracks();
   } else if (multitrackLooper.track(selected).hidden) {
     multitrackLooper.undoClear(selected);
-    multitrackLooper.selectTrack(selected);
   } else {
     multitrackLooper.safeClear(selected, releaseMultitrackOutput, nullptr);
-    multitrackLooper.selectTrack(selected);
   }
-  loopStorageDirty = true;
+  markLoopStorageDirty();
   refreshLoopUiState();
   ui.dirty = true;
 }
@@ -6401,7 +6667,7 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
       finishActiveMultitrackRecording(time_us_64(), false);
     } else {
       const uint8_t track = multitrackLooper.selectedTrack();
-      armSelectedMultitrack(multitrackLooper.track(track).count > 0);
+      armSelectedMultitrack(loopTrackHasContent(track));
     }
   } else if (id == FEATURE_BUTTON_LOOP_PLAY_STOP) {
     if (multitrackLooper.playing()) multitrackLooper.stop(releaseMultitrackOutput, nullptr);
@@ -6412,13 +6678,13 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
     handleMultitrackRecPlay();
   } else if (id >= FEATURE_BUTTON_TRACK_SELECT_BASE &&
              id < FEATURE_BUTTON_TRACK_SELECT_BASE + arpnmidi3::kLoopTrackCount) {
-    multitrackLooper.selectTrack(id - FEATURE_BUTTON_TRACK_SELECT_BASE);
+    selectLooperTrack(id - FEATURE_BUTTON_TRACK_SELECT_BASE);
   } else if (id >= FEATURE_BUTTON_TRACK_MUTE_BASE &&
              id < FEATURE_BUTTON_TRACK_MUTE_BASE + arpnmidi3::kLoopTrackCount) {
     const uint8_t track = id - FEATURE_BUTTON_TRACK_MUTE_BASE;
     multitrackLooper.setMuted(track, !multitrackLooper.track(track).muted,
                               releaseMultitrackOutput, nullptr);
-    loopStorageDirty = true;
+    markLoopStorageDirty();
   } else if (id >= FEATURE_BUTTON_TRACK_SOLO_BASE &&
              id < FEATURE_BUTTON_TRACK_SOLO_BASE + arpnmidi3::kLoopTrackCount) {
     const uint8_t selected = id - FEATURE_BUTTON_TRACK_SOLO_BASE;
@@ -6427,7 +6693,7 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
       multitrackLooper.setSolo(track, enable && track == selected,
                                releaseMultitrackOutput, nullptr);
     }
-    loopStorageDirty = true;
+    markLoopStorageDirty();
   } else if (id == FEATURE_BUTTON_QUICK_JUMP) {
     setQuickJumpEnabled(firmware3Settings.quickJumpEnabled == 0);
   } else if (id == FEATURE_BUTTON_ARP_RETRIGGER) {
@@ -6499,7 +6765,7 @@ bool processDrumRollCc(uint8_t sourcePort, uint8_t channel, uint8_t cc,
         !firmware3Settings.looperRecordCc && multitrackLooper.recording()) {
       const arpnmidi3::LoopMidiEvent event{0,
           static_cast<uint8_t>(0xB0 | ((channel - 1U) & 0x0F)), cc, value};
-      loopStorageDirty |= multitrackLooper.capture(time_us_64(), event);
+      if (multitrackLooper.capture(time_us_64(), event)) markLoopStorageDirty();
       recordedControl = true;
     }
     if (loopOwnsInput(sourcePort)) loopDivNoteHeld[slot] = pressed;
@@ -6775,7 +7041,7 @@ void handleDinStop() {
 
 void handleSongSelect(byte song) {
   if (!firmware3Settings.looperMidiTransport || song >= arpnmidi3::kLoopTrackCount) return;
-  multitrackLooper.selectTrack(song);
+  selectLooperTrack(song);
   refreshLoopUiState();
   ui.dirty = true;
 }
@@ -6786,7 +7052,7 @@ void finishMidiTransportRecording() {
 
 void selectAdjacentLooperTrack(int8_t direction) {
   const int current = multitrackLooper.selectedTrack();
-  multitrackLooper.selectTrack(static_cast<uint8_t>((current + direction +
+  selectLooperTrack(static_cast<uint8_t>((current + direction +
       arpnmidi3::kLoopTrackCount) % arpnmidi3::kLoopTrackCount));
 }
 
@@ -6811,7 +7077,7 @@ void handleMmcCommand(uint8_t command) {
     case 0x06: {  // Record Strobe
       if (!multitrackLooper.recording() && !multitrackLooper.recordingArmed()) {
         const uint8_t track = multitrackLooper.selectedTrack();
-        armSelectedMultitrack(multitrackLooper.track(track).count > 0);
+        armSelectedMultitrack(loopTrackHasContent(track));
       }
       break;
     }
@@ -6828,7 +7094,7 @@ void handleMmcCommand(uint8_t command) {
     case 0x0D:  // MMC Reset: stop safely and return to track 1
       finishMidiTransportRecording();
       multitrackLooper.stop(releaseMultitrackOutput, nullptr);
-      multitrackLooper.selectTrack(0);
+      selectLooperTrack(0);
       break;
     default:
       return;
@@ -7174,11 +7440,22 @@ void handleCustomButton(uint8_t button, bool pressed) {
 }
 
 void handleLooperButton(uint8_t button) {
-  if (button != lastLooperButton) {
-    memset(looperButtonStep, 0, sizeof(looperButtonStep));
-    lastLooperButton = button;
-  }
+  const uint32_t now = millis();
   const uint8_t actions = featureControls.looperButtonActions;
+  const bool selectEnabled = (actions & LOOPER_BUTTON_SELECT) != 0;
+
+  // The action cycle only continues while the performer keeps tapping the same
+  // track in one gesture.  A different button, a pause, or a track that is not
+  // already the working track restarts it, so the first tap on a track always
+  // means the first action and a single press can never reach Clear.
+  if (button != lastLooperButton ||
+      now - looperButtonLastMs > LOOPER_BUTTON_CYCLE_MS ||
+      (selectEnabled && multitrackLooper.selectedTrack() != button)) {
+    memset(looperButtonStep, 0, sizeof(looperButtonStep));
+  }
+  lastLooperButton = button;
+  looperButtonLastMs = now;
+
   static constexpr uint8_t orderedActions[5] = {
     LOOPER_BUTTON_SELECT, LOOPER_BUTTON_MUTE, LOOPER_BUTTON_SOLO,
     LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
@@ -7192,7 +7469,7 @@ void handleLooperButton(uint8_t button) {
     break;
   }
   if (selectedAction == LOOPER_BUTTON_SELECT) {
-    multitrackLooper.selectTrack(button);
+    selectLooperTrack(button);
   } else if (selectedAction == LOOPER_BUTTON_MUTE) {
     multitrackLooper.setMuted(button, !multitrackLooper.track(button).muted,
                               releaseMultitrackOutput, nullptr);
@@ -7203,13 +7480,16 @@ void handleLooperButton(uint8_t button) {
                                releaseMultitrackOutput, nullptr);
     }
   } else if (selectedAction == LOOPER_BUTTON_DELETE) {
+    // Clearing the working track cancels a record aimed at it, so the track is
+    // taken first and the selection follows afterwards.
     multitrackLooper.safeClear(button, releaseMultitrackOutput, nullptr);
-    multitrackLooper.selectTrack(button);
+    selectLooperTrack(button);
   } else if (selectedAction == LOOPER_BUTTON_UNDO) {
     multitrackLooper.undoClear(button);
-    multitrackLooper.selectTrack(button);
+    selectLooperTrack(button);
   }
-  if (selectedAction != 0) loopStorageDirty = true;
+  if (selectedAction != 0) markLoopStorageDirty();
+  releaseSilencedMultitrackOutputs();
   refreshLoopUiState();
   ui.dirty = true;
 }
@@ -7229,7 +7509,7 @@ void handleChordMemoryButton(uint8_t button, bool pressed) {
     if (chordButtonPlaying[button]) sendChordMemorySlot(button, false);
     featureControls.chordMemories[button] = ChordMemorySlot{};
     chordClearArmed = false;
-    extendedPresetDirty = true;
+    markExtendedPresetDirty();
     ui.dirty = true;
     return;
   }
@@ -7261,13 +7541,13 @@ void captureChordMemoryOutput(uint8_t sourcePort, uint8_t channel,
   chord.channels[index] = channel;
   chord.notes[index] = note;
   chord.velocities[index] = max<uint8_t>(1, velocity);
-  extendedPresetDirty = true;
+  markExtendedPresetDirty();
 }
 
 void finishChordMemoryLearnIfReady() {
   if (!chordLearnActive || anyPhysicalInputNotesHeld()) return;
   chordLearnActive = false;
-  extendedPresetDirty = true;
+  markExtendedPresetDirty();
   ui.dirty = true;
 }
 
@@ -8064,7 +8344,7 @@ bool submenuBackSelected() {
              fourButtonUiCursor == FOUR_BUTTON_CHORD_BACK_SLOT;
     case SET_LOOP_BARS: return looperSettingsUi.cursor == 8;
     case SET_PARAMETER_LOCK: return parameterLockUi.cursor == 2;
-    case SET_MUTE_SOLO: return muteSoloCursor == 7;
+    case SET_MUTE_SOLO: return muteSoloCursor == LOOP_MIX_BACK_SLOT;
     case SET_CHORD: return chordUi.cursor == 5;
     case SET_FORCE_SCALE: return scaleUi.cursor == 13;
     case SET_LIVE_CC: return liveCcCursor == 2;
@@ -8711,20 +8991,31 @@ void drawMuteSoloScreen() {
     display.setCursor(x + 13, y + 5);
     display.print(track + 1U);
     display.setTextColor(SSD1306_WHITE);
+    // A cleared track is struck through, and the track a record is aimed at
+    // carries a dot, so the write target is never left to guesswork.
+    if (state.hidden && state.count > 0) {
+      display.drawLine(x + 5, y + 13, x + 26, y + 13, SSD1306_WHITE);
+    }
+    if ((multitrackLooper.recordingArmed() || multitrackLooper.recording()) &&
+        multitrackLooper.recordingTrack() == track) {
+      display.fillRect(x + 25, y + 3, 3, 3, SSD1306_WHITE);
+    }
     if (highlightedTrack == track) display.drawRect(x + 1, y + 1, 29, 15, SSD1306_WHITE);
   }
   if (!editingLoopMix) return;
-  static const char *const actions[] = {"SOLO", "MUTE", "CLEAR", "BACK"};
-  for (uint8_t i = 0; i < 4; ++i) {
+  static const char *const actions[LOOP_MIX_MODE_COUNT] = {"SOLO", "MUTE", "CLEAR", "ARM"};
+  static const uint8_t actionInset[LOOP_MIX_MODE_COUNT] = {4, 4, 1, 7};
+  for (uint8_t i = 0; i < LOOP_MIX_MODE_COUNT; ++i) {
     const int x = i * 32;
     const int y = 28;
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(x + (i == 3 ? 4 : (i < 2 ? 4 : 1)), y);
+    display.setCursor(x + actionInset[i], y);
     display.print(actions[i]);
-    if ((muteSoloModeSolo && i == 0) || (!muteSoloModeSolo && i == 1)) {
-      display.drawLine(x + 2, y + 9, x + 29, y + 9, SSD1306_WHITE);
+    // The underline marks the mode in force, the box marks where the cursor is.
+    if (loopMixMode == i) display.drawLine(x + 2, y + 9, x + 29, y + 9, SSD1306_WHITE);
+    if (muteSoloCursor == LOOP_MIX_MODE_BASE + i) {
+      display.drawRect(x, y - 3, 31, 13, SSD1306_WHITE);
     }
-    if (muteSoloCursor == i + 4) display.drawRect(x, y - 3, 31, 13, SSD1306_WHITE);
   }
 }
 
@@ -8999,6 +9290,23 @@ void drawPanicScreen() {
   if (presetStorageDirty) display.print('P');
   if (loopStorageDirty) display.print('L');
   if (extendedPresetDirty) display.print('E');
+
+  // Storage is the one subsystem that can fail silently, so it reports plainly.
+  // NO FS means the board was built without a filesystem partition and nothing
+  // can ever be saved.
+  display.setCursor(0, 48);
+  if (!littleFsReady) {
+    display.print(F("FS NONE - set 512KB FS"));
+  } else if (storageError || loopStorageError) {
+    display.print(F("FS WRITE ERROR"));
+  } else {
+    FSInfo info;
+    display.print(F("FS OK "));
+    if (LittleFS.info(info)) {
+      display.print((info.totalBytes - info.usedBytes) / 1024U);
+      display.print(F("K free"));
+    }
+  }
 }
 
 void drawDrumMagicScreen() {
@@ -9073,7 +9381,10 @@ void drawLooperSettingsScreen() {
       display.print(F("-"));
       display.print(loopLengthSummaryName(loopTrackLengthSelection[i]));
       const arpnmidi3::LoopTrackState &state = multitrackLooper.track(i);
+      // Filled is audible content. Hollow is cleared content that Undo can
+      // still bring back. Nothing at all is an empty track.
       if (state.count > 0 && !state.hidden) display.fillCircle(64, 5 + i * 10, 2, SSD1306_WHITE);
+      else if (state.count > 0) display.drawCircle(64, 5 + i * 10, 2, SSD1306_WHITE);
     }
     drawLooperFlagBox(70, 1, 'R', firmware3Settings.looperAutoRec);
     drawLooperFlagBox(85, 1, 'T', firmware3Settings.looperTimeTravel);
@@ -9405,6 +9716,12 @@ void processDeferredUiActions() {
     settings.savePreset = storage.currentPreset;
     ui.dirty = true;
   } else if (ui.deferredLoadPreset) {
+    // Anything still pending belongs to the preset being left, so it is written
+    // before the switch rather than dropped by the load.
+    if (presetStorageDirty) saveStorage();
+    else if (extendedPresetDirty && savePresetLearnedContent(storage.currentPreset)) {
+      extendedPresetDirty = false;
+    }
     panicAll();
     storage.currentPreset = settings.loadPreset;
     loadCurrentPreset();
@@ -9452,7 +9769,7 @@ void processDeferredUiActions() {
       ccRemapCursor = 0;
     }
     if (ui.selectedSetting == SET_MUTE_SOLO &&
-        muteSoloCursor == 7) {
+        muteSoloCursor == LOOP_MIX_BACK_SLOT) {
       muteSoloCursor = 0;
     }
     if (ui.selectedSetting == SET_FOUR_BUTTON) {
@@ -9489,13 +9806,11 @@ void pollUiScreenPersistence() {
     uiScreenSavePending = (ui.selectedSetting != persistedUiSetting);
     uiScreenChangedMs = now;
   }
-  if (!uiScreenSavePending || (now - uiScreenChangedMs) < UI_SCREEN_SAVE_IDLE_MS) return;
-  if (ui.deferredExitWork || multitrackLooper.recordingArmed() ||
-      multitrackLooper.recording() || multitrackLooper.playing() ||
-      multitrackLooper.overdubbing()) return;
-  if (anyPhysicalInputNotesHeld() || heldDrumCount > 0 || arpAnyPlaybackActive()) return;
+  if (!uiScreenSavePending) return;
+  if (ui.deferredExitWork) return;
+  if (!storageWriteReady(uiScreenChangedMs, UI_SCREEN_SAVE_IDLE_MS)) return;
   stagePersistedUiSetting(ui.selectedSetting);
-  EEPROM.commit();
+  writeDeviceStateHeader();
 }
 
 void showBootStage(const __FlashStringHelper *line1,
@@ -9636,10 +9951,10 @@ void setupPins() {
 #endif
 }
 
+// The filesystem is not mounted yet when the boot prompt runs, so the request is
+// recorded and honoured by storage init.
 void factoryResetStorage() {
-  EEPROM.begin(EEPROM_BYTES);
-  for (size_t i = 0; i < EEPROM_BYTES; ++i) EEPROM.write(i, 0xFF);
-  EEPROM.commit();
+  factoryResetRequested = true;
 }
 
 void maybeConfirmFactoryResetAtBoot() {
@@ -9672,8 +9987,15 @@ void setup() {
   showBootStage(F("Storage..."));
   littleFsReady = LittleFS.begin();
   if (!littleFsReady) {
+    // A first mount can fail on a blank filesystem, which formatting fixes. It
+    // also fails when the board was built with no filesystem partition at all,
+    // and then nothing can be saved, so that case is shown rather than hidden.
     LittleFS.format();
     littleFsReady = LittleFS.begin();
+  }
+  if (!littleFsReady) {
+    showBootStage(F("NO FILESYSTEM"), F("Flash Size: 512KB FS"));
+    delay(4000);
   }
   initStorageIfNeeded();
   syncMusicalClockConfig(true);

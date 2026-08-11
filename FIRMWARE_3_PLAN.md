@@ -22,7 +22,7 @@ The operating priorities are:
 - Four-track looper playback, recording, and Time Travel imports
 - Routing, scales, chords, parameter locks, and note ownership
 - Velocity, Note Length, Stutter, and Echo engines
-- EEPROM and LittleFS writes only during musically idle windows
+- LittleFS writes only during musically idle windows
 
 Core 0 drains no more than 32 inter-brain UART bytes per pass and performs
 bounded work in each scheduler. Automatic flash writes are deferred while
@@ -146,6 +146,49 @@ Track modes:
 Each track stores note ons, note offs, and optional pruned CC automation.
 Quantize can be Off or a straight division from 1/64 through 1/4.
 
+### Working-track and note-ownership rules
+
+A cleared track is free space, not material. Recording it replaces it, arming
+never destroys it before the first captured event, and an armed record that has
+not started yet follows the working track so the displayed track and the write
+target cannot disagree. Only a layer that captured something advances the
+working track.
+
+Each track also stores where its own cycle begins inside the shared transport
+cycle. A layer that started partway through the others keeps that relationship
+through stop, clear, undo, and play again, so starting the loop restores the
+ensemble rather than restarting every track at its own beginning. The phase is
+stored in the loop file as a fraction of the track length, in space the format
+already reserved, so older loop files load as zero and behave as before.
+
+Track playback is gated so a track emits one Note Off per Note On for a given
+channel and note. Stored material cannot guarantee that on its own: overlapping
+duplicate notes from chords, the arp, or drum generation collapse into a single
+synthesized boundary Note Off, and an overdub pass can store a Note Off whose
+Note On belongs to an earlier pass. Without the gate the final output reference
+count never returns to zero and the note stays latched. A track that stops being
+playable, including one whose events are replaced underneath a sounding note,
+releases what it owns instead of waiting for a loop boundary that never comes.
+
+### Redundant control paths
+
+The looper is reachable more than one way on purpose, so a performance never
+depends on a single control:
+
+- Holding the encoder and turning changes the working track from the LOOPER and
+  LOOP MIX screens, in the summary as well as inside the menu.
+- Loop Mix applies one mode, Solo, Mute, Clear, or Arm, to whichever track is
+  picked. Clear doubles as undo for a track that was cleared and not recorded
+  over. Arm selects and arms the picked track, takes the arm back off when it is
+  already the target, and starts a stopped or paused transport. Clicking Solo or
+  Mute again, while that mode already holds, resets the whole mix instead.
+- The master rec/play trigger accepts a double tap from any source that drives
+  it. A double tap safe clears a layer and arms it, a single trigger before
+  anything is played takes that arm back off, and a further double tap restores
+  the layer, plays it, and moves the working track on. Layers steps back to the
+  most recently recorded layer for this; Manual and Parts Auto Solo stay on the
+  working track.
+
 ### Retained length behavior
 
 Each track has an audible length and a retained-content length:
@@ -213,19 +256,32 @@ The buttons can run in three modes:
 - Chord Memory with Learn and Clear actions
 
 If multiple looper actions are enabled, successive presses advance through the
-enabled actions in a fixed order. They are not all fired on one press.
+enabled actions in a fixed order. They are not all fired on one press. The
+sequence only advances while the same button is tapped repeatedly on the track
+that is already selected, and it restarts after a short pause, so the first tap
+on a track always means the first action and a single press cannot reach Clear.
 
 ## Presets and storage
 
 - Sixteen preset slots
-- Compact preset image in 4 KB flash-backed EEPROM emulation
-- Fixed per-preset extended records in LittleFS
+- One LittleFS state file: a header followed by one complete record per slot
 - One global four-track loop file in LittleFS
+- No EEPROM. The RP2040 has none, and the emulation rewrites a whole 4 KB flash
+  sector for any change, so it cost more wear and more stall time than the
+  filesystem for the same data, and split one preset across two stores
 - Custom arp, mappings, chord memories, live targets, router ranges, and
   parameter locks stored per preset
 - Four loop tracks stored globally rather than per preset
 - Time Travel/Stutter rolling history stored only in RAM
 - Auto Save as the one device-global storage preference
+
+Automatic writes wait for a quiet musical moment, but not indefinitely. A
+performer who leaves loops running and then powers down would otherwise lose
+every setting changed in the session, so a write that has been pending without
+further changes for five seconds proceeds even while the loop plays. Recording
+and Time Travel import always hold a write back, since a flash pause there would
+land inside the take. Loading a preset flushes anything still pending for the
+preset being left.
 
 Firmware 3 does not migrate incompatible prototype preset layouts. A schema
 mismatch installs current factory defaults across all slots. This keeps boot
@@ -233,6 +289,9 @@ and persistence code bounded and prevents a stale binary layout from being
 interpreted as current settings.
 
 The RP2040 main sketch must use the 2 MB flash layout with 512 KB filesystem.
+The board package defaults to no filesystem partition, and with that default
+nothing can be stored at all. The firmware reports the condition at boot and on
+the diagnostics screen rather than failing quietly.
 
 ## Diagnostics
 

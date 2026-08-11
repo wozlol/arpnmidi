@@ -71,6 +71,30 @@ Detailed wiring and two-board build information is in the
 - All four loop tracks survive reboot and are shared across presets
 - Time Travel and Stutter history remain in RAM and do not survive reboot
 
+Tracks keep their own place in the shared cycle:
+
+- A layer may begin wherever the first note landed, so its loop boundary can sit
+  anywhere inside the others
+- Stop, clear all, undo, and play again restore every track to that same
+  relationship, so the loop comes back in sync rather than restarting every
+  track at its own beginning
+- The stored phase survives reboot with the rest of the loop file
+
+Recording always follows one working track:
+
+- A cleared track counts as free space. Recording it takes a fresh replacement
+  take rather than layering onto material that cannot be heard
+- Arming is not destructive. A cleared track keeps its undo material until the
+  first captured event replaces it
+- An armed record that has not started yet follows the working track, so the
+  track shown on screen is always the track about to be written
+- A pass that is already recording keeps its track until it is stopped
+- Only a layer that captured something advances the working track
+- In Layers mode the global Clear gesture works on all four tracks at once and
+  only undoes once nothing audible is left to clear
+- The Loop Mix screen strikes through cleared tracks and dots the record target,
+  and the looper summary shows cleared content as a hollow marker
+
 Changing a populated track's length preserves the instrument's special repeat
 behavior:
 
@@ -84,6 +108,29 @@ behavior:
   copies and establishes new source material.
 - A resize is rejected cleanly if the shared event pool cannot hold the needed
   copies.
+
+Ways to reach the looper without leaving the screen you are on:
+
+- Hold the encoder and turn on either the LOOPER or LOOP MIX screen to change
+  the working track
+- Loop Mix applies one mode to whichever track is picked: Solo, Mute, Clear, or
+  Arm. Clear also undoes a track that was cleared and not recorded over. Arm
+  selects and arms the picked track, takes the arm back off if it is already the
+  target, and starts a stopped or paused transport
+- Clicking Solo or Mute while that mode is already in force resets the whole
+  mix, unmuting and unsoloing all four tracks
+- One step past Arm the back arrows appear without a box, and clicking there
+  leaves the screen
+
+The master rec/play trigger takes a double tap from any source, the push, the
+sensor, a mapped CC, or a button:
+
+- A double tap safe clears a layer and arms it, so the part can be played again
+- A single trigger before anything is played takes that arm back off
+- Another double tap brings the cleared layer back, plays it, and moves the
+  working track on to the next free one
+- Layers steps back to the layer just recorded. Manual and Parts Auto Solo stay
+  on the working track, since choosing tracks there belongs to the performer
 
 ### Live transformations
 
@@ -132,6 +179,16 @@ looper tracks independently.
 - Four physical buttons can operate as custom notes/CCs, looper controls, or
   chord memories
 - Custom button behaviors: Momentary, Latch, and Flappy Bird
+
+In looper button mode each button owns one track and steps through its enabled
+actions, Select, Mute, Solo, Clear, and Undo in that order:
+
+- The first tap on a track always performs the first enabled action, so a single
+  press can never reach Clear
+- The step only advances while the same button keeps being tapped, and the
+  gesture closes after 1.5 seconds or as soon as another button is used
+- With the default Select, Clear, Undo set that reads as tap to select, tap
+  again to clear, tap a third time to undo
 
 ## Clock and transport
 
@@ -239,7 +296,15 @@ Use:
 - Board: Waveshare RP2040 Zero
 - USB stack: Adafruit TinyUSB
 - CPU speed: 120 MHz or 240 MHz
-- Main flash layout: 2 MB flash with 512 KB filesystem
+- Flash Size: **2MB (Sketch: 1536KB, FS: 512KB)**
+
+The Flash Size setting is not optional for the main brain. The board package
+defaults to `2MB (no FS)`, which gives the sketch no filesystem partition at
+all. All persistent state lives in the filesystem, so with the default setting
+nothing is saved: no presets, no settings, no loops, and no remembered screen.
+The firmware says so rather than failing quietly. It shows `NO FILESYSTEM` at
+boot, and the diagnostics screen reads `FS NONE` instead of `FS OK` with the
+free space.
 
 The main sketch requires the MIDI Library, Adafruit GFX, Adafruit SSD1306, and
 VL53L0X libraries. The secondary sketch includes its patched USB Host Shield
@@ -254,8 +319,12 @@ arduino-cli compile --warnings all \
   "arpnmidi os/arpnmidi_main_brain"
 ```
 
+In the Arduino IDE the same setting is Tools, Flash Size,
+`2MB (Sketch: 1536KB, FS: 512KB)`. Changing that setting reformats the
+filesystem, so presets and loops are lost when it changes.
+
 The secondary build uses the same board, USB stack, and CPU setting. It does
-not need the LittleFS flash-layout option.
+not need the filesystem partition.
 
 ## Presets and persistence
 
@@ -267,9 +336,20 @@ not need the LittleFS flash-layout option.
 - Loop mute, solo, hidden/undo state, active length, retained length, and events
   survive reboot
 - Rolling Time Travel/Stutter history is intentionally RAM-only
-- EEPROM-emulated storage holds the compact preset image
-- LittleFS holds extended preset records and global loop data
-- Automatic writes are deferred until the musical engine is idle
+- One LittleFS file, `/state.f3`, holds everything: a small header with the
+  current preset, Auto Save, and the remembered screen, then one complete record
+  per preset slot
+- A second LittleFS file, `/loops.f3`, holds the global loop tracks, because
+  they are not per preset and change on their own rhythm
+- There is no EEPROM. The RP2040 has none, and the emulation rewrote a whole
+  4 KB flash sector for any change, so a two-byte screen memory cost as much as
+  a preset and every save wrote two stores instead of one
+- Automatic writes are deferred until the musical engine is idle, and a change
+  that has been pending for five seconds is written anyway rather than waiting
+  for a loop that may never stop
+- Recording and Time Travel import are the only states that always hold a write
+  back, because a flash pause there would land inside the take
+- Loading a preset writes anything still pending for the preset being left
 
 Firmware 3 uses explicit storage schema identities. If the installed preset
 layout does not match, the firmware installs the current factory defaults

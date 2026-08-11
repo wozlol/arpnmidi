@@ -179,6 +179,94 @@ int main() {
   assert(resizeLooper.track(0).count == 2);
   assert(resizeLooper.track(0).storedLengthUs == 250000);
 
+  // Clearing an empty track is a no-op. A hidden empty track could never be
+  // brought back by Undo, and it would make "is anything cleared" answer yes
+  // for a looper that holds nothing.
+  FourTrackLooper clearLooper;
+  Probe clearProbe;
+  clearLooper.safeClear(2, release, &clearProbe);
+  assert(!clearLooper.track(2).hidden);
+  assert(!clearLooper.trackHasContent(2));
+
+  // Arming is not destructive. A cleared track keeps its undo material until a
+  // capture actually replaces it, so the armed target can still move away.
+  clearLooper.armRecord(0, 250000, false);
+  assert(clearLooper.capture(1000000, LoopMidiEvent{0, 0x90, 60, 100}));
+  assert(clearLooper.finishRecording(1250000));
+  assert(clearLooper.trackHasContent(0));
+  clearLooper.safeClear(0, release, &clearProbe);
+  assert(!clearLooper.trackHasContent(0));
+  assert(clearLooper.track(0).count == 2);
+  clearLooper.armRecord(0, 250000, false);
+  assert(clearLooper.track(0).count == 2);  // still recoverable while armed
+  clearLooper.cancelRecording();
+  clearLooper.undoClear(0);
+  assert(clearLooper.trackHasContent(0));
+
+  // A pending record follows the working track. Landing on audible content
+  // layers onto it instead of erasing it, and landing on a cleared track
+  // replaces it.
+  clearLooper.start(2000000);
+  clearLooper.armRecord(1, 250000, false);
+  assert(clearLooper.recordingArmed());
+  clearLooper.armRecord(0, 250000, false);  // retargeted onto live content
+  assert(clearLooper.recordingTrack() == 0);
+  assert(clearLooper.track(1).count == 0);
+  assert(clearLooper.capture(2100000, LoopMidiEvent{0, 0x90, 64, 100}));
+  assert(clearLooper.overdubbing());
+  assert(clearLooper.track(0).count == 3);  // the earlier take survived
+  assert(clearLooper.finishRecording(2150000));
+
+  clearLooper.safeClear(0, release, &clearProbe);
+  clearLooper.armRecord(0, 250000, false);
+  assert(clearLooper.capture(2200000, LoopMidiEvent{0, 0x90, 67, 100}));
+  assert(!clearLooper.overdubbing());  // a cleared track takes a fresh take
+  assert(clearLooper.track(0).count == 1);
+  assert(!clearLooper.track(0).hidden);
+  assert(clearLooper.finishRecording(2250000));
+
+  // Tracks may begin at different points in the shared cycle. Stopping and
+  // starting again, including a clear and undo in between, has to bring them
+  // back in the same alignment rather than restarting every track at zero.
+  FourTrackLooper syncLooper;
+  Probe syncProbe;
+  syncLooper.armRecord(0, 1000000, false);
+  assert(syncLooper.capture(1000000, LoopMidiEvent{0, 0x90, 48, 100}));
+  assert(syncLooper.capture(1100000, LoopMidiEvent{0, 0x80, 48, 0}));
+  assert(syncLooper.finishRecording(2000000));
+  syncLooper.start(2000000);
+
+  // The second take begins a quarter of the way through the first loop.
+  syncLooper.armRecord(1, 1000000, false);
+  assert(syncLooper.capture(2250000, LoopMidiEvent{0, 0x90, 55, 100}));
+  assert(syncLooper.capture(2350000, LoopMidiEvent{0, 0x80, 55, 0}));
+  syncLooper.tick(3250000, emit, release, &syncProbe);
+  assert(!syncLooper.recording());
+  assert(syncLooper.track(1).lengthUs == 1000000);
+  assert(syncLooper.track(0).startOffsetUs == 0);
+  assert(syncLooper.track(1).startOffsetUs == 250000);
+
+  syncLooper.stop(release, &syncProbe);
+  syncLooper.safeClear(0, release, &syncProbe);
+  syncLooper.safeClear(1, release, &syncProbe);
+  syncLooper.undoClear(0);
+  syncLooper.undoClear(1);
+  syncLooper.start(9000000);
+  assert(syncLooper.track(0).cycleStartUs == 9000000);
+  // Track two is three quarters of the way through its loop at the top of the
+  // transport cycle, so its own boundary still lands a quarter bar later.
+  assert(syncLooper.track(1).cycleStartUs == 9000000 - 750000);
+  assert(syncLooper.track(1).startOffsetUs == 250000);
+
+  Probe syncPlayback;
+  syncLooper.tick(9000000, emit, release, &syncPlayback);
+  assert(syncPlayback.emitted == 1 && syncPlayback.lastTrack == 0);
+  syncLooper.tick(9240000, emit, release, &syncPlayback);
+  assert(syncPlayback.emitted == 2);  // track one's Note Off only
+  syncLooper.tick(9260000, emit, release, &syncPlayback);
+  assert(syncPlayback.emitted == 3 && syncPlayback.lastTrack == 1 &&
+         syncPlayback.last.status == 0x90);
+
   looper.clearAll(release, &probe);
   assert(looper.usedEvents() == 0);
   assert(!looper.hasAnyData());

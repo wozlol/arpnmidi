@@ -31,6 +31,10 @@ struct LoopTrackState {
   uint32_t generation = 0;
   uint64_t cycleStartUs = 0;
   uint32_t pausedPositionUs = 0;
+  // Where this track's own cycle begins inside the shared transport cycle. A
+  // layer that started partway through the others keeps that relationship
+  // across stop, clear, undo, and play again.
+  uint32_t startOffsetUs = 0;
   bool muted = false;
   bool solo = false;
   bool hidden = false;
@@ -50,6 +54,7 @@ class FourTrackLooper {
   void selectTrack(uint8_t track);
   uint8_t selectedTrack() const { return selectedTrack_; }
 
+  bool trackHasContent(uint8_t track) const;
   void armRecord(uint8_t track, uint32_t fixedLengthUs, bool overdub);
   bool beginArmedRecording(uint64_t nowUs);
   void setRecordQuantizeUs(uint32_t quantumUs) { recordQuantizeUs_ = quantumUs; }
@@ -85,11 +90,13 @@ class FourTrackLooper {
   uint32_t overflowCount() const { return overflowCount_; }
   bool hasAnyData() const;
   uint8_t oldestPopulatedTrack() const;
+  uint8_t newestPopulatedTrack() const;
   bool visitEvents(VisitFn visitor, void *context) const;
   bool restoreEvent(uint8_t track, const LoopMidiEvent &event);
   void setRestoredTrackState(uint8_t track, uint32_t lengthUs,
                              uint32_t storedLengthUs, uint32_t generation,
-                             bool muted, bool solo, bool hidden);
+                             bool muted, bool solo, bool hidden,
+                             uint32_t startOffsetUs = 0);
   void beginImport(uint8_t track, uint32_t lengthUs, ReleaseFn release, void *context);
   bool importEvent(uint8_t track, const LoopMidiEvent &event);
   void finishImport(uint8_t track, uint64_t boundaryUs);
@@ -103,6 +110,9 @@ class FourTrackLooper {
   uint16_t allocateSlot();
   void freeSlot(uint16_t slot);
   bool insertEvent(uint8_t track, const LoopMidiEvent &event);
+  void captureTrackPhase(uint8_t track);
+  void seekTrackTo(LoopTrackState &track, uint64_t nowUs, uint32_t positionUs,
+                   bool skipEventsAtPosition);
   void releaseIfAudibilityChanged(uint8_t track, bool wasAudible,
                                   ReleaseFn release, void *context);
   void resetPlaybackCursors(uint64_t nowUs);

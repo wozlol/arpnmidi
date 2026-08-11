@@ -83,6 +83,10 @@ void FourTrackLooper::selectTrack(uint8_t track) {
   if (track < kLoopTrackCount) selectedTrack_ = track;
 }
 
+bool FourTrackLooper::trackHasContent(uint8_t track) const {
+  return track < kLoopTrackCount && tracks_[track].count > 0 && !tracks_[track].hidden;
+}
+
 void FourTrackLooper::armRecord(uint8_t track, uint32_t fixedLengthUs, bool overdub) {
   if (track >= kLoopTrackCount) return;
   recordingTrack_ = track;
@@ -93,7 +97,9 @@ void FourTrackLooper::armRecord(uint8_t track, uint32_t fixedLengthUs, bool over
   overdubbing_ = overdub;
   recordStartUs_ = overdub ? transportStartUs_ : 0;
   memset(recordHeld_, 0, sizeof(recordHeld_));
-  if (!overdub && tracks_[track].hidden) permanentlyClear(track);
+  // Arming stays non-destructive.  A cleared track keeps its undo material
+  // until the first captured event actually replaces it, so the armed target
+  // can still move to another track without losing anything.
   if (overdub) tracks_[track].generation = ++generationCounter_;
 }
 
@@ -101,10 +107,18 @@ bool FourTrackLooper::beginArmedRecording(uint64_t nowUs) {
   if (!recordingArmed_) return false;
   recordingArmed_ = false;
   recording_ = true;
-  overdubbing_ = false;
-  recordStartUs_ = nowUs;
-  permanentlyClear(recordingTrack_);
-  tracks_[recordingTrack_].generation = ++generationCounter_;
+  // The armed target may have moved onto a populated track after arming, so
+  // the kind of pass is decided here rather than at arm time.  Audible content
+  // is layered onto; empty and cleared tracks take a replacement recording.
+  LoopTrackState &track = tracks_[recordingTrack_];
+  overdubbing_ = playing_ && track.lengthUs > 0 && track.count > 0 && !track.hidden;
+  if (overdubbing_) {
+    recordStartUs_ = transportStartUs_;
+  } else {
+    recordStartUs_ = nowUs;
+    permanentlyClear(recordingTrack_);
+  }
+  track.generation = ++generationCounter_;
   return true;
 }
 
@@ -167,8 +181,14 @@ bool FourTrackLooper::finishRecording(uint64_t nowUs) {
     track.lengthUs = recordFixedLengthUs_ ? recordFixedLengthUs_ :
         static_cast<uint32_t>(elapsed > UINT32_MAX ? UINT32_MAX : elapsed);
     if (playing_) {
+      // The take begins where the performer began it, which is usually not the
+      // top of the transport cycle. That offset is the track's phase from now
+      // on and is restored every time playback starts again.
       track.cycleStartUs = nowUs;
       track.playCursor = track.head;
+      captureTrackPhase(recordingTrack_);
+    } else {
+      track.startOffsetUs = 0;
     }
   }
   if (track.lengthUs == 0) track.lengthUs = 1;
@@ -191,11 +211,54 @@ void FourTrackLooper::cancelRecording() {
   memset(recordHeld_, 0, sizeof(recordHeld_));
 }
 
+// Where a track sits inside the shared transport cycle. Tracks are allowed to
+// begin at different points, and that relationship is what has to survive a
+// stop or a clear and undo, so it is stored rather than recomputed from zero.
+void FourTrackLooper::captureTrackPhase(uint8_t trackIndex) {
+  if (trackIndex >= kLoopTrackCount) return;
+  LoopTrackState &track = tracks_[trackIndex];
+  if (track.lengthUs == 0) {
+    track.startOffsetUs = 0;
+    return;
+  }
+  if (track.cycleStartUs >= transportStartUs_) {
+    track.startOffsetUs =
+        static_cast<uint32_t>((track.cycleStartUs - transportStartUs_) % track.lengthUs);
+  } else {
+    const uint32_t behind =
+        static_cast<uint32_t>((transportStartUs_ - track.cycleStartUs) % track.lengthUs);
+    track.startOffsetUs = behind == 0 ? 0 : track.lengthUs - behind;
+  }
+}
+
+// Resume continues a cycle that was already running, so an event sitting
+// exactly on the resume point has been played and is skipped. Starting a cycle
+// places the transport on that point, so an event there is still due.
+void FourTrackLooper::seekTrackTo(LoopTrackState &track, uint64_t nowUs,
+                                  uint32_t positionUs, bool skipEventsAtPosition) {
+  track.cycleStartUs = nowUs - positionUs;
+  track.playCursor = track.head;
+  while (track.playCursor != kNoLoopEvent) {
+    const uint32_t atUs = slots_[track.playCursor].event.atUs;
+    if (atUs > positionUs || (atUs == positionUs && !skipEventsAtPosition)) break;
+    track.playCursor = slots_[track.playCursor].next;
+  }
+}
+
 void FourTrackLooper::resetPlaybackCursors(uint64_t nowUs) {
   transportStartUs_ = nowUs;
   for (LoopTrackState &track : tracks_) {
-    track.playCursor = track.head;
-    track.cycleStartUs = nowUs;
+    if (track.lengthUs == 0) {
+      track.playCursor = track.head;
+      track.cycleStartUs = nowUs;
+      continue;
+    }
+    // Restore the track to the point in its own loop that belongs at the top of
+    // the transport cycle, so every track comes back in the same alignment it
+    // had when it was recorded.
+    const uint32_t offset = track.startOffsetUs % track.lengthUs;
+    const uint32_t positionUs = offset == 0 ? 0 : track.lengthUs - offset;
+    seekTrackTo(track, nowUs, positionUs, false);
   }
 }
 
@@ -230,16 +293,15 @@ void FourTrackLooper::resume(uint64_t nowUs) {
   playing_ = true;
   paused_ = false;
   transportStartUs_ = nowUs;
-  for (LoopTrackState &track : tracks_) {
+  for (uint8_t index = 0; index < kLoopTrackCount; ++index) {
+    LoopTrackState &track = tracks_[index];
     if (track.lengthUs == 0) continue;
     const uint32_t positionUs = track.pausedPositionUs % track.lengthUs;
-    track.cycleStartUs = nowUs - positionUs;
-    track.playCursor = track.head;
-    while (track.playCursor != kNoLoopEvent &&
-           slots_[track.playCursor].event.atUs <= positionUs) {
-      track.playCursor = slots_[track.playCursor].next;
-    }
+    seekTrackTo(track, nowUs, positionUs, true);
     track.pausedPositionUs = 0;
+    // Resume keeps absolute positions, so the stored phase is re-expressed
+    // against the new transport origin instead of drifting away from it.
+    captureTrackPhase(index);
   }
 }
 
@@ -307,14 +369,11 @@ bool FourTrackLooper::resizeTrack(uint8_t trackIndex, uint32_t lengthUs,
         ? (nowUs - track.cycleStartUs) % oldLengthUs : 0;
     positionUs %= lengthUs;
     if (wasAudible && release) release(context, trackIndex);
-    track.cycleStartUs = nowUs - positionUs;
-    track.playCursor = track.head;
-    while (track.playCursor != kNoLoopEvent &&
-           slots_[track.playCursor].event.atUs <= positionUs) {
-      track.playCursor = slots_[track.playCursor].next;
-    }
+    seekTrackTo(track, nowUs, static_cast<uint32_t>(positionUs), true);
+    captureTrackPhase(trackIndex);
   } else {
     track.playCursor = track.head;
+    track.startOffsetUs %= lengthUs;
   }
   return true;
 }
@@ -366,6 +425,12 @@ void FourTrackLooper::releaseIfAudibilityChanged(uint8_t track, bool wasAudible,
 void FourTrackLooper::safeClear(uint8_t track, ReleaseFn release, void *context) {
   if (track >= kLoopTrackCount) return;
   if ((recording_ || recordingArmed_) && recordingTrack_ == track) cancelRecording();
+  // An empty track must not become hidden.  Undo can never bring it back, and a
+  // phantom hidden track inverts every "is anything cleared" decision above.
+  if (tracks_[track].count == 0) {
+    if (release) release(context, track);
+    return;
+  }
   tracks_[track].hidden = true;
   if (release) release(context, track);
 }
@@ -429,6 +494,23 @@ uint8_t FourTrackLooper::oldestPopulatedTrack() const {
   return result;
 }
 
+// The most recently recorded layer, cleared or not. Stepping back to the last
+// thing played is what a performer means by the previous layer.
+uint8_t FourTrackLooper::newestPopulatedTrack() const {
+  uint8_t result = selectedTrack_;
+  uint32_t newest = 0;
+  bool found = false;
+  for (uint8_t i = 0; i < kLoopTrackCount; ++i) {
+    if (tracks_[i].count == 0) continue;
+    if (!found || tracks_[i].generation >= newest) {
+      newest = tracks_[i].generation;
+      result = i;
+      found = true;
+    }
+  }
+  return result;
+}
+
 bool FourTrackLooper::visitEvents(VisitFn visitor, void *context) const {
   if (!visitor) return false;
   for (uint8_t track = 0; track < kLoopTrackCount; ++track) {
@@ -448,8 +530,10 @@ bool FourTrackLooper::restoreEvent(uint8_t track, const LoopMidiEvent &event) {
 void FourTrackLooper::setRestoredTrackState(uint8_t track, uint32_t lengthUs,
                                             uint32_t storedLengthUs,
                                             uint32_t generation, bool muted,
-                                            bool solo, bool hidden) {
+                                            bool solo, bool hidden,
+                                            uint32_t startOffsetUs) {
   if (track >= kLoopTrackCount) return;
+  tracks_[track].startOffsetUs = lengthUs > 0 ? startOffsetUs % lengthUs : 0;
   tracks_[track].lengthUs = lengthUs;
   tracks_[track].storedLengthUs = storedLengthUs >= lengthUs
       ? storedLengthUs : lengthUs;
@@ -484,6 +568,7 @@ void FourTrackLooper::finishImport(uint8_t track, uint64_t boundaryUs) {
   importing_[track] = false;
   tracks_[track].playCursor = tracks_[track].head;
   tracks_[track].cycleStartUs = boundaryUs;
+  captureTrackPhase(track);
 }
 
 }  // namespace arpnmidi3
