@@ -6667,6 +6667,13 @@ void pollEncoder() {
   if (encoder.switchDown && !encoder.turnWhilePressed &&
       (now - encoder.pressStartMs) >= LONG_HOLD_PANIC_MS) {
     panicAll();
+    // The held gesture is a deliberate emergency reset, not just a silence:
+    // it also gives the loop a clean slate, the same undoable clear/undo the
+    // eye/pad's stop-then-clear press and the three-button chord reach, so a
+    // held panic never destroys a take outright.
+    clearOrUndoAllLoopTracks();
+    markLoopStorageDirty();
+    refreshLoopUiState();
     encoder.turnWhilePressed = true;
   }
 }

@@ -269,6 +269,14 @@ depends on a single control:
   regardless of history, which could never be turned off and, worse, kept
   restarting a capture pass mid-note, which is what was leaving notes stuck on
   the thru channel while playing over a loop.
+- Holding the encoder switch into a panic is a deliberate emergency reset, not
+  just a silence: on top of the usual panic, all notes off and the transport
+  stopped, it also gives the loop a clean slate through the same undoable
+  clear-all/undo-all the eye/pad's stop-then-clear press and the three-button
+  chord reach, so a held panic never destroys a take outright. This is scoped
+  to the held gesture specifically; a quick tap on the PANIC screen, a mapped
+  Feature Button panic, and the panic a preset load fires on its way out all
+  stay silence-only.
 
 ### Retained length behavior
 
