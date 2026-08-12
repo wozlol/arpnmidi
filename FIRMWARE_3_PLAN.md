@@ -273,10 +273,14 @@ depends on a single control:
   just a silence: on top of the usual panic, all notes off and the transport
   stopped, it also gives the loop a clean slate through the same undoable
   clear-all/undo-all the eye/pad's stop-then-clear press and the three-button
-  chord reach, so a held panic never destroys a take outright. This is scoped
-  to the held gesture specifically; a quick tap on the PANIC screen, a mapped
-  Feature Button panic, and the panic a preset load fires on its way out all
-  stay silence-only.
+  chord reach, so a held panic never destroys a take outright. The clear/undo
+  runs first and panic last, since undoing a clear can retrigger held notes
+  and panic's all-channel sweep is the most exhaustive kill-everything pass
+  there is, the one thing that has to get the final word so nothing the
+  clear/undo stirs up can slip past it and stick. This is scoped to the held
+  gesture specifically; a quick tap on the PANIC screen, a mapped Feature
+  Button panic, and the panic a preset load fires on its way out all stay
+  silence-only.
 
 ### Retained length behavior
 
@@ -361,13 +365,12 @@ Select, Arm, Clear leaves the performer armed and ready with the old content
 now out of the way; Undo is the opposite choice and cancels that pending arm
 when it restores the old content instead.
 
-In Looper mode the buttons also read as a chord. Each button's own 25ms
-debounce timer runs from its own edge, so a genuinely concurrent press can
-still confirm several milliseconds apart; judging the chord the instant the
-first button confirms would miss the others. A press instead joins a 50ms
-pending window, and only once that window closes does the accumulated mask
-decide what fired: one button still means its own per-track action, two means
-stop or play, three means the whole-loop clear or undo.
+In Looper mode the buttons also read as a chord: a fresh press counts however
+many of the four are physically down at that instant, no waiting, no
+window, since none is needed, holding a second or third button down later
+still leaves the earlier ones reading as held. One button still means its
+own per-track action, two down together means stop or play, three down
+together means the whole-loop clear or undo.
 
 - Two buttons down together is the same stop the eye or pad sensor gives on
   its first press: finish anything mid-capture and stop the transport. Doing

@@ -6666,14 +6666,18 @@ void pollEncoder() {
 
   if (encoder.switchDown && !encoder.turnWhilePressed &&
       (now - encoder.pressStartMs) >= LONG_HOLD_PANIC_MS) {
-    panicAll();
     // The held gesture is a deliberate emergency reset, not just a silence:
     // it also gives the loop a clean slate, the same undoable clear/undo the
     // eye/pad's stop-then-clear press and the three-button chord reach, so a
-    // held panic never destroys a take outright.
+    // held panic never destroys a take outright. Clear first and panic last:
+    // undoing a clear can retrigger held notes, and panic's all-channel
+    // sweep is the most exhaustive kill-everything pass there is, so it has
+    // to run after, not before, or anything the clear/undo stirs up could
+    // slip past it and stick.
     clearOrUndoAllLoopTracks();
     markLoopStorageDirty();
     refreshLoopUiState();
+    panicAll();
     encoder.turnWhilePressed = true;
   }
 }
@@ -8087,35 +8091,12 @@ void tickFlappyButtons() {
   }
 }
 
-// A real two- or three-finger press rarely lands on every button in the same
-// debounce-confirmed instant: each button's own 25ms debounce timer runs from
-// its own edge, so a genuinely concurrent press can still confirm several
-// milliseconds apart. Judging the chord the moment the first button confirms
-// would miss the others entirely, so a press instead joins a short pending
-// window; only once that window closes does the accumulated mask decide
-// whether it was a lone tap or a chord.
-constexpr uint32_t LOOPER_CHORD_WINDOW_MS = 50;
-uint32_t looperChordWindowStartMs = 0;
-uint8_t looperChordHeldMask = 0;
-bool looperChordPending = false;
-
-void resolveLooperButtonChord() {
-  looperChordPending = false;
-  uint8_t heldCount = 0;
-  uint8_t soloButton = 0xFF;
+uint8_t heldPhysicalButtonCount() {
+  uint8_t count = 0;
   for (uint8_t button = 0; button < 4; ++button) {
-    if ((looperChordHeldMask & (1U << button)) == 0) continue;
-    ++heldCount;
-    soloButton = button;
+    if (physicalButtonState[button]) ++count;
   }
-  looperChordHeldMask = 0;
-  if (heldCount == 1) {
-    handleLooperButton(soloButton);
-  } else if (heldCount == 2) {
-    handleLooperTwoButtonChord();
-  } else if (heldCount >= 3) {
-    handleLooperThreeButtonChord();
-  }
+  return count;
 }
 
 void pollButtons() {
@@ -8130,19 +8111,25 @@ void pollButtons() {
     if (featureControls.fourButtonMode == FOUR_BUTTON_CUSTOM) {
       handleCustomButton(button, pressed);
     } else if (featureControls.fourButtonMode == FOUR_BUTTON_LOOPER) {
+      // physicalButtonState[] above already reflects this press, so counting
+      // it right here is however many buttons are physically down this
+      // instant, no matter which order they went down in or how far apart:
+      // one button still means its own per-track action, two down together
+      // means stop or play, three down together means the whole-loop clear
+      // or undo.
       if (pressed) {
-        looperChordHeldMask |= (1U << button);
-        if (!looperChordPending) {
-          looperChordPending = true;
-          looperChordWindowStartMs = now;
+        const uint8_t heldCount = heldPhysicalButtonCount();
+        if (heldCount >= 3) {
+          handleLooperThreeButtonChord();
+        } else if (heldCount == 2) {
+          handleLooperTwoButtonChord();
+        } else {
+          handleLooperButton(button);
         }
       }
     } else {
       handleChordMemoryButton(button, pressed);
     }
-  }
-  if (looperChordPending && now - looperChordWindowStartMs >= LOOPER_CHORD_WINDOW_MS) {
-    resolveLooperButtonChord();
   }
   tickFlappyButtons();
 }
