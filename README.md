@@ -380,6 +380,10 @@ not need the filesystem partition.
   filesystem stops all attempts, so storage trouble can never grind the
   instrument
 - Loading a preset writes anything still pending for the preset being left
+- The remembered screen is the exception to "a commit click saves it": just
+  looking at a screen is not something the performer made, so it waits for
+  the screen to sit still for five full seconds, and for the engine to be
+  idle too, rather than saving on every visit
 
 Firmware 3 uses explicit storage schema identities. If the installed preset
 layout does not match, the firmware installs the current factory defaults

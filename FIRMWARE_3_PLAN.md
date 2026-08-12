@@ -189,6 +189,16 @@ count never returns to zero and the note stays latched. A track that stops being
 playable, including one whose events are replaced underneath a sounding note,
 releases what it owns instead of waiting for a loop boundary that never comes.
 
+A synthesized boundary Note Off also clears that track's own claim on the
+performer-facing held-note bookkeeping arp, bass, and legato all read from,
+regardless of which channel the note happens to be on. The normal input
+dispatch only updates that bookkeeping for notes on the currently selected
+input channel, so a loop-recorded note whose channel does not match, whether
+because it was recorded on another channel or because the input channel
+setting changed after it was recorded, would otherwise leave that track
+holding the note forever. Bass reads a stuck hold like that as a note that
+never lets go.
+
 A track's playback cursor keeps stepping through its own recorded events every
 tick regardless of audibility: muted, soloed out, or hidden all still let time
 pass inside that track's data, since the cursor only stops advancing while the
@@ -350,6 +360,16 @@ those can repeat continuously during a performance. A failed write backs off
 for five seconds and a missing filesystem disables attempts entirely, because
 retrying every loop pass would grind the whole instrument. Loading a preset
 flushes anything still pending for the preset being left.
+
+The remembered screen is the one exception to "a commit click saves it,"
+because merely looking at a screen is not something the performer made. There
+is no way to make a flash write itself imperceptible: the erase and program
+cost the same tens of milliseconds regardless of how few bytes changed, a
+12-byte header the same as a full preset record. It instead waits for the
+screen to sit still for a long window, five seconds, not just a short one, and
+still requires the engine to be genuinely idle on top of that, so browsing
+through several screens in a row does not attempt a write after every stop
+along the way.
 
 The arp and drum scheduling grid only used to clear reactively, on the next
 note-off after everything went idle. Stopping the looper with no notes

@@ -189,6 +189,8 @@ void arpNoteOffs();
 void drumArpNoteOffs();
 bool saveStorage();
 void saveStorageIfAuto();
+bool writeDeviceStateHeader();
+void stagePersistedUiSetting(uint8_t settingId);
 void markLoopStorageDirty();
 void markExtendedPresetDirty();
 void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t velocity, bool on,
@@ -911,6 +913,15 @@ SensorRuntime sensorRt;
 PushRuntime pushRt;
 UiState ui;
 uint8_t persistedUiSetting = SET_BPM;
+// The remembered screen is a convenience, not something the performer made,
+// so it never forces itself in ahead of real content the way a menu commit
+// does. It waits for the screen itself to sit still, not just the engine, so
+// browsing through several screens in a row does not attempt a write after
+// every stop along the way, only once the performer has actually settled.
+uint8_t observedUiSetting = SET_BPM;
+bool uiScreenSavePending = false;
+uint32_t uiScreenChangedMs = 0;
+constexpr uint32_t UI_SCREEN_SAVE_IDLE_MS = 5000UL;
 constexpr uint32_t UI_MIN_FRAME_MS = 50;
 constexpr uint32_t RENDER_STARVED_MS = 100;
 // A failed flash write waits this long before another attempt. Retrying every
@@ -3191,17 +3202,30 @@ void refreshLoopUiState() {
 void releaseMultitrackOutput(void *, uint8_t track) {
   if (track >= arpnmidi3::kLoopTrackCount) return;
   const uint8_t sourcePort = LOOP_TRACK_SOURCE_BASE + track;
+  bool anyReleased = false;
   for (uint8_t channel = 0; channel < 16; ++channel) {
     for (uint8_t noteByte = 0; noteByte < 16; ++noteByte) {
       const uint8_t held = multitrackPlaybackHeld[track][channel][noteByte];
       multitrackPlaybackHeld[track][channel][noteByte] = 0;
       for (uint8_t bit = 0; bit < 8; ++bit) {
         if ((held & (1U << bit)) == 0) continue;
-        routeIncomingChannelMessage(sourcePort, 0x80 | channel, noteByte * 8 + bit, 0);
+        const uint8_t note = noteByte * 8 + bit;
+        routeIncomingChannelMessage(sourcePort, 0x80 | channel, note, 0);
+        // The message above only reaches setInputOwnerState (arp/bass/legato's
+        // held-note bookkeeping) when the note's channel still matches the
+        // current input channel setting. A note recorded on some other
+        // channel, or one whose channel no longer matches because the
+        // setting changed after it was recorded, would otherwise leave this
+        // track's ownership of it stuck true forever: bass in particular
+        // reads that as a note that never lets go. Clearing it here does not
+        // depend on which branch the routed message happened to take.
+        setInputOwnerState(sourcePort, note, 0, false);
+        anyReleased = true;
       }
     }
   }
   multitrackPlaybackHeldCount[track] = 0;
+  if (anyReleased) updateBassVoice();
 }
 
 // Every downstream owner of a loop note (thru mapping, chord extras, arp
@@ -3949,6 +3973,30 @@ void pollLoopStoragePersistence() {
   saveLoopStorageIfAny();
   endBusyHourglass();
   if (loopStorageDirty) storageRetryHoldUntilMs = millis() + 5000UL;
+}
+
+// There is no fast way to make a flash write imperceptible: it disables
+// interrupts and parks the rendering core for the same tens of milliseconds
+// regardless of how few bytes changed, so a 12-byte header costs the same
+// pause as a full preset. The remembered screen is not worth that pause on
+// every visit, so it only writes once the screen has sat still for a long
+// while AND the engine has nothing going on, five full seconds of neither,
+// not a menu commit's single deliberate click.
+void pollUiScreenPersistence() {
+  const uint32_t now = millis();
+  if (ui.selectedSetting != observedUiSetting) {
+    observedUiSetting = ui.selectedSetting;
+    uiScreenSavePending = (ui.selectedSetting != persistedUiSetting);
+    uiScreenChangedMs = now;
+  }
+  if (!uiScreenSavePending || ui.deferredExitWork || !littleFsReady) return;
+  if (millis() < storageRetryHoldUntilMs) return;
+  if (!storageWriteReady(uiScreenChangedMs, UI_SCREEN_SAVE_IDLE_MS)) return;
+  showBusyHourglass();
+  stagePersistedUiSetting(ui.selectedSetting);
+  const bool ok = writeDeviceStateHeader();
+  endBusyHourglass();
+  if (!ok) storageRetryHoldUntilMs = millis() + 5000UL;
 }
 
 // The deferred polls exist for changes made while the engine is busy, mapped
@@ -5562,6 +5610,7 @@ void stagePersistedUiSetting(uint8_t settingId) {
   if (settingId >= SETTING_COUNT || !selectableSetting(settingId)) return;
   storage.lastScreen = settingId;
   persistedUiSetting = settingId;
+  uiScreenSavePending = false;
 }
 
 bool loadPersistedUiSetting(uint8_t &settingId) {
@@ -10515,6 +10564,7 @@ void setup() {
     ui.selectedSetting = resumeSetting;
   }
   persistedUiSetting = ui.selectedSetting;
+  observedUiSetting = ui.selectedSetting;
   showBootStage(F("Held state..."));
   resetHeldState();
   showBootStage(F("Sensor..."));
@@ -10593,6 +10643,7 @@ void loop() {
   pollPresetStoragePersistence();
   pollLoopStoragePersistence();
   pollExtendedPresetPersistence();
+  pollUiScreenPersistence();
 
   const uint32_t perfPassUs =
       static_cast<uint32_t>(time_us_64() - perfPassStartUs);
