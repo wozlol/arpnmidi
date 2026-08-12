@@ -897,6 +897,8 @@ struct UiState {
   int16_t pendingValue = 0;
 };
 
+volatile bool uiBusyRequest = false;
+volatile bool uiBusyShown = false;
 DeviceStateHeader storage;
 bool storageError = false;
 bool factoryResetRequested = false;
@@ -993,7 +995,9 @@ uint8_t mappedArpOffChannels[128];
 uint8_t mappedLoopArpOffNotes[arpnmidi3::kLoopTrackCount][128];
 uint8_t mappedLoopArpOffChannels[arpnmidi3::kLoopTrackCount][128];
 uint8_t thruOutputRefCount[128];
+uint8_t thruOutputRefChannel[128];
 uint8_t arpOffOutputRefCount[128];
+uint8_t arpOffOutputChannel[128];
 uint8_t legatoHeldCount[128];
 uint8_t legatoHeldVelocity[128];
 uint8_t legatoHeldSource[128];
@@ -1028,7 +1032,16 @@ uint64_t drumNextStepUs = 0;
 uint32_t drumGateOffMs = 0;
 uint64_t drumGridOriginUs = 0;
 uint32_t drumGlobalStep = 0;
+// arpGlobalStep is a position in musical time: which grid boundary the next
+// step lands on. It is recomputed whenever the grid moves, which happens on
+// every division change, and a drum roll changes the division constantly.
+//
+// arpSequenceStep is a position in the arpeggio: how many steps have actually
+// been played. Note order and octave come from this one, so re-gridding changes
+// when the next note happens without changing which note it is. Sharing one
+// counter for both is what made Up sound random while rolling drums.
 uint32_t arpGlobalStep = 0;
+uint32_t arpSequenceStep = 0;
 uint8_t arpPatternStep = 0;
 bool arpHadKeys = false;
 bool arpLatchAwaitingNewPhrase = false;
@@ -2149,6 +2162,26 @@ bool takeUiResumeHint(uint8_t &settingId) {
   return true;
 }
 
+// Everything the output owns, forgotten together. After a silence the claims
+// and the counters have to start from the same place, or a later Note Off finds
+// a counter that no longer matches anything sounding.
+void clearOutputOwnership() {
+  memset(mappedThruNotes, 0xFF, sizeof(mappedThruNotes));
+  memset(mappedLoopThruNotes, 0xFF, sizeof(mappedLoopThruNotes));
+  memset(mappedThruChordNotes, 0xFF, sizeof(mappedThruChordNotes));
+  memset(mappedLoopThruChordNotes, 0xFF, sizeof(mappedLoopThruChordNotes));
+  memset(mappedThruChordCount, 0, sizeof(mappedThruChordCount));
+  memset(mappedLoopThruChordCount, 0, sizeof(mappedLoopThruChordCount));
+  memset(mappedArpOffNotes, 0xFF, sizeof(mappedArpOffNotes));
+  memset(mappedArpOffChannels, 0, sizeof(mappedArpOffChannels));
+  memset(mappedLoopArpOffNotes, 0xFF, sizeof(mappedLoopArpOffNotes));
+  memset(mappedLoopArpOffChannels, 0, sizeof(mappedLoopArpOffChannels));
+  memset(thruOutputRefCount, 0, sizeof(thruOutputRefCount));
+  memset(thruOutputRefChannel, 0, sizeof(thruOutputRefChannel));
+  memset(arpOffOutputRefCount, 0, sizeof(arpOffOutputRefCount));
+  memset(arpOffOutputChannel, 0, sizeof(arpOffOutputChannel));
+}
+
 void panicMidiOnly() {
   for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
     deactivateStutter(target);
@@ -2188,6 +2221,7 @@ void panicMidiOnly() {
   pushRt.lastPitch = 0;
   sensorRt.lastCcValue = -1;
   pushRt.lastCcValue = -1;
+  clearOutputOwnership();
 }
 
 void panicAll() {
@@ -2225,18 +2259,7 @@ void resetHeldState() {
   memset(loopHeldDrumVelocities, 0, sizeof(loopHeldDrumVelocities));
   memset(loopTrackHeldDrumNotes, 0, sizeof(loopTrackHeldDrumNotes));
   memset(loopTrackHeldDrumVelocities, 0, sizeof(loopTrackHeldDrumVelocities));
-  memset(mappedThruNotes, 0xFF, sizeof(mappedThruNotes));
-  memset(mappedLoopThruNotes, 0xFF, sizeof(mappedLoopThruNotes));
-  memset(mappedThruChordNotes, 0xFF, sizeof(mappedThruChordNotes));
-  memset(mappedLoopThruChordNotes, 0xFF, sizeof(mappedLoopThruChordNotes));
-  memset(mappedThruChordCount, 0, sizeof(mappedThruChordCount));
-  memset(mappedLoopThruChordCount, 0, sizeof(mappedLoopThruChordCount));
-  memset(mappedArpOffNotes, 0xFF, sizeof(mappedArpOffNotes));
-  memset(mappedArpOffChannels, 0, sizeof(mappedArpOffChannels));
-  memset(mappedLoopArpOffNotes, 0xFF, sizeof(mappedLoopArpOffNotes));
-  memset(mappedLoopArpOffChannels, 0, sizeof(mappedLoopArpOffChannels));
-  memset(thruOutputRefCount, 0, sizeof(thruOutputRefCount));
-  memset(arpOffOutputRefCount, 0, sizeof(arpOffOutputRefCount));
+  clearOutputOwnership();
   memset(legatoHeldCount, 0, sizeof(legatoHeldCount));
   memset(legatoHeldVelocity, 0, sizeof(legatoHeldVelocity));
   memset(legatoHeldSource, 255, sizeof(legatoHeldSource));
@@ -2263,6 +2286,7 @@ void resetHeldState() {
   customArpWaitingForFirstNote = false;
   roundRobinCursor = 0;
   arpGlobalStep = 0;
+  arpSequenceStep = 0;
   arpPatternStep = 0;
   arpHadKeys = false;
   arpLatchAwaitingNewPhrase = false;
@@ -2886,6 +2910,7 @@ void restartArpTiming(bool sendNoteOffs = true) {
   arpNextStepUs = arpGridOriginUs;
   drumNextStepUs = drumGridOriginUs;
   arpGlobalStep = 0;
+  arpSequenceStep = 0;
   drumGlobalStep = 0;
   arpPatternStep = 0;
 }
@@ -2894,6 +2919,7 @@ void restartArpFromNewKeyPhraseAt(uint64_t phraseStartUs) {
   arpGateOffMs = 0;
   drumGateOffMs = 0;
   arpGlobalStep = 0;
+  arpSequenceStep = 0;
   drumGlobalStep = 0;
   arpPatternStep = 0;
   arpGridOriginUs = phraseStartUs + (ARP_KEY_SYNC_CAPTURE_MS * 1000ULL);
@@ -2920,6 +2946,7 @@ void restartArpFromNewKeyPhrase() {
   arpGateOffMs = 0;
   drumGateOffMs = 0;
   arpGlobalStep = 0;
+  arpSequenceStep = 0;
   drumGlobalStep = 0;
   arpPatternStep = 0;
   arpGridOriginUs = swungGridTimeUs(originUs, boundary, division);
@@ -2928,6 +2955,9 @@ void restartArpFromNewKeyPhrase() {
   drumNextStepUs = drumGridOriginUs;
 }
 
+// Called whenever a division might have moved, which a drum roll does on every
+// press and release. Each half only re-grids when its own next step actually
+// lands somewhere new, so rolling drums leaves the arp's timing untouched.
 void syncArpDivisionToGrid() {
   const uint64_t now = time_us_64();
   if (arpNextStepUs != 0) {
@@ -2938,9 +2968,11 @@ void syncArpDivisionToGrid() {
       const uint64_t stepUs = max<uint64_t>(1, musicalDurationUs(kDivisionPulseSteps[division]));
       uint32_t boundary = static_cast<uint32_t>((now - arpGridOriginUs) / stepUs);
       while (swungGridTimeUs(arpGridOriginUs, boundary, division) < now) ++boundary;
-      arpGlobalStep = boundary;
-      arpPatternStep = boundary % 16U;
-      arpNextStepUs = swungGridTimeUs(arpGridOriginUs, boundary, division);
+      const uint64_t nextUs = swungGridTimeUs(arpGridOriginUs, boundary, division);
+      if (nextUs != arpNextStepUs) {
+        arpGlobalStep = boundary;
+        arpNextStepUs = nextUs;
+      }
     }
   }
 
@@ -2960,38 +2992,47 @@ void syncArpDivisionToGrid() {
   while (swungGridTimeUs(drumGridOriginUs, drumBoundary, drumDivision) < now) {
     ++drumBoundary;
   }
-  drumGlobalStep = drumBoundary;
-  drumNextStepUs = swungGridTimeUs(drumGridOriginUs, drumBoundary, drumDivision);
+  const uint64_t drumNextUs = swungGridTimeUs(drumGridOriginUs, drumBoundary, drumDivision);
+  if (drumNextUs != drumNextStepUs) {
+    drumGlobalStep = drumBoundary;
+    drumNextStepUs = drumNextUs;
+  }
+}
+
+void releaseArpPassthroughClaim(uint8_t sourcePort, uint8_t inNote) {
+  uint8_t *mappedNotes = loopOwnsInput(sourcePort)
+      ? mappedLoopArpOffNotes[loopTrackForSource(sourcePort)] : mappedArpOffNotes;
+  uint8_t *mappedChannels = loopOwnsInput(sourcePort)
+      ? mappedLoopArpOffChannels[loopTrackForSource(sourcePort)] : mappedArpOffChannels;
+  if (mappedNotes[inNote] > 127) return;
+  arpOutputRefOff(sourcePort, mappedNotes[inNote]);
+  mappedNotes[inNote] = 0xFF;
+  mappedChannels[inNote] = 0;
 }
 
 void noteArpOffPassthrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on) {
+  // A release always runs, whatever the routing or the arp mode looks like now.
+  // Bailing out because the arp was switched on, or a channel was disabled or
+  // moved, would leave the claim counted forever.
+  if (!on) {
+    releaseArpPassthroughClaim(sourcePort, inNote);
+    return;
+  }
   if (currentArpSelection() != ARPSEL_OFF) return;
   const bool drumSplit = arpChannelSplitMode() && splitDrumInputNote(inNote);
   const uint8_t baseOutCh = drumSplit ? 10 : mainArpOutChannel();
-  uint8_t outCh = baseOutCh;
-  if (!channelEnabled(outCh)) return;
-  if (outCh == effectiveThruChannel()) return;
+  if (!channelEnabled(baseOutCh)) return;
+  if (baseOutCh == effectiveThruChannel()) return;
+  // A second Note On for a note this source already holds replaces the old
+  // claim rather than abandoning it.
+  releaseArpPassthroughClaim(sourcePort, inNote);
   uint8_t *mappedNotes = loopOwnsInput(sourcePort)
       ? mappedLoopArpOffNotes[loopTrackForSource(sourcePort)] : mappedArpOffNotes;
   uint8_t *mappedChannels = loopOwnsInput(sourcePort)
       ? mappedLoopArpOffChannels[loopTrackForSource(sourcePort)] : mappedArpOffChannels;
   const uint8_t q = drumSplit ? inNote : quantizeUp(inNote);
-  if (on) {
-    mappedNotes[inNote] = q;
-    if (arpOffOutputRefCount[q]++ == 0) {
-      if (!drumSplit) outCh = nextRoundRobinChannel(baseOutCh);
-      mappedChannels[inNote] = outCh;
-      sendFanout(sourcePort, 0x90 | ((outCh - 1) & 0x0F), q, velocity);
-    }
-  } else {
-    const uint8_t out = mappedNotes[inNote];
-    outCh = mappedChannels[inNote] ? mappedChannels[inNote] : baseOutCh;
-    if (out <= 127 && arpOffOutputRefCount[out] > 0 && --arpOffOutputRefCount[out] == 0) {
-      sendFanout(sourcePort, 0x80 | ((outCh - 1) & 0x0F), out, 0);
-    }
-    mappedNotes[inNote] = 0xFF;
-    mappedChannels[inNote] = 0;
-  }
+  mappedNotes[inNote] = q;
+  mappedChannels[inNote] = arpOutputRefOn(sourcePort, q, baseOutCh, !drumSplit, velocity);
 }
 
 void releaseArpClockIfLooperIdle() {
@@ -3715,14 +3756,12 @@ void tickStutter() {
   }
 }
 
-// A flash write stalls the musical core, so writes wait for a quiet moment.
-// Waiting forever is worse than a short stall: a performer who leaves loops
-// running and then powers down would lose everything they changed. A write that
-// has been pending without further changes for this long therefore goes ahead
-// even while the loop plays. Recording and Time Travel import are the only
-// states that always block, because a stall there lands inside the take.
-constexpr uint32_t STORAGE_SETTLE_FORCE_MS = 5000UL;
-
+// A flash write is a musical event, not a background chore. LittleFS disables
+// interrupts and parks the second core for the whole erase and program, which
+// costs tens of milliseconds with no MIDI input, no display, and no scheduling.
+// Writes therefore wait for the engine to be genuinely quiet, however long that
+// takes. The dirty markers on the diagnostics screen show what is still owed,
+// and stopping the loop is what settles it.
 bool storageWriteAlwaysBlocked() {
   return multitrackLooper.recording() || multitrackLooper.recordingArmed() ||
          timeTravelImport.active;
@@ -3734,10 +3773,8 @@ bool storageWriteEngineIdle() {
 }
 
 bool storageWriteReady(uint32_t dirtySinceMs, uint32_t minimumPendingMs) {
-  if (storageWriteAlwaysBlocked()) return false;
-  const uint32_t pending = millis() - dirtySinceMs;
-  if (pending < minimumPendingMs) return false;
-  return storageWriteEngineIdle() || pending >= STORAGE_SETTLE_FORCE_MS;
+  if (storageWriteAlwaysBlocked() || !storageWriteEngineIdle()) return false;
+  return millis() - dirtySinceMs >= minimumPendingMs;
 }
 
 void markLoopStorageDirty() {
@@ -3752,21 +3789,27 @@ void markExtendedPresetDirty() {
 
 void pollLoopStoragePersistence() {
   if (!loopStorageDirty || !storageWriteReady(loopStorageDirtyMs, 750UL)) return;
+  showBusyHourglass();
   saveLoopStorageIfAny();
+  endBusyHourglass();
 }
 
 void pollPresetStoragePersistence() {
   if (!presetStorageDirty || ui.deferredExitWork) return;
   if (!storageWriteReady(presetStorageDirtyMs, 750UL)) return;
+  showBusyHourglass();
   saveStorage();
   extendedPresetDirty = false;
+  endBusyHourglass();
 }
 
 void pollExtendedPresetPersistence() {
   if (!extendedPresetDirty || chordLearnActive || customArpLearning ||
       ui.deferredExitWork) return;
   if (!storageWriteReady(extendedPresetDirtyMs, 750UL)) return;
+  showBusyHourglass();
   if (savePresetLearnedContent(storage.currentPreset)) extendedPresetDirty = false;
+  endBusyHourglass();
 }
 
 void clearSavedLoopStorage() {
@@ -3895,19 +3938,53 @@ void loadSavedLoopStorage() {
   refreshLoopUiState();
 }
 
+// These counters are shared by every source, so a note sounding from two places
+// is turned off once. That only holds if each claim is released exactly once.
+// A claim is therefore always counted and always released, whatever the channel
+// settings happen to be at the time: a decrement skipped because a channel was
+// disabled or changed would strand the counter above zero, and from then on
+// every Note Off for that output note would be swallowed, from any source and
+// any track. The channel a note started on is remembered so it can still be
+// released correctly after the setting moves.
 void thruOutputRefOn(uint8_t sourcePort, uint8_t outNote, uint8_t velocity) {
+  if (outNote > 127) return;
   const uint8_t outCh = effectiveThruChannel();
-  if (!channelEnabled(outCh) || outNote > 127) return;
-  captureChordMemoryOutput(sourcePort, outCh, outNote, velocity);
+  const bool sendable = channelEnabled(outCh);
+  if (sendable) captureChordMemoryOutput(sourcePort, outCh, outNote, velocity);
   if (thruOutputRefCount[outNote]++ == 0) {
-    sendFanout(sourcePort, 0x90 | ((outCh - 1) & 0x0F), outNote, velocity);
+    thruOutputRefChannel[outNote] = sendable ? outCh : 0;
+    if (sendable) sendFanout(sourcePort, 0x90 | ((outCh - 1) & 0x0F), outNote, velocity);
   }
 }
 
 void thruOutputRefOff(uint8_t sourcePort, uint8_t outNote) {
-  const uint8_t outCh = effectiveThruChannel();
-  if (!channelEnabled(outCh) || outNote > 127) return;
-  if (thruOutputRefCount[outNote] > 0 && --thruOutputRefCount[outNote] == 0) {
+  if (outNote > 127 || thruOutputRefCount[outNote] == 0) return;
+  if (--thruOutputRefCount[outNote] > 0) return;
+  const uint8_t outCh = thruOutputRefChannel[outNote];
+  thruOutputRefChannel[outNote] = 0;
+  if (channelEnabled(outCh)) {
+    sendFanout(sourcePort, 0x80 | ((outCh - 1) & 0x0F), outNote, 0);
+  }
+}
+
+// The arp passthrough owns its output notes the same way.
+uint8_t arpOutputRefOn(uint8_t sourcePort, uint8_t outNote, uint8_t baseCh,
+                       bool allowRoundRobin, uint8_t velocity) {
+  if (outNote > 127) return baseCh;
+  if (arpOffOutputRefCount[outNote]++ != 0) return arpOffOutputChannel[outNote];
+  const uint8_t outCh = allowRoundRobin ? nextRoundRobinChannel(baseCh) : baseCh;
+  const bool sendable = channelEnabled(outCh);
+  arpOffOutputChannel[outNote] = sendable ? outCh : 0;
+  if (sendable) sendFanout(sourcePort, 0x90 | ((outCh - 1) & 0x0F), outNote, velocity);
+  return outCh;
+}
+
+void arpOutputRefOff(uint8_t sourcePort, uint8_t outNote) {
+  if (outNote > 127 || arpOffOutputRefCount[outNote] == 0) return;
+  if (--arpOffOutputRefCount[outNote] > 0) return;
+  const uint8_t outCh = arpOffOutputChannel[outNote];
+  arpOffOutputChannel[outNote] = 0;
+  if (channelEnabled(outCh)) {
     sendFanout(sourcePort, 0x80 | ((outCh - 1) & 0x0F), outNote, 0);
   }
 }
@@ -3920,6 +3997,11 @@ void noteThrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on) 
   uint8_t *extraCount = loopOwnsInput(sourcePort)
       ? mappedLoopThruChordCount[loopTrackForSource(sourcePort)] : mappedThruChordCount;
   if (on) {
+    // Replace any claim this source still holds for the note, so the shared
+    // output counters keep one release for every claim.
+    if (mappedNotes[inNote] <= 127 || extraCount[inNote] > 0) {
+      noteThrough(sourcePort, inNote, 0, false);
+    }
     uint8_t notes[4];
     const uint8_t count = buildChordNotes(inNote, notes);
     mappedNotes[inNote] = notes[0];
@@ -4049,12 +4131,7 @@ void clearSplitNoteFromMainPaths(uint8_t sourcePort, uint8_t note) {
 
   uint8_t *thruMap = loopOwnsInput(sourcePort)
       ? mappedLoopThruNotes[loopTrackForSource(sourcePort)] : mappedThruNotes;
-  const uint8_t thruOut = thruMap[note];
-  const uint8_t thruCh = effectiveThruChannel();
-  if (thruOut <= 127 && channelEnabled(thruCh) &&
-      thruOutputRefCount[thruOut] > 0 && --thruOutputRefCount[thruOut] == 0) {
-    sendFanout(sourcePort, 0x80 | ((thruCh - 1) & 0x0F), thruOut, 0);
-  }
+  if (thruMap[note] <= 127) thruOutputRefOff(sourcePort, thruMap[note]);
   thruMap[note] = 0xFF;
   uint8_t (*extraNotes)[3] = loopOwnsInput(sourcePort)
       ? mappedLoopThruChordNotes[loopTrackForSource(sourcePort)] : mappedThruChordNotes;
@@ -4066,18 +4143,7 @@ void clearSplitNoteFromMainPaths(uint8_t sourcePort, uint8_t note) {
   }
   extraCount[note] = 0;
 
-  uint8_t *arpMap = loopOwnsInput(sourcePort)
-      ? mappedLoopArpOffNotes[loopTrackForSource(sourcePort)] : mappedArpOffNotes;
-  uint8_t *arpChannels = loopOwnsInput(sourcePort)
-      ? mappedLoopArpOffChannels[loopTrackForSource(sourcePort)] : mappedArpOffChannels;
-  const uint8_t arpOut = arpMap[note];
-  const uint8_t arpCh = arpChannels[note] ? arpChannels[note] : mainArpOutChannel();
-  if (arpOut <= 127 && channelEnabled(arpCh) &&
-      arpOffOutputRefCount[arpOut] > 0 && --arpOffOutputRefCount[arpOut] == 0) {
-    sendFanout(sourcePort, 0x80 | ((arpCh - 1) & 0x0F), arpOut, 0);
-  }
-  arpMap[note] = 0xFF;
-  arpChannels[note] = 0;
+  releaseArpPassthroughClaim(sourcePort, note);
 }
 
 uint8_t nextRoundRobinChannel(uint8_t baseCh) {
@@ -7182,7 +7248,7 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
 int8_t arpModeNextIndex() {
   if (arpHeldCount == 0) return -1;
   const uint8_t mode = classicArpModeFromSelection(currentArpSelection());
-  const uint32_t phase = arpGlobalStep;
+  const uint32_t phase = arpSequenceStep;
   switch (mode) {
     case ARP_UP:
       return phase % arpHeldCount;
@@ -7288,6 +7354,7 @@ void runArpStep() {
   if (mainArpEnabled && token.noteIndex == TOK_REST) {
     arpGateOffMs = 0;
     arpGlobalStep++;
+    arpSequenceStep++;
     arpPatternStep = (arpPatternStep + 1) % 16;
     return;
   }
@@ -7306,8 +7373,8 @@ void runArpStep() {
     }
     if (idx >= 0 && arpHeldCount > 0) {
       const uint8_t base = arpHeldSorted[idx % arpHeldCount];
-      const uint8_t octave = (arpGlobalStep / max<uint8_t>(1, arpHeldCount)) %
-                             firmware3Settings.arpOctaves;
+      const uint8_t octave = (arpSequenceStep / max<uint8_t>(1, arpHeldCount)) %
+                             max<uint8_t>(1, firmware3Settings.arpOctaves);
       int note = base + token.semitoneOffset + ((token.octaveOffset + octave) * 12);
       note = constrain(note, 0, 127);
       arpAddOutput(quantizeUp(note));
@@ -7317,6 +7384,7 @@ void runArpStep() {
   const uint32_t gateMs = max<uint32_t>(15, (divisionStepMs() * currentArpLengthPctSetting()) / 100);
   arpGateOffMs = millis() + gateMs;
   arpGlobalStep++;
+  arpSequenceStep++;
   arpPatternStep = (arpPatternStep + 1) % 16;
 }
 
@@ -7364,6 +7432,7 @@ void tickArp() {
     if (arpNextStepUs == 0) {
       arpGridOriginUs = nowUs;
       arpGlobalStep = 0;
+      arpSequenceStep = 0;
       arpPatternStep = 0;
       arpNextStepUs = arpGridOriginUs;
     }
@@ -7372,7 +7441,6 @@ void tickArp() {
       uint32_t boundary = static_cast<uint32_t>((nowUs - arpGridOriginUs) / stepUs);
       while (boundary > 0 && swungGridTimeUs(arpGridOriginUs, boundary, division) > nowUs) --boundary;
       arpGlobalStep = boundary;
-      arpPatternStep = boundary % 16U;
       arpNextStepUs = swungGridTimeUs(arpGridOriginUs, boundary, division);
     }
     uint8_t catchUp = 0;
@@ -9706,8 +9774,37 @@ void renderDisplayIfNeeded() {
   ui.lastRenderMs = now;
 }
 
+// A flash write disables interrupts and parks the rendering core for tens of
+// milliseconds, so the instrument stops answering. The display says so first.
+// Only the core that owns the panel may draw, so this is a request and a wait
+// for that core to acknowledge rather than a direct draw.
+void showBusyHourglass() {
+  if (uiBusyRequest) return;
+  uiBusyShown = false;
+  uiBusyRequest = true;
+  const uint32_t startMs = millis();
+  while (!uiBusyShown && millis() - startMs < 40UL) tight_loop_contents();
+}
+
+void endBusyHourglass() {
+  if (!uiBusyRequest) return;
+  uiBusyRequest = false;
+  ui.dirty = true;
+}
+
+void drawBusyHourglassNow() {
+  const int y = SETTING_AREA_Y + 23;
+  display.fillRect(116, y, 12, 18, SSD1306_BLACK);
+  display.drawTriangle(118, y + 1, 126, y + 1, 122, y + 8, SSD1306_WHITE);
+  display.drawTriangle(118, y + 16, 126, y + 16, 122, y + 9, SSD1306_WHITE);
+  display.display();
+}
+
 void processDeferredUiActions() {
   if (!ui.deferredExitWork) return;
+  const bool willWrite = presetStorageDirty || extendedPresetDirty ||
+                         ui.deferredSaveOnly || ui.deferredLoadPreset;
+  if (willWrite) showBusyHourglass();
 
   if (ui.deferredSaveOnly) {
     storage.currentPreset = settings.savePreset;
@@ -9795,6 +9892,7 @@ void processDeferredUiActions() {
   ui.deferredExitWork = false;
   ui.deferredLoadPreset = false;
   ui.deferredSaveOnly = false;
+  if (willWrite) endBusyHourglass();
 
   ui.dirty = true;
 }
@@ -9806,11 +9904,15 @@ void pollUiScreenPersistence() {
     uiScreenSavePending = (ui.selectedSetting != persistedUiSetting);
     uiScreenChangedMs = now;
   }
-  if (!uiScreenSavePending) return;
-  if (ui.deferredExitWork) return;
+  if (!uiScreenSavePending || ui.deferredExitWork) return;
+  // Remembering the screen is a convenience, not something the performer made,
+  // so it waits like everything else. A real save carries the screen along
+  // anyway, because it lives in the same header.
   if (!storageWriteReady(uiScreenChangedMs, UI_SCREEN_SAVE_IDLE_MS)) return;
+  showBusyHourglass();
   stagePersistedUiSetting(ui.selectedSetting);
   writeDeviceStateHeader();
+  endBusyHourglass();
 }
 
 void showBootStage(const __FlashStringHelper *line1,
@@ -10030,7 +10132,14 @@ void setup1() {
 void loop1() {
   drainSecondaryMidiTx();
   pollSensorHardwareCore1();
-  renderDisplayIfNeeded();
+  if (uiBusyRequest) {
+    if (!uiBusyShown) {
+      drawBusyHourglassNow();
+      uiBusyShown = true;
+    }
+  } else {
+    renderDisplayIfNeeded();
+  }
   yield();
 }
 
