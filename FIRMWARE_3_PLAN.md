@@ -334,7 +334,7 @@ The buttons can run in three modes:
 
 - Custom Note or CC with Momentary, Latch, or Flappy Bird behavior
 - Looper control with Select, Arm, Mute, Solo, Delete, and Undo actions, in
-  that fixed order, with Select, Arm, Delete, and Undo on by default
+  that fixed order, with Arm, Delete, and Undo on by default and Select off
 - Chord Memory with Learn and Clear actions
 
 If multiple looper actions are enabled, successive presses advance through the
@@ -353,13 +353,13 @@ Select, Arm, Clear leaves the performer armed and ready with the old content
 now out of the way; Undo is the opposite choice and cancels that pending arm
 when it restores the old content instead.
 
-In Looper mode the buttons also read as a chord: `pollButtons` counts how
-many of the four are down together the instant a press lands, and a fresh
-press that brings the count to two or three fires a whole-loop action instead
-of that button's own per-track action, on top of whatever already fired for
-the buttons pressed before it, the same way the first tap of a double tap
-always runs its ordinary single-trigger logic before the second tap is even
-known to be coming.
+In Looper mode the buttons also read as a chord. Each button's own 25ms
+debounce timer runs from its own edge, so a genuinely concurrent press can
+still confirm several milliseconds apart; judging the chord the instant the
+first button confirms would miss the others. A press instead joins a 50ms
+pending window, and only once that window closes does the accumulated mask
+decide what fired: one button still means its own per-track action, two means
+stop or play, three means the whole-loop clear or undo.
 
 - Two buttons down together is the same stop the eye or pad sensor gives on
   its first press: finish anything mid-capture and stop the transport. Doing

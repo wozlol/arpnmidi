@@ -5303,7 +5303,7 @@ Firmware3Settings defaultFirmware3Settings() {
 FeatureControlSettings defaultFeatureControlSettings() {
   FeatureControlSettings controls{};
   controls.fourButtonMode = FOUR_BUTTON_LOOPER;
-  controls.looperButtonActions = LOOPER_BUTTON_SELECT | LOOPER_BUTTON_ARM |
+  controls.looperButtonActions = LOOPER_BUTTON_ARM |
       LOOPER_BUTTON_DELETE | LOOPER_BUTTON_UNDO;
   for (uint8_t button = 0; button < 4; ++button) {
     controls.customButtons[button].channel = 1;
@@ -8080,12 +8080,35 @@ void tickFlappyButtons() {
   }
 }
 
-uint8_t heldPhysicalButtonCount() {
-  uint8_t count = 0;
+// A real two- or three-finger press rarely lands on every button in the same
+// debounce-confirmed instant: each button's own 25ms debounce timer runs from
+// its own edge, so a genuinely concurrent press can still confirm several
+// milliseconds apart. Judging the chord the moment the first button confirms
+// would miss the others entirely, so a press instead joins a short pending
+// window; only once that window closes does the accumulated mask decide
+// whether it was a lone tap or a chord.
+constexpr uint32_t LOOPER_CHORD_WINDOW_MS = 50;
+uint32_t looperChordWindowStartMs = 0;
+uint8_t looperChordHeldMask = 0;
+bool looperChordPending = false;
+
+void resolveLooperButtonChord() {
+  looperChordPending = false;
+  uint8_t heldCount = 0;
+  uint8_t soloButton = 0xFF;
   for (uint8_t button = 0; button < 4; ++button) {
-    if (physicalButtonState[button]) ++count;
+    if ((looperChordHeldMask & (1U << button)) == 0) continue;
+    ++heldCount;
+    soloButton = button;
   }
-  return count;
+  looperChordHeldMask = 0;
+  if (heldCount == 1) {
+    handleLooperButton(soloButton);
+  } else if (heldCount == 2) {
+    handleLooperTwoButtonChord();
+  } else if (heldCount >= 3) {
+    handleLooperThreeButtonChord();
+  }
 }
 
 void pollButtons() {
@@ -8100,25 +8123,19 @@ void pollButtons() {
     if (featureControls.fourButtonMode == FOUR_BUTTON_CUSTOM) {
       handleCustomButton(button, pressed);
     } else if (featureControls.fourButtonMode == FOUR_BUTTON_LOOPER) {
-      // physicalButtonState[button] above is already updated for this press,
-      // so a held count taken right here reflects every button down at this
-      // instant, this one included. Whichever count a fresh press just
-      // reached decides what fires: a lone press still means its own
-      // per-track action, a second concurrent button means stop or play, and
-      // a third means the whole-loop clear or undo.
       if (pressed) {
-        const uint8_t heldCount = heldPhysicalButtonCount();
-        if (heldCount >= 3) {
-          handleLooperThreeButtonChord();
-        } else if (heldCount == 2) {
-          handleLooperTwoButtonChord();
-        } else {
-          handleLooperButton(button);
+        looperChordHeldMask |= (1U << button);
+        if (!looperChordPending) {
+          looperChordPending = true;
+          looperChordWindowStartMs = now;
         }
       }
     } else {
       handleChordMemoryButton(button, pressed);
     }
+  }
+  if (looperChordPending && now - looperChordWindowStartMs >= LOOPER_CHORD_WINDOW_MS) {
+    resolveLooperButtonChord();
   }
   tickFlappyButtons();
 }
