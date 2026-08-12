@@ -9793,7 +9793,7 @@ void drawLooperSettingsScreen() {
     drawLooperFlagBox(85, 1, 'T', firmware3Settings.looperTimeTravel);
     drawLooperFlagBox(70, 14, 'Q', loopTrackQuantizeSelection(track));
     drawLooperFlagBox(85, 14, 'C', firmware3Settings.looperRecordCc);
-    display.drawRect(101, 1, 18, 24, SSD1306_WHITE);
+    display.drawRect(101, 1, 16, 24, SSD1306_WHITE);
     display.setTextSize(2);
     display.setCursor(104, 6);
     display.print(looperTrackModeSummaryLetter());
