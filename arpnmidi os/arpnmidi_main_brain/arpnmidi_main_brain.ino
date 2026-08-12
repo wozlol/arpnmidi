@@ -6865,6 +6865,12 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
   if (recordForLoop) recordLoopNote(sourcePort, channel1, note, velocity, on);
 
   if (channel1 != settings.inputChannel) {
+    // A note that reached noteThrough while this WAS the input channel still
+    // owns a thru claim by the time its Note Off arrives here, if the
+    // setting moved on in between, an arbitrary time later for one a clear
+    // or undo force-releases rather than one ending on its own. Releasing it
+    // here is a harmless no-op for a note noteThrough never claimed.
+    if (!on) noteThrough(sourcePort, note, 0, false);
     if (channelEnabled(settings.legatoChannel) && channel1 == settings.legatoChannel) {
       handleLegatoInputNote(sourcePort, channel1, note, velocity, on);
     } else {

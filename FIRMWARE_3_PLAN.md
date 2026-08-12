@@ -124,6 +124,23 @@ Loop playback re-enters the musical path with a track-specific source identity.
 Generated Stutter and Echo repeats are not fed back into the looper or rolling
 history, which prevents recursive growth.
 
+Thru output is shared, ref-counted per output note across every source, so a
+note sounding from two places is turned off once, and remembers the channel
+it actually went out on at the moment it started, not whatever the current
+setting says, so a mid-note channel change can't strand it. That memory only
+helps if the Note Off actually reaches it: `onInputNote` compares an
+incoming message's channel against the current input channel setting before
+anything else, and a message on any other channel is forwarded raw,
+bypassing thru's claim-release step entirely. A loop note recorded while its
+channel matched the input channel still owns a thru claim by the time its
+release comes due, an arbitrary time later for a clear or undo forcing the
+release rather than the note ending on its own, so if the input channel
+setting had moved on by then, the release used to take the raw path and
+never reach the claim, leaving the note stuck sounding on the channel it was
+actually sent on. A Note Off now always tries to release a thru claim first,
+regardless of which channel path it otherwise takes; harmless for a note
+thru never claimed.
+
 ## Arpeggiator and drums
 
 The Arp submenu contains Mode, Division, Arp Velocity, Arp Length, Octave Range,
