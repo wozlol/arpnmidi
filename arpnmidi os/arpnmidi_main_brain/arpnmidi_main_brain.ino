@@ -3659,9 +3659,12 @@ bool loopMasterDoubleTap() {
 
 // The double gesture is the retake control. It safe clears a layer and arms it
 // so the part can be played again, and a second double brings the old layer
-// back and plays it. Layers steps back to the layer just recorded, because that
-// is the one a performer means. Manual and Parts Auto Solo stay on the working
-// track: moving between tracks there is the performer's decision alone.
+// back and plays it. Layers steps back to the layer just recorded to do
+// either of those, because that is the one a performer means, but the working
+// track goes no further than that: undo restores content rather than
+// capturing it, so it must not also advance to another track afterward.
+// Manual and Parts Auto Solo stay on the working track throughout: moving
+// between tracks there is the performer's decision alone.
 void handleMultitrackMasterDoubleTap() {
   const uint64_t nowUs = time_us_64();
   const bool layers = multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers;
@@ -3683,7 +3686,9 @@ void handleMultitrackMasterDoubleTap() {
     if (!wasAudible && multitrackLooper.audible(target)) {
       retriggerLoopTrackHeldNotes(target);
     }
-    if (layers) selectNextAutoLooperTrackAfterCapture();
+    // Undo restores content; it does not capture anything, so it must not
+    // move the working track. Only a layer that actually captured something
+    // does that, the same rule as everywhere else in the looper.
   } else {
     selectLooperTrack(target);
     multitrackLooper.safeClear(target, releaseMultitrackOutput, nullptr);
