@@ -6587,11 +6587,18 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
   markActivity(false);
   if (liveNoteViewActive()) ui.dirty = true;
 
+  // Latch and Freeze belong to the performer's hands. Loop playback re-enters
+  // here on the main channel, and letting it participate stranded thru claims:
+  // a loop note latched itself, or collided with a latched pitch, and then its
+  // note-off was treated as sustain-held and never released the thru output.
+  // Safe clear could not fix it because clear releases through this same path.
+  const bool fromLoop = loopOwnsInput(sourcePort);
+
   if (on && velocity > 0) {
     const bool hadNoPhysicalInputNotes = !anyPhysicalInputNotesHeld();
     if (inputOwnerHeld(sourcePort, note)) releaseDuplicateInputNote(sourcePort, note);
 
-    if (arpLatchEnabled()) {
+    if (arpLatchEnabled() && !fromLoop) {
       if (arpLatchAwaitingNewPhrase && !anyPhysicalInputNotesHeld()) {
         clearArpLatchNotes();
       }
@@ -6609,17 +6616,24 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
       restartArpFromNewKeyPhrase();
     }
     arpHadKeys = true;
-    if (!arpLatchPlusEnabled()) {
+    if (!arpLatchPlusEnabled() || fromLoop) {
       noteThrough(sourcePort, note, velocity, true);
-      if (arpLatchEnabled()) thruLatchedNotes[note] = true;
+      if (arpLatchEnabled() && !fromLoop) thruLatchedNotes[note] = true;
     }
     noteArpOffPassthrough(sourcePort, note, velocity, true);
   } else {
     setInputOwnerState(sourcePort, note, 0, false);
-    if (arpLatchEnabled() && !anyPhysicalInputNotesHeld()) arpLatchAwaitingNewPhrase = true;
-    const bool sustainHeld = (arpLatchEnabled() && arpLatchedNotes[note]) ||
-                             (arpFreezeActive && arpFrozenNotes[note]);
-    if (!arpLatchPlusEnabled() && !sustainHeld) noteThrough(sourcePort, note, 0, false);
+    if (arpLatchEnabled() && !fromLoop && !anyPhysicalInputNotesHeld()) {
+      arpLatchAwaitingNewPhrase = true;
+    }
+    // A loop-sourced note-off always releases its own thru and arp claims,
+    // whatever the performer has latched or frozen at the same pitch.
+    const bool sustainHeld = !fromLoop &&
+        ((arpLatchEnabled() && arpLatchedNotes[note]) ||
+         (arpFreezeActive && arpFrozenNotes[note]));
+    if ((!arpLatchPlusEnabled() || fromLoop) && !sustainHeld) {
+      noteThrough(sourcePort, note, 0, false);
+    }
     if (!sustainHeld) noteArpOffPassthrough(sourcePort, note, 0, false);
   }
 
