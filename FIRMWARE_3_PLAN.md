@@ -89,6 +89,18 @@ first. A new arp key phrase joins a rolling drum grid instead of resetting it.
 Engine accessors read stored settings directly, never the composite menu
 accessors, whose raw values follow the submenu cursor and are navigation state.
 
+Releasing every held key already left the arp side of the grid exactly where
+it was, just paused; releasing every held drum note did not, it force-forgot
+the grid every time regardless of what else was going on, so the next hit
+planted a brand new origin at that instant instead of rejoining where the
+beat already was. That is the normal, wanted behavior for a fresh performance
+note when Retrig isn't set to Clock Sync, but while the loop has the clock
+locked, armed, recording, or playing, it must not happen: a captured take
+with no quantize to mask it would show the seam as an audible timing jump
+right where the drum notes happened to gap. Forgetting the grid on release
+now only happens outside that locked state, matching what already happened
+on the arp side.
+
 Arp and Drum schedulers use the measured external tempo when Clock Input is
 Follow/Client. Recorded looper event positions remain microsecond-based. Start,
 Continue, and Stop are synchronized, but recorded loops are not continuously

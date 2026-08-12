@@ -7914,8 +7914,19 @@ void tickArp() {
   }
 
   const int8_t drumDivision = currentDrumDivisionSetting();
-  if (heldDrumCount == 0 || drumDivision < 0) {
+  if (drumDivision < 0) {
     drumNextStepUs = 0;
+    return;
+  }
+  if (heldDrumCount == 0) {
+    // Loop recording, armed, or playing must never let a momentary gap
+    // between drum hits forget the grid: that's what was producing an
+    // audible timing seam in a captured take with no quantize to mask it.
+    // Outside of that, forgetting it here is what lets a fresh note plant a
+    // brand new origin, the normal Key Press retrigger behavior when Retrig
+    // isn't set to Clock Sync, so only skip the reset while the loop has the
+    // clock locked.
+    if (!loopLocksArpClock()) drumNextStepUs = 0;
     return;
   }
   if (drumNextStepUs == 0 || nowUs >= drumNextStepUs) {
