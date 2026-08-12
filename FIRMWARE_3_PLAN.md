@@ -203,6 +203,14 @@ depends on a single control:
   the layer, plays it, and moves the working track on. Layers steps back to the
   most recently recorded layer for this; Manual and Parts Auto Solo stay on the
   working track.
+- Auto Arm offers an arm on the working track whenever it is empty, so a layer
+  starts on the first note played with no button press. The offer is
+  edge-triggered on the working track's identity, not polled as a level: it
+  fires once when the selection newly arrives at an empty track and then
+  leaves the performer alone, so an explicit disarm actually stays disarmed.
+  A poll that re-armed on every idle pass regardless of history could never be
+  turned off, and worse, repeatedly restarting a capture pass mid-note is what
+  was leaving notes stuck on the thru channel while playing over a loop.
 
 ### Retained length behavior
 

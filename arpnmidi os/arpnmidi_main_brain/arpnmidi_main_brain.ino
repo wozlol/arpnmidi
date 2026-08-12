@@ -3362,18 +3362,30 @@ void armSelectedMultitrack(bool overdub) {
   ui.dirty = true;
 }
 
-// Auto Arm keeps the working track armed and waiting whenever it is empty, so
-// a layer starts on the first note played with no button press: the note
-// arrives right away, or it arrives later, either way it is what begins the
-// take. This runs every pass rather than hooking every place the working
-// track can change, selection by hand, MMC, a mapped CC, or the auto-advance
-// after a layer completes, so it follows all of them the same way. It is
-// inert once armed: nothing plays, nothing is written, until a note arrives.
+// Auto Arm keeps the working track armed and waiting whenever it just became
+// the selection and is empty, so a layer starts on the first note played with
+// no button press. It offers the arm exactly once per selection: the edge is
+// the track identity actually changing, not the level of "empty and
+// unarmed." Re-arming on every pass regardless of history left no way to
+// disarm anything, a single trigger's cancel or a double tap's cancel was
+// undone before the performer's next action, which read as being
+// permanently stuck armed and, worse, meant every attempt to just play or
+// stop kept restarting a capture pass, which is what was leaving notes stuck
+// on the thru channel. This runs every tick rather than hooking every place
+// the working track can change, hand selection, MMC, a mapped CC, or the
+// auto-advance after a layer completes, so it follows all of them the same
+// way, but it only acts on the moment the selection actually arrives there.
+uint8_t autoArmLastTrack = 0xFF;
+
 void pollLooperAutoArm() {
+  const uint8_t track = multitrackLooper.selectedTrack();
+  const bool trackChanged = track != autoArmLastTrack;
+  autoArmLastTrack = track;
   if (!firmware3Settings.looperAutoRec) return;
   if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) return;
   if (timeTravelImport.active) return;
-  if (loopTrackHasContent(multitrackLooper.selectedTrack())) return;
+  if (!trackChanged) return;
+  if (loopTrackHasContent(track)) return;
   armSelectedMultitrack(false);
 }
 
@@ -3433,7 +3445,12 @@ void clearOrUndoAllLoopTracks() {
   // A whole-loop clear is a fresh start, so the working track resets to 1
   // along with it. Undo restores content, not the selection, so it leaves
   // wherever the working track already was alone.
-  if (anyLive) selectLooperTrack(0);
+  if (anyLive) {
+    selectLooperTrack(0);
+    // Force Auto Arm to treat this as a fresh selection even if track 1 was
+    // already the one selected, so a wipe always offers the arm again.
+    autoArmLastTrack = 0xFF;
+  }
 }
 
 bool finishActiveMultitrackRecording(uint64_t nowUs, bool startIfStopped) {
@@ -6298,6 +6315,9 @@ void activateClickAction() {
           releaseSilencedMultitrackOutputs();
           loopSafeClearArmed = false;
           markLoopStorageDirty();
+          // The selected track did not change, but it is empty now, so Auto
+          // Arm gets a fresh offer instead of treating this as steady state.
+          autoArmLastTrack = 0xFF;
         } else if (secondClick && picked == LOOP_MIX_ARM) {
           // Double-clicking Arm leaves the screen, the same as Back.
           ui.menuMode = MENU_SELECT;

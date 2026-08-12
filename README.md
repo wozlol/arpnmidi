@@ -99,7 +99,9 @@ Recording always follows one working track:
   layer starts on the first note played with no button press, whether that note
   arrives right away or after a pause. It follows every way the working track
   can change: hand selection, MMC, a mapped CC, and the auto-advance after a
-  layer completes
+  layer completes. It offers the arm once per selection rather than fighting an
+  explicit disarm: cancelling a pending arm stays cancelled until the working
+  track actually changes to something else and back
 
 Changing a populated track's length preserves the instrument's special repeat
 behavior:
