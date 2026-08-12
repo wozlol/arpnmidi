@@ -7963,6 +7963,46 @@ void handleLooperButton(uint8_t button) {
   ui.dirty = true;
 }
 
+// Two physical buttons held together in Looper mode is the same stop the eye
+// or pad sensor gives on its first press: finish anything mid-capture and
+// stop the transport. Doing it again while already stopped plays instead of
+// chaining into that sensor's stop-then-clear escalation, since the
+// three-button chord below is the dedicated way to reach a clear from the
+// physical buttons.
+void handleLooperTwoButtonChord() {
+  const uint64_t nowUs = time_us_64();
+  if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
+    finishActiveMultitrackRecording(nowUs, false);
+  }
+  if (multitrackLooper.playing()) {
+    multitrackLooper.stop(releaseMultitrackOutput, nullptr);
+    loopSafeClearArmed = true;
+  } else {
+    multitrackLooper.start(nowUs);
+    loopSafeClearArmed = false;
+  }
+  releaseSilencedMultitrackOutputs();
+  refreshLoopUiState();
+  ui.dirty = true;
+}
+
+// Three physical buttons held together in Looper mode is the same undoable
+// clear-all gesture the eye/pad reaches on a second stop-then-clear press:
+// clear every track that has anything audible, or if every track is already
+// cleared, bring them all back instead.
+void handleLooperThreeButtonChord() {
+  const uint64_t nowUs = time_us_64();
+  if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
+    finishActiveMultitrackRecording(nowUs, false);
+  }
+  clearOrUndoAllLoopTracks();
+  loopSafeClearArmed = false;
+  markLoopStorageDirty();
+  releaseSilencedMultitrackOutputs();
+  refreshLoopUiState();
+  ui.dirty = true;
+}
+
 void sendChordMemorySlot(uint8_t slot, bool on) {
   if (slot >= 4) return;
   ChordMemorySlot &chord = featureControls.chordMemories[slot];
@@ -8040,6 +8080,14 @@ void tickFlappyButtons() {
   }
 }
 
+uint8_t heldPhysicalButtonCount() {
+  uint8_t count = 0;
+  for (uint8_t button = 0; button < 4; ++button) {
+    if (physicalButtonState[button]) ++count;
+  }
+  return count;
+}
+
 void pollButtons() {
   const uint32_t now = millis();
   for (uint8_t button = 0; button < 4; ++button) {
@@ -8052,7 +8100,22 @@ void pollButtons() {
     if (featureControls.fourButtonMode == FOUR_BUTTON_CUSTOM) {
       handleCustomButton(button, pressed);
     } else if (featureControls.fourButtonMode == FOUR_BUTTON_LOOPER) {
-      if (pressed) handleLooperButton(button);
+      // physicalButtonState[button] above is already updated for this press,
+      // so a held count taken right here reflects every button down at this
+      // instant, this one included. Whichever count a fresh press just
+      // reached decides what fires: a lone press still means its own
+      // per-track action, a second concurrent button means stop or play, and
+      // a third means the whole-loop clear or undo.
+      if (pressed) {
+        const uint8_t heldCount = heldPhysicalButtonCount();
+        if (heldCount >= 3) {
+          handleLooperThreeButtonChord();
+        } else if (heldCount == 2) {
+          handleLooperTwoButtonChord();
+        } else {
+          handleLooperButton(button);
+        }
+      }
     } else {
       handleChordMemoryButton(button, pressed);
     }

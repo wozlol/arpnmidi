@@ -353,6 +353,24 @@ Select, Arm, Clear leaves the performer armed and ready with the old content
 now out of the way; Undo is the opposite choice and cancels that pending arm
 when it restores the old content instead.
 
+In Looper mode the buttons also read as a chord: `pollButtons` counts how
+many of the four are down together the instant a press lands, and a fresh
+press that brings the count to two or three fires a whole-loop action instead
+of that button's own per-track action, on top of whatever already fired for
+the buttons pressed before it, the same way the first tap of a double tap
+always runs its ordinary single-trigger logic before the second tap is even
+known to be coming.
+
+- Two buttons down together is the same stop the eye or pad sensor gives on
+  its first press: finish anything mid-capture and stop the transport. Doing
+  it again while already stopped plays instead of chaining into that
+  sensor's stop-then-clear escalation, so this chord is a plain play/stop
+  toggle from the buttons alone.
+- Three buttons down together is the same undoable whole-loop clear the
+  eye/pad reaches on a second stop-then-clear press: clear every track that
+  has anything audible, or if every track is already cleared, bring them all
+  back instead. Four down behaves the same as three.
+
 ## Presets and storage
 
 - Sixteen preset slots
