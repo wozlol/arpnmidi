@@ -9717,15 +9717,19 @@ void drawLooperSettingsScreen() {
       display.setCursor(0, y);
       display.print(i == track ? F(">") : F(" "));
       display.print(i + 1U);
-      display.setCursor(14, y);
+      display.setCursor(15, y);
       display.print(loopLengthSummaryName(loopTrackLengthSelection[i]));
-      display.setCursor(42, y);
+      display.setCursor(38, y);
       display.print(loopQuantizeSummaryName(loopTrackQuantizeSelection(i)));
       const arpnmidi3::LoopTrackState &state = multitrackLooper.track(i);
-      // Filled is audible content. Hollow is cleared content that Undo can
-      // still bring back. Nothing at all is an empty track.
-      if (state.count > 0 && !state.hidden) display.fillCircle(64, 5 + i * 10, 2, SSD1306_WHITE);
-      else if (state.count > 0) display.drawCircle(64, 5 + i * 10, 2, SSD1306_WHITE);
+      // A filled play triangle is audible content. A hollow one is cleared
+      // content that Undo can still bring back. Nothing is an empty track.
+      const int ty = 5 + i * 10;
+      if (state.count > 0 && !state.hidden) {
+        display.fillTriangle(60, ty - 3, 60, ty + 3, 65, ty, SSD1306_WHITE);
+      } else if (state.count > 0) {
+        display.drawTriangle(60, ty - 3, 60, ty + 3, 65, ty, SSD1306_WHITE);
+      }
     }
     drawLooperFlagBox(70, 1, 'R', firmware3Settings.looperAutoRec);
     drawLooperFlagBox(85, 1, 'T', firmware3Settings.looperTimeTravel);
@@ -9736,7 +9740,7 @@ void drawLooperSettingsScreen() {
     display.setCursor(107, 6);
     display.print(looperTrackModeSummaryLetter());
     display.setTextSize(1);
-    display.setCursor(90, 31);
+    display.setCursor(80, 31);
     display.print(F("T"));
     display.print(track + 1U);
     display.print(' ');
