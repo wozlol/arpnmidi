@@ -923,7 +923,22 @@ bool uiScreenSavePending = false;
 uint32_t uiScreenChangedMs = 0;
 constexpr uint32_t UI_SCREEN_SAVE_IDLE_MS = 5000UL;
 constexpr uint32_t UI_MIN_FRAME_MS = 50;
+// LOOPER and LOOP MIX show state that changes with almost every click while
+// the performer is actively working the loop, select, arm, mute, solo, clear,
+// undo, all one dirty screen apiece. A push to this panel is a full-frame,
+// blocking I2C transfer that runs about 20ms at 400kHz regardless of how
+// little changed, and it holds the outgoing MIDI drain, on this same core,
+// off the wire for the entire transfer. A flurry of clicks on an ordinary
+// screen already only pushes one frame every 50ms; these two screens get a
+// longer window so more of that flurry coalesces into one push, trading a
+// slightly less instant icon for a looper that stays on its own time.
+constexpr uint32_t UI_LOOPER_SCREEN_MIN_FRAME_MS = 300;
 constexpr uint32_t RENDER_STARVED_MS = 100;
+
+uint32_t uiMinFrameIntervalMs() {
+  return (ui.selectedSetting == SET_LOOP_BARS || ui.selectedSetting == SET_MUTE_SOLO)
+      ? UI_LOOPER_SCREEN_MIN_FRAME_MS : UI_MIN_FRAME_MS;
+}
 // A failed flash write waits this long before another attempt. Retrying every
 // loop pass would grind the whole instrument, which is far worse than data
 // waiting a few extra seconds.
@@ -8910,7 +8925,7 @@ void drawLoopStatusIcon() {
   if (!armed && !recording && !overdubbing && !playing && !hasData) return;
   const int x = 116;
   const int y = 1;
-  display.fillRect(x - 2, y, 14, 12, SSD1306_BLACK);
+  display.fillRect(x, y, 12, 12, SSD1306_BLACK);
 
   if (armed || recording || overdubbing) {
     display.drawCircle(x + 5, y + 6, 4, SSD1306_WHITE);
@@ -10217,7 +10232,7 @@ void renderDisplayIfNeeded() {
   // Dirty can be set faster than frames are worth drawing, one drum-roll hit
   // at a time. Capping the frame rate keeps this core mostly free for the
   // MIDI drain.
-  if ((now - ui.lastRenderMs) < UI_MIN_FRAME_MS) return;
+  if ((now - ui.lastRenderMs) < uiMinFrameIntervalMs()) return;
   // Clear before drawing so a real-time-side change during the I2C transfer
   // leaves dirty asserted for the next frame instead of being lost.
   ui.dirty = false;

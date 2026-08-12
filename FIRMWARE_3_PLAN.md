@@ -36,6 +36,13 @@ notes, arp, playback, recording, or pending UI work are active.
   starvation bound. There is no periodic refresh. Events that change nothing
   on the selected screen must not mark the display dirty, so a quiet screen
   costs zero frames during a performance
+- A push is a full-frame, blocking I2C transfer, about 20 ms at 400 kHz
+  regardless of how little changed, and it holds the outgoing MIDI drain off
+  the wire for the whole transfer since both live on this core. LOOPER and
+  LOOP MIX change on nearly every click while the performer is actively
+  working the loop, so those two screens use a 300 ms cap instead of the
+  general 50 ms, coalescing a flurry of clicks into fewer pushes rather than
+  paying the block on each one
 - VL53L0X distance-sensor polling, data-ready peek first so a slow or wedged
   sensor costs one register read instead of a blocking wait
 
