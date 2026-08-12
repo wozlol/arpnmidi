@@ -9754,7 +9754,7 @@ void drawLooperSettingsScreen() {
     display.setCursor(104, 6);
     display.print(looperTrackModeSummaryLetter());
     display.setTextSize(1);
-    display.setCursor(78, 31);
+    display.setCursor(71, 31);
     display.print(F("T"));
     display.print(track + 1U);
     const uint8_t summaryQuant = loopTrackQuantizeSelection(track);
