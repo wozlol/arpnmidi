@@ -2786,7 +2786,13 @@ void forEachCcOutput(Fn fn) {
 }
 
 uint8_t currentArpSelection() {
-  return constrain(effectiveSettingValue(SET_ARP_MODE), 0, ARP_SELECTION_COUNT - 1);
+  // The stored mode, never the composite menu accessor. SET_ARP_MODE's raw
+  // value follows the submenu cursor when nothing is being edited, and the
+  // cursor is navigation. Reading it as the mode made the arp boot silent
+  // (cursor 0 reads as Off), turn Up into Random after visiting item 6, and
+  // walk octaves after leaving through Back. Edits inside the submenu write
+  // settings.arpMode live, so live audition still works through this path.
+  return clampU8(settings.arpMode, 0, ARP_SELECTION_COUNT - 1);
 }
 
 int8_t activeDivNoteSlot() {
@@ -2918,12 +2924,27 @@ void restartArpTiming(bool sendNoteOffs = true) {
 
 void restartArpFromNewKeyPhraseAt(uint64_t phraseStartUs) {
   arpGateOffMs = 0;
-  drumGateOffMs = 0;
   arpGlobalStep = 0;
   arpSequenceStep = 0;
-  drumGlobalStep = 0;
   arpPatternStep = 0;
-  arpGridOriginUs = phraseStartUs + (ARP_KEY_SYNC_CAPTURE_MS * 1000ULL);
+  const uint64_t readyUs = phraseStartUs + (ARP_KEY_SYNC_CAPTURE_MS * 1000ULL);
+  if (drumNextStepUs != 0) {
+    // Drums own the running clock. The new arp phrase joins their grid at its
+    // own division instead of resetting a rolling pattern underneath the
+    // performer, which was audible as a hiccup on every played phrase.
+    const uint8_t division = currentDivisionSetting();
+    const uint64_t stepUs = max<uint64_t>(1, musicalDurationUs(kDivisionPulseSteps[division]));
+    uint32_t boundary = readyUs > drumGridOriginUs
+        ? static_cast<uint32_t>((readyUs - drumGridOriginUs) / stepUs) : 0;
+    while (swungGridTimeUs(drumGridOriginUs, boundary, division) < readyUs) ++boundary;
+    arpGridOriginUs = drumGridOriginUs;
+    arpGlobalStep = boundary;
+    arpNextStepUs = swungGridTimeUs(drumGridOriginUs, boundary, division);
+    return;
+  }
+  drumGateOffMs = 0;
+  drumGlobalStep = 0;
+  arpGridOriginUs = readyUs;
   arpNextStepUs = arpGridOriginUs;
   drumGridOriginUs = arpGridOriginUs;
   drumNextStepUs = drumGridOriginUs;
@@ -2931,7 +2952,7 @@ void restartArpFromNewKeyPhraseAt(uint64_t phraseStartUs) {
 
 void restartArpFromNewKeyPhrase() {
   const uint64_t nowUs = time_us_64();
-  if (!firmware3Settings.arpRetriggerSync) {
+  if (!firmware3Settings.arpRetriggerSync || drumNextStepUs != 0) {
     restartArpFromNewKeyPhraseAt(nowUs);
     return;
   }
@@ -7510,11 +7531,23 @@ void tickArp() {
   if (!customMode && arpHeldCount > 0 && (arpNextStepUs == 0 || nowUs >= arpNextStepUs)) {
     const uint8_t division = currentDivisionSetting();
     if (arpNextStepUs == 0) {
-      arpGridOriginUs = nowUs;
-      arpGlobalStep = 0;
       arpSequenceStep = 0;
       arpPatternStep = 0;
-      arpNextStepUs = arpGridOriginUs;
+      if (drumNextStepUs != 0) {
+        // Drums started this phrase, so they own the clock. The arp joins
+        // their grid at its own division instead of planting a second origin
+        // that would drift against the first.
+        arpGridOriginUs = drumGridOriginUs;
+        const uint64_t stepUs = max<uint64_t>(1, musicalDurationUs(kDivisionPulseSteps[division]));
+        uint32_t boundary = static_cast<uint32_t>((nowUs - arpGridOriginUs) / stepUs);
+        while (swungGridTimeUs(arpGridOriginUs, boundary, division) < nowUs) ++boundary;
+        arpGlobalStep = boundary;
+        arpNextStepUs = swungGridTimeUs(arpGridOriginUs, boundary, division);
+      } else {
+        arpGridOriginUs = nowUs;
+        arpGlobalStep = 0;
+        arpNextStepUs = arpGridOriginUs;
+      }
     }
     const uint64_t stepUs = max<uint64_t>(1, musicalDurationUs(kDivisionPulseSteps[division]));
     if (nowUs > arpNextStepUs && nowUs - arpNextStepUs > stepUs * 4ULL) {
@@ -7537,9 +7570,21 @@ void tickArp() {
   }
   if (drumNextStepUs == 0 || nowUs >= drumNextStepUs) {
     if (drumNextStepUs == 0) {
-      drumGridOriginUs = nowUs;
-      drumGlobalStep = 0;
-      drumNextStepUs = drumGridOriginUs;
+      if (arpNextStepUs != 0) {
+        // The arp started this phrase and is the boss. Drums follow its
+        // origin with their own division.
+        drumGridOriginUs = arpGridOriginUs;
+        const uint64_t stepUs = max<uint64_t>(1,
+            musicalDurationUs(kDivisionPulseSteps[drumDivision]));
+        uint32_t boundary = static_cast<uint32_t>((nowUs - drumGridOriginUs) / stepUs);
+        while (swungGridTimeUs(drumGridOriginUs, boundary, drumDivision) < nowUs) ++boundary;
+        drumGlobalStep = boundary;
+        drumNextStepUs = swungGridTimeUs(drumGridOriginUs, boundary, drumDivision);
+      } else {
+        drumGridOriginUs = nowUs;
+        drumGlobalStep = 0;
+        drumNextStepUs = drumGridOriginUs;
+      }
     }
     const uint64_t stepUs = max<uint64_t>(1, musicalDurationUs(kDivisionPulseSteps[drumDivision]));
     if (nowUs > drumNextStepUs && nowUs - drumNextStepUs > stepUs * 4ULL) {

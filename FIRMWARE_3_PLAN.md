@@ -70,6 +70,13 @@ same inter-brain UART speed and message behavior.
 - MMC Stop, Play, Deferred Play, Fast Forward, Rewind, Record Strobe, Record
   Exit, Record Pause, Pause, and Reset have bounded looper actions.
 
+The arp and drum schedulers share one grid origin. Whichever engine starts the
+phrase plants the origin and is the boss, and the other joins that grid at its
+own division rather than planting a second origin that would drift against the
+first. A new arp key phrase joins a rolling drum grid instead of resetting it.
+Engine accessors read stored settings directly, never the composite menu
+accessors, whose raw values follow the submenu cursor and are navigation state.
+
 Arp and Drum schedulers use the measured external tempo when Clock Input is
 Follow/Client. Recorded looper event positions remain microsecond-based. Start,
 Continue, and Stop are synchronized, but recorded loops are not continuously
