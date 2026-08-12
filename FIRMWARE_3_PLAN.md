@@ -31,8 +31,11 @@ notes, arp, playback, recording, or pending UI work are active.
 ### Main-brain core 1
 
 - Outgoing 1 Mbps inter-brain UART queue, which outranks everything else here
-- OLED rendering when visible state is dirty, capped at one frame per 50 ms and
-  deferred while outgoing MIDI is queued, with a 100 ms starvation bound
+- OLED rendering only when something visible actually changed, capped at one
+  frame per 50 ms and deferred while outgoing MIDI is queued, with a 100 ms
+  starvation bound. There is no periodic refresh. Events that change nothing
+  on the selected screen must not mark the display dirty, so a quiet screen
+  costs zero frames during a performance
 - VL53L0X distance-sensor polling, data-ready peek first so a slow or wedged
   sensor costs one register read instead of a blocking wait
 

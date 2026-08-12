@@ -3670,7 +3670,8 @@ void recordLoopNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t 
       armSelectedMultitrack(false);
     }
     if (multitrackLooper.capture(nowUs, event)) markLoopStorageDirty();
-    refreshLoopUiState();
+    // No refresh here. A captured note changes nothing the screen shows, and
+    // this runs once per played note while recording.
   }
 }
 
@@ -6954,7 +6955,14 @@ bool processDrumRollCc(uint8_t sourcePort, uint8_t channel, uint8_t cc,
   }
   if (matched) {
     markActivity(false);
-    ui.dirty = true;
+    // Only screens that show division state redraw. A roll hit while sitting
+    // on an unrelated screen changes nothing visible and must not cost a
+    // frame in the middle of playing.
+    if (ui.selectedSetting == SET_DIVISION || ui.selectedSetting == SET_DRUM_MAGIC ||
+        ui.selectedSetting == SET_ARP_MODE || ui.selectedSetting == SET_DIV_NOTES ||
+        liveNoteViewActive()) {
+      ui.dirty = true;
+    }
   }
   return matched;
 }
@@ -10363,10 +10371,12 @@ void loop() {
   const uint32_t perfNowMs = millis();
   if (perfNowMs - perfWindowStartMs >= 1000UL) {
     perfWindowStartMs = perfNowMs;
+    const bool changed = perfLoopMaxUsShown != perfLoopMaxUs ||
+                         perfLateMaxUsShown != perfLateMaxUs;
     perfLoopMaxUsShown = perfLoopMaxUs;
     perfLateMaxUsShown = perfLateMaxUs;
     perfLoopMaxUs = 0;
     perfLateMaxUs = 0;
-    if (ui.selectedSetting == SET_PANIC) ui.dirty = true;
+    if (changed && ui.selectedSetting == SET_PANIC) ui.dirty = true;
   }
 }
