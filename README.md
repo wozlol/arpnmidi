@@ -137,10 +137,13 @@ sensor, a mapped CC, or a button:
 
 - A double tap safe clears a layer and arms it, so the part can be played again
 - A single trigger before anything is played takes that arm back off
-- Another double tap brings the cleared layer back, plays it, and moves the
-  working track on to the next free one
-- Layers steps back to the layer just recorded. Manual and Parts Auto Solo stay
-  on the working track, since choosing tracks there belongs to the performer
+- Another double tap brings the cleared layer back and plays it, staying on
+  that same working track since undo restores content, it never counts as a
+  capture
+- In Layers, a double tap that lands on a track that is neither cleared nor
+  holding content steps back to the layer just recorded first. Manual and
+  Parts Auto Solo always stay on the working track, since choosing tracks
+  there belongs to the performer
 
 ### Live transformations
 

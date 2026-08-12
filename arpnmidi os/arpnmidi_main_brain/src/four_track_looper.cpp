@@ -28,6 +28,7 @@ void FourTrackLooper::reset() {
   recordingArmed_ = false;
   recording_ = false;
   overdubbing_ = false;
+  recordStartCount_ = 0;
   memset(importing_, 0, sizeof(importing_));
   memset(recordHeld_, 0, sizeof(recordHeld_));
 }
@@ -96,6 +97,10 @@ void FourTrackLooper::armRecord(uint8_t track, uint32_t fixedLengthUs, bool over
   recording_ = overdub;
   overdubbing_ = overdub;
   recordStartUs_ = overdub ? transportStartUs_ : 0;
+  // Overdub starts recording immediately, right here, rather than waiting for
+  // a first note the way a replacement arm does, so its start count has to be
+  // captured now too.
+  if (overdub) recordStartCount_ = tracks_[track].count;
   memset(recordHeld_, 0, sizeof(recordHeld_));
   // Arming stays non-destructive.  A cleared track keeps its undo material
   // until the first captured event actually replaces it, so the armed target
@@ -114,9 +119,11 @@ bool FourTrackLooper::beginArmedRecording(uint64_t nowUs) {
   overdubbing_ = playing_ && track.lengthUs > 0 && track.count > 0 && !track.hidden;
   if (overdubbing_) {
     recordStartUs_ = transportStartUs_;
+    recordStartCount_ = track.count;
   } else {
     recordStartUs_ = nowUs;
     permanentlyClear(recordingTrack_);
+    recordStartCount_ = 0;
   }
   track.generation = ++generationCounter_;
   return true;
@@ -201,7 +208,11 @@ bool FourTrackLooper::finishRecording(uint64_t nowUs) {
   recording_ = false;
   overdubbing_ = false;
   memset(recordHeld_, 0, sizeof(recordHeld_));
-  return track.count > 0;
+  // Whether THIS pass captured anything, not just whether the track holds
+  // anything at all: an overdub track already had content before the pass
+  // began, so track.count alone cannot tell the two apart. A pass that added
+  // nothing must not read as a completed take to whatever asked.
+  return track.count > recordStartCount_;
 }
 
 void FourTrackLooper::cancelRecording() {

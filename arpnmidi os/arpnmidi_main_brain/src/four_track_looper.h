@@ -147,6 +147,13 @@ class FourTrackLooper {
   bool recordingArmed_ = false;
   bool recording_ = false;
   bool overdubbing_ = false;
+  // The track's own event count at the instant this pass actually started
+  // recording, so finishRecording can tell whether THIS pass added anything.
+  // A plain count-is-nonzero check is right for a replacement, which always
+  // starts from zero, but wrong for an overdub: the track already had
+  // content before the pass began, so that check is always true regardless
+  // of whether the pass captured a single new event.
+  uint16_t recordStartCount_ = 0;
   bool importing_[kLoopTrackCount]{};
   bool recordHeld_[16][128]{};
 };

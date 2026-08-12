@@ -237,9 +237,26 @@ depends on a single control:
 - The master rec/play trigger accepts a double tap from any source that drives
   it. A double tap safe clears a layer and arms it, a single trigger before
   anything is played takes that arm back off, and a further double tap restores
-  the layer, plays it, and moves the working track on. Layers steps back to the
-  most recently recorded layer for this; Manual and Parts Auto Solo stay on the
-  working track.
+  the layer and plays it, staying on that same working track rather than
+  moving on, since undo restores content, it does not capture anything. In
+  Layers, a double tap that lands on a track that is neither cleared nor
+  holding content steps back to the most recently recorded layer first;
+  Manual and Parts Auto Solo always stay on the working track.
+  Every double tap's first press, on its own, still runs the ordinary
+  single-trigger logic, since there is no way to know in advance a second
+  press is coming. If the working track already has content and is playing,
+  that first press silently begins an overdub take, one that the second
+  press's recognized double tap then finishes. `finishRecording` used to
+  decide whether a pass captured anything by checking `track.count > 0`,
+  correct for a replace, which always starts from zero, but wrong for an
+  overdub onto existing content, where that count is never zero regardless of
+  whether the accidental pass added a single event. A genuinely empty
+  overdub pass therefore used to read as a completed take and silently
+  auto-advance the working track, right as the second press's own logic ran,
+  landing the clear or undo on whatever track it advanced to instead of the
+  one actually selected. The fix tracks each pass's starting count and checks
+  `track.count > recordStartCount_` instead, so an overdub that captured
+  nothing is correctly recognized as empty and never triggers the advance.
 - Auto Arm fires in exactly one place: the instant a fixed-length pass
   concludes on its own because it reached its length, inside the same check
   that already decides whether the pass captured anything. Nothing else
