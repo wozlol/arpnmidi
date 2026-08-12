@@ -61,6 +61,9 @@ Detailed wiring and two-board build information is in the
 - Track 1 can also establish a Free loop length and make it the musical bar
 - Layers, Parts Auto Solo, and Manual track modes
 - Overdub, replace, Auto Arm, mute, exclusive solo, safe clear, and undo
+- Recovering audibility, an unmute, losing an exclusive solo, or an undo,
+  retriggers whatever the track's own data would already have sounding at that
+  instant, not just whatever note-on comes next
 - When all Layers tracks are occupied, the next overdub goes onto the oldest
   layer
 - Optional auto quantize from 1/64 through 1/4, set per track
@@ -188,14 +191,20 @@ looper tracks independently.
 - Custom button behaviors: Momentary, Latch, and Flappy Bird
 
 In looper button mode each button owns one track and steps through its enabled
-actions, Select, Mute, Solo, Clear, and Undo in that order:
+actions, Select, Arm, Mute, Solo, Clear, and Undo in that order:
 
 - The first tap on a track always performs the first enabled action, so a single
   press can never reach Clear
 - The step only advances while the same button keeps being tapped, and the
   gesture closes after 1.5 seconds or as soon as another button is used
-- With the default Select, Clear, Undo set that reads as tap to select, tap
-  again to clear, tap a third time to undo
+- With the default Select, Arm, Clear, Undo set that reads as tap to select,
+  tap again to arm, tap a third time to clear, tap a fourth time to undo
+- Arm selects the track it arms, the same as Select, and disarms it again on a
+  second tap if it is already the pending arm. A pending arm survives a clear
+  on its own unrecorded track, so clearing after arming leaves the performer
+  still armed with the old content out of the way; undoing that clear cancels
+  the arm instead, since bringing old content back and starting a fresh take
+  are opposite choices
 
 ## Clock and transport
 

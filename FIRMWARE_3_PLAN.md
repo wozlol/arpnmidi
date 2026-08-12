@@ -159,7 +159,11 @@ Each track stores note ons, note offs, and optional pruned CC automation.
 Quantize is per track and can be Off or a straight division from 1/64 through
 1/4. The track being written owns the setting, so a drum part can land on a grid
 while a pad stays free. The LOOPER summary shows each track's length and
-quantize together, which is why lengths read as 2Br rather than 2 Bars.
+quantize together, which is why lengths read as 2Br rather than 2 Bars, and its
+Q flag box is a master indicator lit whenever any track has a quantize set,
+not just the selected one. The LOOPER submenu itself, Track, Length, Track
+Quantize, New Track's mode, Auto Arm, Time Travel, Rec CC, Transport, Back,
+groups the per-track fields first.
 
 ### Working-track and note-ownership rules
 
@@ -184,6 +188,22 @@ Note On belongs to an earlier pass. Without the gate the final output reference
 count never returns to zero and the note stays latched. A track that stops being
 playable, including one whose events are replaced underneath a sounding note,
 releases what it owns instead of waiting for a loop boundary that never comes.
+
+A track's playback cursor keeps stepping through its own recorded events every
+tick regardless of audibility: muted, soloed out, or hidden all still let time
+pass inside that track's data, since the cursor only stops advancing while the
+track is empty or the transport itself is not running. Recovering audibility,
+an unmute, losing an exclusive solo, or an undo, therefore does not land back
+at the top of the data; it lands wherever the cursor already is, mid-phrase.
+Picking up only the next note-on from there would silently skip whatever was
+already sounding. Recovery instead replays every event the cursor has already
+stepped past this cycle and retriggers whatever is still held as of right now,
+so it sounds like the part was playing the whole time even though every note
+is technically a fresh trigger. The replay is a core method, `collectHeldNotes`,
+that walks a track's own event list from its head up to its live cursor and
+reports the net-held notes; the sketch wraps mute, exclusive solo, and undo so
+each captures audibility before and after the change and retriggers only the
+tracks that newly became audible, never ones that already were.
 
 ### Redundant control paths
 
@@ -279,7 +299,8 @@ The current prototype button order is GPIO9, GPIO12, GPIO10, and GPIO13.
 The buttons can run in three modes:
 
 - Custom Note or CC with Momentary, Latch, or Flappy Bird behavior
-- Looper control with Select, Mute, Solo, Delete, and Undo actions
+- Looper control with Select, Arm, Mute, Solo, Delete, and Undo actions, in
+  that fixed order, with Select, Arm, Delete, and Undo on by default
 - Chord Memory with Learn and Clear actions
 
 If multiple looper actions are enabled, successive presses advance through the
@@ -287,6 +308,16 @@ enabled actions in a fixed order. They are not all fired on one press. The
 sequence only advances while the same button is tapped repeatedly on the track
 that is already selected, and it restarts after a short pause, so the first tap
 on a track always means the first action and a single press cannot reach Clear.
+Arm counts as locking to a track for this the same way Select does, since the
+button names a specific track either way, so Arm alone still lets pressing a
+different button restart the sequence for its own track.
+
+Arm selects the track as part of arming it and disarms it again on a second
+press if that track is already the pending arm, matching Loop Mix's Arm mode.
+A pending arm survives a clear on its own, unrecorded track, so the sequence
+Select, Arm, Clear leaves the performer armed and ready with the old content
+now out of the way; Undo is the opposite choice and cancels that pending arm
+when it restores the old content instead.
 
 ## Presets and storage
 

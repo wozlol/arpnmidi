@@ -45,6 +45,8 @@ class FourTrackLooper {
   using EmitFn = void (*)(void *context, uint8_t track, const LoopMidiEvent &event);
   using ReleaseFn = void (*)(void *context, uint8_t track);
   using VisitFn = bool (*)(void *context, uint8_t track, const LoopMidiEvent &event);
+  using HeldNoteFn = void (*)(void *context, uint8_t track, uint8_t channel,
+                              uint8_t note, uint8_t velocity);
 
   FourTrackLooper();
   void reset();
@@ -83,6 +85,15 @@ class FourTrackLooper {
   void setMuted(uint8_t track, bool muted, ReleaseFn release, void *context);
   void setSolo(uint8_t track, bool solo, ReleaseFn release, void *context);
   bool audible(uint8_t track) const;
+
+  // A track's cursor keeps advancing through its own recorded events every
+  // tick regardless of audibility: muted, soloed out, or hidden all still let
+  // time pass inside that track's data. This replays everything the cursor
+  // has already stepped past in the current cycle and reports which notes
+  // are still sounding as of right now, so a track regaining audibility can
+  // retrigger exactly what it should already be playing instead of only
+  // picking up whatever note-on happens to come next.
+  void collectHeldNotes(uint8_t track, HeldNoteFn fn, void *context) const;
 
   const LoopTrackState &track(uint8_t index) const { return tracks_[index]; }
   uint16_t usedEvents() const { return usedEvents_; }

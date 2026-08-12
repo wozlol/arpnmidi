@@ -225,6 +225,44 @@ int main() {
   assert(!clearLooper.track(0).hidden);
   assert(clearLooper.finishRecording(2250000));
 
+  // A pending arm survives a clear on its own, unrecorded track: there is
+  // nothing captured yet, so tidying up old content is not a reason to
+  // abandon the take. An armed-and-recording pass is different, since it
+  // already holds real events, so a clear still aborts that one.
+  FourTrackLooper armClearLooper;
+  Probe armClearProbe;
+  armClearLooper.armRecord(0, 250000, false);
+  assert(armClearLooper.capture(1000000, LoopMidiEvent{0, 0x90, 60, 100}));
+  assert(armClearLooper.finishRecording(1250000));
+  armClearLooper.armRecord(0, 250000, false);
+  assert(armClearLooper.recordingArmed());
+  armClearLooper.safeClear(0, release, &armClearProbe);
+  assert(!armClearLooper.trackHasContent(0));         // old content hidden
+  assert(armClearLooper.recordingArmed());             // arm untouched
+  assert(armClearLooper.recordingTrack() == 0);
+  assert(armClearLooper.capture(2000000, LoopMidiEvent{0, 0x90, 64, 90}));
+  assert(armClearLooper.recording());                  // the pending take still starts
+
+  armClearLooper.armRecord(1, 250000, false);
+  assert(armClearLooper.capture(3000000, LoopMidiEvent{0, 0x90, 67, 80}));
+  assert(armClearLooper.recording());
+  armClearLooper.safeClear(1, release, &armClearProbe);
+  assert(!armClearLooper.recordingArmed() && !armClearLooper.recording());  // aborted
+
+  // Undo is the opposite choice from a pending replacement: bringing the old
+  // content back cancels whatever take was pending for that track.
+  FourTrackLooper undoArmLooper;
+  Probe undoArmProbe;
+  undoArmLooper.armRecord(0, 250000, false);
+  assert(undoArmLooper.capture(1000000, LoopMidiEvent{0, 0x90, 60, 100}));
+  assert(undoArmLooper.finishRecording(1250000));
+  undoArmLooper.safeClear(0, release, &undoArmProbe);
+  undoArmLooper.armRecord(0, 250000, false);
+  assert(undoArmLooper.recordingArmed());
+  undoArmLooper.undoClear(0);
+  assert(!undoArmLooper.recordingArmed());
+  assert(undoArmLooper.trackHasContent(0));
+
   // Tracks may begin at different points in the shared cycle. Stopping and
   // starting again, including a clear and undo in between, has to bring them
   // back in the same alignment rather than restarting every track at zero.
@@ -266,6 +304,59 @@ int main() {
   syncLooper.tick(9260000, emit, release, &syncPlayback);
   assert(syncPlayback.emitted == 3 && syncPlayback.lastTrack == 1 &&
          syncPlayback.last.status == 0x90);
+
+  // Recovering from mute or an exclusive solo should retrigger whatever the
+  // track's own cursor has already walked past this cycle: audibility does
+  // not pause the cursor, so silently picking up only the next note-on
+  // dropped whatever was already mid-note.
+  FourTrackLooper heldLooper;
+  Probe heldProbe;
+  heldLooper.armRecord(0, 1000000, false);
+  assert(heldLooper.capture(1000000, LoopMidiEvent{0, 0x90, 60, 100}));   // t=0
+  assert(heldLooper.capture(1300000, LoopMidiEvent{0, 0x90, 64, 90}));    // t=300ms, still held
+  assert(heldLooper.capture(1500000, LoopMidiEvent{0, 0x80, 60, 0}));     // t=500ms, 60 released
+  assert(heldLooper.capture(1700000, LoopMidiEvent{0, 0x90, 67, 80}));    // t=700ms, held
+  assert(heldLooper.finishRecording(2000000));
+  heldLooper.start(2000000);
+
+  struct HeldCapture {
+    uint8_t count = 0;
+    uint8_t notes[8]{};
+    uint8_t velocities[8]{};
+  } heldCapture;
+  auto collect = [](void *context, uint8_t, uint8_t, uint8_t note, uint8_t velocity) {
+    auto &capture = *static_cast<HeldCapture *>(context);
+    capture.notes[capture.count] = note;
+    capture.velocities[capture.count] = velocity;
+    ++capture.count;
+  };
+
+  // Before anything has played this cycle, the cursor sits at head: nothing
+  // to replay yet.
+  heldLooper.collectHeldNotes(0, collect, &heldCapture);
+  assert(heldCapture.count == 0);
+
+  // Advance to just past the 700ms note-on, past the 500ms release of 60.
+  // Held right now: 64 (still sounding) and 67 (just started). 60 already
+  // released and must not reappear.
+  heldLooper.tick(2750000, emit, release, &heldProbe);
+  heldCapture = HeldCapture{};
+  heldLooper.collectHeldNotes(0, collect, &heldCapture);
+  assert(heldCapture.count == 2);
+  bool found64 = false, found67 = false;
+  for (uint8_t i = 0; i < heldCapture.count; ++i) {
+    if (heldCapture.notes[i] == 64) { found64 = true; assert(heldCapture.velocities[i] == 90); }
+    if (heldCapture.notes[i] == 67) { found67 = true; assert(heldCapture.velocities[i] == 80); }
+    assert(heldCapture.notes[i] != 60);
+  }
+  assert(found64 && found67);
+
+  // A fresh cycle (wrap) resets the cursor to head, and this same tick
+  // immediately retriggers whatever sits right at the top of the cycle.
+  heldLooper.tick(3000000, emit, release, &heldProbe);
+  heldCapture = HeldCapture{};
+  heldLooper.collectHeldNotes(0, collect, &heldCapture);
+  assert(heldCapture.count == 1 && heldCapture.notes[0] == 60);
 
   looper.clearAll(release, &probe);
   assert(looper.usedEvents() == 0);

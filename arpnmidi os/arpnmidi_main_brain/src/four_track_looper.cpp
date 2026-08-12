@@ -386,6 +386,34 @@ bool FourTrackLooper::audible(uint8_t trackIndex) const {
   return !importing_[trackIndex] && !track.hidden && !track.muted && (!anySolo || track.solo);
 }
 
+void FourTrackLooper::collectHeldNotes(uint8_t track, HeldNoteFn fn, void *context) const {
+  if (track >= kLoopTrackCount || !fn) return;
+  const LoopTrackState &state = tracks_[track];
+  // Nothing between head and the cursor to replay, either because the track
+  // is empty or because the cursor sits at the very top of its cycle.
+  if (state.head == kNoLoopEvent || state.head == state.playCursor) return;
+
+  bool held[16][128] = {};
+  uint8_t velocity[16][128] = {};
+  uint16_t slot = state.head;
+  while (slot != kNoLoopEvent && slot != state.playCursor) {
+    const LoopMidiEvent &event = slots_[slot].event;
+    const uint8_t type = event.status & 0xF0;
+    if ((type == 0x90 || type == 0x80) && event.data1 <= 127) {
+      const uint8_t channel = event.status & 0x0F;
+      const bool on = type == 0x90 && event.data2 > 0;
+      held[channel][event.data1] = on;
+      if (on) velocity[channel][event.data1] = event.data2;
+    }
+    slot = slots_[slot].next;
+  }
+  for (uint8_t channel = 0; channel < 16; ++channel) {
+    for (uint8_t note = 0; note < 128; ++note) {
+      if (held[channel][note]) fn(context, track, channel, note, velocity[channel][note]);
+    }
+  }
+}
+
 void FourTrackLooper::tick(uint64_t nowUs, EmitFn emit, ReleaseFn release,
                            void *context, uint16_t maxEvents) {
   if (recording_ && !overdubbing_ && recordFixedLengthUs_ > 0 &&
@@ -424,7 +452,13 @@ void FourTrackLooper::releaseIfAudibilityChanged(uint8_t track, bool wasAudible,
 
 void FourTrackLooper::safeClear(uint8_t track, ReleaseFn release, void *context) {
   if (track >= kLoopTrackCount) return;
-  if ((recording_ || recordingArmed_) && recordingTrack_ == track) cancelRecording();
+  // A pending arm survives its own track being cleared. There is nothing
+  // captured yet, so tidying up old content underneath it is not a reason to
+  // abandon the take: the performer stays ready to play, right where they
+  // were, with the old material now out of the way. An armed-and-recording
+  // pass is different: it already holds real captured events, so clearing its
+  // own track out from under it still aborts it, the same as before.
+  if (recording_ && recordingTrack_ == track) cancelRecording();
   // An empty track must not become hidden.  Undo can never bring it back, and a
   // phantom hidden track inverts every "is anything cleared" decision above.
   if (tracks_[track].count == 0) {
@@ -436,7 +470,12 @@ void FourTrackLooper::safeClear(uint8_t track, ReleaseFn release, void *context)
 }
 
 void FourTrackLooper::undoClear(uint8_t track) {
-  if (track < kLoopTrackCount && tracks_[track].count > 0) tracks_[track].hidden = false;
+  if (track >= kLoopTrackCount || tracks_[track].count == 0) return;
+  // Bringing the old content back means abandoning whatever take was pending
+  // for this track: undo and a fresh replacement are opposite choices, so
+  // choosing one cancels the other rather than leaving a stale arm behind.
+  if ((recording_ || recordingArmed_) && recordingTrack_ == track) cancelRecording();
+  tracks_[track].hidden = false;
 }
 
 void FourTrackLooper::permanentlyClear(uint8_t trackIndex) {

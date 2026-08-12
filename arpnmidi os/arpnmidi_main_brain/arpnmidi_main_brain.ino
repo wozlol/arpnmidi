@@ -411,8 +411,8 @@ constexpr uint8_t BASS_CANCEL_OCTAVE = 4;
 constexpr uint8_t BASS_CANCEL_HIGH_NOTE = 128;
 constexpr uint8_t FOUR_BUTTON_CUSTOM_DONE_SLOT = 4;
 constexpr uint8_t FOUR_BUTTON_CUSTOM_BACK_SLOT = 5;
-constexpr uint8_t FOUR_BUTTON_LOOPER_DONE_SLOT = 5;
-constexpr uint8_t FOUR_BUTTON_LOOPER_BACK_SLOT = 6;
+constexpr uint8_t FOUR_BUTTON_LOOPER_DONE_SLOT = 6;
+constexpr uint8_t FOUR_BUTTON_LOOPER_BACK_SLOT = 7;
 constexpr uint8_t FOUR_BUTTON_CHORD_DONE_SLOT = 2;
 constexpr uint8_t FOUR_BUTTON_CHORD_BACK_SLOT = 3;
 
@@ -500,6 +500,7 @@ constexpr uint8_t LOOPER_BUTTON_MUTE = 0x02;
 constexpr uint8_t LOOPER_BUTTON_SOLO = 0x04;
 constexpr uint8_t LOOPER_BUTTON_DELETE = 0x08;
 constexpr uint8_t LOOPER_BUTTON_UNDO = 0x10;
+constexpr uint8_t LOOPER_BUTTON_ARM = 0x20;
 // Two master rec/play triggers inside this window read as one double gesture.
 constexpr uint32_t LOOP_MASTER_DOUBLE_TAP_MS = 1000UL;
 // A looper button keeps stepping through its enabled actions only while it is
@@ -3237,6 +3238,56 @@ void emitMultitrackEvent(void *, uint8_t track, const arpnmidi3::LoopMidiEvent &
   routeIncomingChannelMessage(sourcePort, event.status, event.data1, event.data2);
 }
 
+// A track's cursor keeps stepping through its own recorded events every tick
+// no matter why it went quiet, muted, soloed out, or hidden, so by the time it
+// regains audibility the data itself has moved on. Picking up only the next
+// note-on from there would skip whatever was already mid-note. This replays
+// the track's own held-note state through the normal emit path, so recovery
+// sounds like the part was playing the whole time even though it is
+// technically a fresh trigger, and everything downstream, thru claims, the
+// held-note bookkeeping above, arp passthrough, sees an ordinary Note On.
+void retriggerLoopTrackHeldNotes(uint8_t track) {
+  if (!multitrackLooper.playing()) return;
+  multitrackLooper.collectHeldNotes(
+      track,
+      [](void *, uint8_t trackIndex, uint8_t channel, uint8_t note, uint8_t velocity) {
+        emitMultitrackEvent(nullptr, trackIndex,
+            arpnmidi3::LoopMidiEvent{0, static_cast<uint8_t>(0x90 | channel), note, velocity});
+      },
+      nullptr);
+}
+
+void setLoopTrackMuted(uint8_t track, bool muted) {
+  const bool wasAudible = multitrackLooper.audible(track);
+  multitrackLooper.setMuted(track, muted, releaseMultitrackOutput, nullptr);
+  if (!wasAudible && multitrackLooper.audible(track)) retriggerLoopTrackHeldNotes(track);
+}
+
+// Solo is exclusive: enabling it for one track changes every track's
+// audibility at once, so every track is checked before and after, not just
+// the one the performer touched.
+void setExclusiveLoopSolo(uint8_t soloTrack, bool enable) {
+  bool wasAudible[arpnmidi3::kLoopTrackCount];
+  for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+    wasAudible[i] = multitrackLooper.audible(i);
+  }
+  for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+    multitrackLooper.setSolo(i, enable && i == soloTrack, releaseMultitrackOutput, nullptr);
+  }
+  for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+    if (!wasAudible[i] && multitrackLooper.audible(i)) retriggerLoopTrackHeldNotes(i);
+  }
+}
+
+// Undo shares the same mechanism as mute and solo: a hidden track's cursor
+// keeps advancing the same as a muted one, so bringing it back benefits from
+// the same retrigger.
+void undoLoopTrackClear(uint8_t track) {
+  const bool wasAudible = multitrackLooper.audible(track);
+  multitrackLooper.undoClear(track);
+  if (!wasAudible && multitrackLooper.audible(track)) retriggerLoopTrackHeldNotes(track);
+}
+
 // A track that is no longer playable must not keep notes latched.  Clearing,
 // replacing, muting, soloing, and stopping all release through the looper, but
 // a track can also lose its events underneath a sounding note, and a silent
@@ -3413,7 +3464,7 @@ void clearOrUndoAllLoopTracks() {
   }
   for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
     if (anyLive) multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
-    else multitrackLooper.undoClear(track);
+    else undoLoopTrackClear(track);
   }
   // A whole-loop clear is a fresh start, so the working track resets to 1
   // along with it. Undo restores content, not the selection, so it leaves
@@ -3456,9 +3507,18 @@ void toggleLooperArmForTrack(uint8_t track) {
 // mix: every track comes back unmuted and unsoloed. It is the one action on
 // this screen that is not about a single picked track.
 void resetLoopMixMuteAndSolo() {
+  bool wasAudible[arpnmidi3::kLoopTrackCount];
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    wasAudible[track] = multitrackLooper.audible(track);
+  }
   for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
     multitrackLooper.setMuted(track, false, releaseMultitrackOutput, nullptr);
     multitrackLooper.setSolo(track, false, releaseMultitrackOutput, nullptr);
+  }
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    if (!wasAudible[track] && multitrackLooper.audible(track)) {
+      retriggerLoopTrackHeldNotes(track);
+    }
   }
   markLoopStorageDirty();
   releaseSilencedMultitrackOutputs();
@@ -3469,18 +3529,15 @@ void applyLoopMixModeToTrack(uint8_t track) {
   if (track >= arpnmidi3::kLoopTrackCount) return;
   if (loopMixMode == LOOP_MIX_SOLO) {
     const bool enable = !multitrackLooper.track(track).solo;
-    for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
-      multitrackLooper.setSolo(i, enable && i == track, releaseMultitrackOutput, nullptr);
-    }
+    setExclusiveLoopSolo(track, enable);
     markLoopStorageDirty();
   } else if (loopMixMode == LOOP_MIX_MUTE) {
-    multitrackLooper.setMuted(track, !multitrackLooper.track(track).muted,
-                              releaseMultitrackOutput, nullptr);
+    setLoopTrackMuted(track, !multitrackLooper.track(track).muted);
     markLoopStorageDirty();
   } else if (loopMixMode == LOOP_MIX_CLEAR) {
     // Clear and undo are the same gesture: a track that was cleared and not
     // recorded over comes back on the next press.
-    if (multitrackLooper.track(track).hidden) multitrackLooper.undoClear(track);
+    if (multitrackLooper.track(track).hidden) undoLoopTrackClear(track);
     else multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
     selectLooperTrack(track);
     markLoopStorageDirty();
@@ -3617,9 +3674,15 @@ void handleMultitrackMasterDoubleTap() {
   }
 
   if (loopTrackIsCleared(target)) {
+    const bool wasAudible = multitrackLooper.audible(target);
     multitrackLooper.undoClear(target);
     selectLooperTrack(target);
     if (!multitrackLooper.playing()) multitrackLooper.resume(nowUs);
+    // The retrigger check runs after resume, once the cursor is actually
+    // positioned for right now rather than wherever it was left paused.
+    if (!wasAudible && multitrackLooper.audible(target)) {
+      retriggerLoopTrackHeldNotes(target);
+    }
     if (layers) selectNextAutoLooperTrackAfterCapture();
   } else {
     selectLooperTrack(target);
@@ -3655,9 +3718,7 @@ void handleMultitrackRecPlay() {
     const uint8_t target = multitrackLooper.selectedTrack();
     armSelectedMultitrack(loopTrackHasContent(target));
     if (mode == arpnmidi3::LoopTrackMode::PartsAutoSolo) {
-      for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
-        multitrackLooper.setSolo(i, i == target, releaseMultitrackOutput, nullptr);
-      }
+      setExclusiveLoopSolo(target, true);
       markLoopStorageDirty();
     }
   }
@@ -3677,7 +3738,7 @@ void handleMultitrackStopDelete() {
     if (multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers) {
       clearOrUndoAllLoopTracks();
     } else if (multitrackLooper.track(track).hidden) {
-      multitrackLooper.undoClear(track);
+      undoLoopTrackClear(track);
     } else {
       multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
     }
@@ -4424,7 +4485,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (looperSettingsUi.cursor == 0) return arpnmidi3::kLoopTrackCount - 1;
       if (looperSettingsUi.cursor == 1) return multitrackLooper.selectedTrack() == 0 ? 6 : 5;
       if (looperSettingsUi.cursor == 2) return 5;
-      if (looperSettingsUi.cursor == 5) return static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual);
+      if (looperSettingsUi.cursor == 3) return static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual);
       return 1;
     case SET_MUTE_SOLO: return LOOP_MIX_BACK_SLOT;
     case SET_PARAMETER_LOCK:
@@ -4598,9 +4659,9 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       if (looperSettingsUi.cursor == 2) {
         return loopTrackQuantizeSelection(multitrackLooper.selectedTrack());
       }
-      if (looperSettingsUi.cursor == 3) return firmware3Settings.looperAutoRec;
-      if (looperSettingsUi.cursor == 4) return firmware3Settings.looperTimeTravel;
-      if (looperSettingsUi.cursor == 5) return firmware3Settings.looperTrackMode;
+      if (looperSettingsUi.cursor == 3) return firmware3Settings.looperTrackMode;
+      if (looperSettingsUi.cursor == 4) return firmware3Settings.looperAutoRec;
+      if (looperSettingsUi.cursor == 5) return firmware3Settings.looperTimeTravel;
       if (looperSettingsUi.cursor == 6) return firmware3Settings.looperRecordCc;
       return firmware3Settings.looperMidiTransport;
     case SET_MUTE_SOLO: return muteSoloCursor;
@@ -4940,12 +5001,12 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
         firmware3Settings.looperQuantize[multitrackLooper.selectedTrack()] =
             clampU8(value, 0, 5);
       } else if (looperSettingsUi.cursor == 3) {
-        firmware3Settings.looperAutoRec = value ? 1 : 0;
-      } else if (looperSettingsUi.cursor == 4) {
-        firmware3Settings.looperTimeTravel = value ? 1 : 0;
-      } else if (looperSettingsUi.cursor == 5) {
         firmware3Settings.looperTrackMode =
           clampU8(value, 0, static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
+      } else if (looperSettingsUi.cursor == 4) {
+        firmware3Settings.looperAutoRec = value ? 1 : 0;
+      } else if (looperSettingsUi.cursor == 5) {
+        firmware3Settings.looperTimeTravel = value ? 1 : 0;
       } else if (looperSettingsUi.cursor == 6) {
         firmware3Settings.looperRecordCc = value ? 1 : 0;
       } else {
@@ -5174,8 +5235,8 @@ Firmware3Settings defaultFirmware3Settings() {
 FeatureControlSettings defaultFeatureControlSettings() {
   FeatureControlSettings controls{};
   controls.fourButtonMode = FOUR_BUTTON_LOOPER;
-  controls.looperButtonActions = LOOPER_BUTTON_SELECT | LOOPER_BUTTON_DELETE |
-      LOOPER_BUTTON_UNDO;
+  controls.looperButtonActions = LOOPER_BUTTON_SELECT | LOOPER_BUTTON_ARM |
+      LOOPER_BUTTON_DELETE | LOOPER_BUTTON_UNDO;
   for (uint8_t button = 0; button < 4; ++button) {
     controls.customButtons[button].channel = 1;
     controls.customButtons[button].number = 60 + button;
@@ -5310,7 +5371,7 @@ void applyPresetRecord(const PresetRecord &record) {
   featureControls.fourButtonMode = clampU8(featureControls.fourButtonMode, 0,
       FOUR_BUTTON_MODE_COUNT - 1);
   featureControls.looperButtonActions &= LOOPER_BUTTON_SELECT | LOOPER_BUTTON_MUTE |
-      LOOPER_BUTTON_SOLO | LOOPER_BUTTON_DELETE | LOOPER_BUTTON_UNDO;
+      LOOPER_BUTTON_SOLO | LOOPER_BUTTON_DELETE | LOOPER_BUTTON_UNDO | LOOPER_BUTTON_ARM;
   if (featureControls.looperButtonActions ==
       (LOOPER_BUTTON_SELECT | LOOPER_BUTTON_DELETE)) {
     featureControls.looperButtonActions |= LOOPER_BUTTON_UNDO;
@@ -6213,10 +6274,10 @@ void activateClickAction() {
           saveStorageIfAuto();
         }
       } else if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) {
-        if (fourButtonUiCursor < 5) {
-          static constexpr uint8_t masks[5] = {
-            LOOPER_BUTTON_SELECT, LOOPER_BUTTON_MUTE, LOOPER_BUTTON_SOLO,
-            LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
+        if (fourButtonUiCursor < 6) {
+          static constexpr uint8_t masks[6] = {
+            LOOPER_BUTTON_SELECT, LOOPER_BUTTON_ARM, LOOPER_BUTTON_MUTE,
+            LOOPER_BUTTON_SOLO, LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
           };
           featureControls.looperButtonActions ^= masks[fourButtonUiCursor];
           saveStorageIfAuto();
@@ -6914,7 +6975,7 @@ void featureLoopClearUndo() {
   if (multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers) {
     clearOrUndoAllLoopTracks();
   } else if (multitrackLooper.track(selected).hidden) {
-    multitrackLooper.undoClear(selected);
+    undoLoopTrackClear(selected);
   } else {
     multitrackLooper.safeClear(selected, releaseMultitrackOutput, nullptr);
   }
@@ -6979,17 +7040,12 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
   } else if (id >= FEATURE_BUTTON_TRACK_MUTE_BASE &&
              id < FEATURE_BUTTON_TRACK_MUTE_BASE + arpnmidi3::kLoopTrackCount) {
     const uint8_t track = id - FEATURE_BUTTON_TRACK_MUTE_BASE;
-    multitrackLooper.setMuted(track, !multitrackLooper.track(track).muted,
-                              releaseMultitrackOutput, nullptr);
+    setLoopTrackMuted(track, !multitrackLooper.track(track).muted);
     markLoopStorageDirty();
   } else if (id >= FEATURE_BUTTON_TRACK_SOLO_BASE &&
              id < FEATURE_BUTTON_TRACK_SOLO_BASE + arpnmidi3::kLoopTrackCount) {
     const uint8_t selected = id - FEATURE_BUTTON_TRACK_SOLO_BASE;
-    const bool enable = !multitrackLooper.track(selected).solo;
-    for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
-      multitrackLooper.setSolo(track, enable && track == selected,
-                               releaseMultitrackOutput, nullptr);
-    }
+    setExclusiveLoopSolo(selected, !multitrackLooper.track(selected).solo);
     markLoopStorageDirty();
   } else if (id == FEATURE_BUTTON_QUICK_JUMP) {
     setQuickJumpEnabled(firmware3Settings.quickJumpEnabled == 0);
@@ -7780,7 +7836,10 @@ void handleCustomButton(uint8_t button, bool pressed) {
 void handleLooperButton(uint8_t button) {
   const uint32_t now = millis();
   const uint8_t actions = featureControls.looperButtonActions;
-  const bool selectEnabled = (actions & LOOPER_BUTTON_SELECT) != 0;
+  // Arm selects too, the same as Select itself: the button press already
+  // names a specific track, so either action puts the working track there.
+  const bool locksToTrack =
+      (actions & (LOOPER_BUTTON_SELECT | LOOPER_BUTTON_ARM)) != 0;
 
   // The action cycle only continues while the performer keeps tapping the same
   // track in one gesture.  A different button, a pause, or a track that is not
@@ -7788,45 +7847,46 @@ void handleLooperButton(uint8_t button) {
   // means the first action and a single press can never reach Clear.
   if (button != lastLooperButton ||
       now - looperButtonLastMs > LOOPER_BUTTON_CYCLE_MS ||
-      (selectEnabled && multitrackLooper.selectedTrack() != button)) {
+      (locksToTrack && multitrackLooper.selectedTrack() != button)) {
     memset(looperButtonStep, 0, sizeof(looperButtonStep));
   }
   lastLooperButton = button;
   looperButtonLastMs = now;
 
-  static constexpr uint8_t orderedActions[5] = {
-    LOOPER_BUTTON_SELECT, LOOPER_BUTTON_MUTE, LOOPER_BUTTON_SOLO,
-    LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
+  static constexpr uint8_t orderedActions[6] = {
+    LOOPER_BUTTON_SELECT, LOOPER_BUTTON_ARM, LOOPER_BUTTON_MUTE,
+    LOOPER_BUTTON_SOLO, LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
   };
   uint8_t selectedAction = 0;
-  for (uint8_t offset = 0; offset < 5; ++offset) {
-    const uint8_t index = (looperButtonStep[button] + offset) % 5U;
+  for (uint8_t offset = 0; offset < 6; ++offset) {
+    const uint8_t index = (looperButtonStep[button] + offset) % 6U;
     if ((actions & orderedActions[index]) == 0) continue;
     selectedAction = orderedActions[index];
-    looperButtonStep[button] = (index + 1U) % 5U;
+    looperButtonStep[button] = (index + 1U) % 6U;
     break;
   }
   if (selectedAction == LOOPER_BUTTON_SELECT) {
     selectLooperTrack(button);
+  } else if (selectedAction == LOOPER_BUTTON_ARM) {
+    // Selects the track as part of arming it, and disarms it again if this
+    // same track is already the pending arm.
+    toggleLooperArmForTrack(button);
   } else if (selectedAction == LOOPER_BUTTON_MUTE) {
-    multitrackLooper.setMuted(button, !multitrackLooper.track(button).muted,
-                              releaseMultitrackOutput, nullptr);
+    setLoopTrackMuted(button, !multitrackLooper.track(button).muted);
   } else if (selectedAction == LOOPER_BUTTON_SOLO) {
-    const bool enable = !multitrackLooper.track(button).solo;
-    for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
-      multitrackLooper.setSolo(track, enable && track == button,
-                               releaseMultitrackOutput, nullptr);
-    }
+    setExclusiveLoopSolo(button, !multitrackLooper.track(button).solo);
   } else if (selectedAction == LOOPER_BUTTON_DELETE) {
-    // Clearing the working track cancels a record aimed at it, so the track is
-    // taken first and the selection follows afterwards.
+    // Clearing the working track cancels a real in-progress recording aimed
+    // at it, but a mere pending arm survives, so the track is taken first and
+    // the selection follows afterwards either way.
     multitrackLooper.safeClear(button, releaseMultitrackOutput, nullptr);
     selectLooperTrack(button);
   } else if (selectedAction == LOOPER_BUTTON_UNDO) {
-    multitrackLooper.undoClear(button);
+    undoLoopTrackClear(button);
     selectLooperTrack(button);
   }
-  if (selectedAction != 0 && selectedAction != LOOPER_BUTTON_SELECT) {
+  if (selectedAction != 0 && selectedAction != LOOPER_BUTTON_SELECT &&
+      selectedAction != LOOPER_BUTTON_ARM) {
     markLoopStorageDirty();
   }
   releaseSilencedMultitrackOutputs();
@@ -8413,8 +8473,8 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
     }
     case SET_LOOP_BARS: {
       static const char *const names[] = {
-        "TRACK", "LENGTH", "TRK QUANT", "AUTO ARM", "TIME TRAV",
-        "NEW TRACK", "REC CC", "TRNSPRT", "BACK"
+        "TRACK", "LENGTH", "TRK QUANT", "NEW TRACK", "AUTO ARM",
+        "TIME TRAV", "REC CC", "TRNSPRT", "BACK"
       };
       index = looperSettingsUi.cursor; label = names[index]; return true;
     }
@@ -9318,14 +9378,16 @@ void drawFourButtonScreen() {
     return;
   }
   if (fourButtonUiStage == FOUR_BUTTON_UI_LOOPER) {
-    static const char *const names[] = {"SELECT TRK", "MUTE", "SOLO", "DELETE", "UNDO", "DONE", "BACK"};
+    static const char *const names[] = {
+      "SELECT TRK", "ARM", "MUTE", "SOLO", "DELETE", "UNDO", "DONE", "BACK"
+    };
     static constexpr uint8_t masks[] = {
-      LOOPER_BUTTON_SELECT, LOOPER_BUTTON_MUTE, LOOPER_BUTTON_SOLO,
-      LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
+      LOOPER_BUTTON_SELECT, LOOPER_BUTTON_ARM, LOOPER_BUTTON_MUTE,
+      LOOPER_BUTTON_SOLO, LOOPER_BUTTON_DELETE, LOOPER_BUTTON_UNDO
     };
     display.setTextSize(2);
     display.print(names[fourButtonUiCursor]);
-    if (fourButtonUiCursor < 5) {
+    if (fourButtonUiCursor < 6) {
       display.setCursor(0, 31);
       display.print((featureControls.looperButtonActions & masks[fourButtonUiCursor])
           ? F("ON") : F("OFF"));
@@ -9754,8 +9816,8 @@ void drawLooperFlagBox(uint8_t x, uint8_t y, char label, bool enabled) {
 
 void drawLooperSettingsScreen() {
   static const char *const names[] = {
-    "TRACK", "LENGTH", "TRK QUANT", "AUTO ARM", "TIME TRAV",
-    "NEW TRACK", "REC CC", "TRNSPRT", "BACK"
+    "TRACK", "LENGTH", "TRK QUANT", "NEW TRACK", "AUTO ARM",
+    "TIME TRAV", "REC CC", "TRNSPRT", "BACK"
   };
   const uint8_t track = multitrackLooper.selectedTrack();
   if (ui.menuMode == MENU_SELECT) {
@@ -9781,7 +9843,13 @@ void drawLooperSettingsScreen() {
     }
     drawLooperFlagBox(70, 1, 'A', firmware3Settings.looperAutoRec);
     drawLooperFlagBox(85, 1, 'T', firmware3Settings.looperTimeTravel);
-    drawLooperFlagBox(70, 14, 'Q', loopTrackQuantizeSelection(track));
+    // A master indicator: lit whenever any track has a quantize set, not just
+    // the selected one, since quantize is per track now.
+    bool anyTrackQuantized = false;
+    for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
+      anyTrackQuantized |= loopTrackQuantizeSelection(i) != 0;
+    }
+    drawLooperFlagBox(70, 14, 'Q', anyTrackQuantized);
     drawLooperFlagBox(85, 14, 'C', firmware3Settings.looperRecordCc);
     display.drawRect(101, 1, 16, 24, SSD1306_WHITE);
     display.setTextSize(2);
@@ -9806,12 +9874,12 @@ void drawLooperSettingsScreen() {
   else if (looperSettingsUi.cursor == 2) {
     static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
     value = quantize[loopTrackQuantizeSelection(track)];
-  } else if (looperSettingsUi.cursor == 3) value = onOff(firmware3Settings.looperAutoRec);
-  else if (looperSettingsUi.cursor == 4) value = onOff(firmware3Settings.looperTimeTravel);
-  else if (looperSettingsUi.cursor == 5) {
+  } else if (looperSettingsUi.cursor == 3) {
     static const char *const modes[] = {"LAYERS", "PARTS SOLO", "MANUAL"};
     value = modes[firmware3Settings.looperTrackMode];
-  } else if (looperSettingsUi.cursor == 6) value = onOff(firmware3Settings.looperRecordCc);
+  } else if (looperSettingsUi.cursor == 4) value = onOff(firmware3Settings.looperAutoRec);
+  else if (looperSettingsUi.cursor == 5) value = onOff(firmware3Settings.looperTimeTravel);
+  else if (looperSettingsUi.cursor == 6) value = onOff(firmware3Settings.looperRecordCc);
   else if (looperSettingsUi.cursor == 7) value = onOff(firmware3Settings.looperMidiTransport);
   drawSubmenuField(names[looperSettingsUi.cursor], value, looperSettingsUi.editing);
 }
