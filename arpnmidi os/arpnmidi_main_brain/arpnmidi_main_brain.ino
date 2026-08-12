@@ -1099,6 +1099,8 @@ constexpr uint8_t LOOP_MIX_BACK_SLOT = LOOP_MIX_MODE_BASE + LOOP_MIX_MODE_COUNT;
 uint8_t loopMixMode = LOOP_MIX_ARM;
 uint8_t loopMixLastClickedMode = 0xFF;
 uint32_t loopMixModeClickMs = 0;
+uint8_t loopMixLastClickedTrack = 0xFF;
+uint32_t loopMixTrackClickMs = 0;
 constexpr uint32_t LOOP_MIX_DOUBLE_CLICK_MS = 700UL;
 SubmenuUiState arpMenuUi;
 SubmenuUiState liveVelocityUi;
@@ -4926,12 +4928,11 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       }
       break;
     case SET_MUTE_SOLO:
+      // Moving the cursor is browsing. The engine's working track changes
+      // only when an action lands on a track: Arm and Clear select it, Mute
+      // and Solo leave the selection alone. The cursor still follows the
+      // engine when a button, a CC, or the auto-advance selects a track.
       muteSoloCursor = clampU8(value, 0, LOOP_MIX_BACK_SLOT);
-      // Turning onto a track in Loop Mix selects it in the engine, the same
-      // as hold-and-turn on the summary screen.
-      if (muteSoloCursor < arpnmidi3::kLoopTrackCount) {
-        selectLooperTrack(muteSoloCursor);
-      }
       break;
     case SET_PARAMETER_LOCK:
       if (!parameterLockUi.editing) parameterLockUi.cursor = clampU8(value, 0, 2);
@@ -6225,7 +6226,20 @@ void activateClickAction() {
       return;
     } else if (ui.selectedSetting == SET_MUTE_SOLO) {
       if (muteSoloCursor < arpnmidi3::kLoopTrackCount) {
-        applyLoopMixModeToTrack(muteSoloCursor);
+        const uint32_t trackClickMs = millis();
+        const bool secondClick = loopMixLastClickedTrack == muteSoloCursor &&
+            (trackClickMs - loopMixTrackClickMs) <= LOOP_MIX_DOUBLE_CLICK_MS;
+        loopMixLastClickedTrack = muteSoloCursor;
+        loopMixTrackClickMs = trackClickMs;
+        if (secondClick) {
+          // The fast second click on a track leaves the screen. The action
+          // already landed on the first click, and re-applying it here would
+          // just toggle it straight back.
+          ui.menuMode = MENU_SELECT;
+          ui.deferredExitWork = true;
+        } else {
+          applyLoopMixModeToTrack(muteSoloCursor);
+        }
       } else if (muteSoloCursor < LOOP_MIX_BACK_SLOT) {
         const uint8_t picked = muteSoloCursor - LOOP_MIX_MODE_BASE;
         const uint32_t clickMs = millis();
@@ -9717,35 +9731,39 @@ void drawLooperSettingsScreen() {
       display.setCursor(0, y);
       display.print(i == track ? F(">") : F(" "));
       display.print(i + 1U);
-      display.setCursor(15, y);
+      display.setCursor(17, y);
       display.print(loopLengthSummaryName(loopTrackLengthSelection[i]));
-      display.setCursor(38, y);
+      display.setCursor(39, y);
       display.print(loopQuantizeSummaryName(loopTrackQuantizeSelection(i)));
       const arpnmidi3::LoopTrackState &state = multitrackLooper.track(i);
       // A filled play triangle is audible content. A hollow one is cleared
       // content that Undo can still bring back. Nothing is an empty track.
       const int ty = 5 + i * 10;
       if (state.count > 0 && !state.hidden) {
-        display.fillTriangle(60, ty - 3, 60, ty + 3, 65, ty, SSD1306_WHITE);
+        display.fillTriangle(58, ty - 3, 58, ty + 3, 63, ty, SSD1306_WHITE);
       } else if (state.count > 0) {
-        display.drawTriangle(60, ty - 3, 60, ty + 3, 65, ty, SSD1306_WHITE);
+        display.drawTriangle(58, ty - 3, 58, ty + 3, 63, ty, SSD1306_WHITE);
       }
     }
     drawLooperFlagBox(70, 1, 'R', firmware3Settings.looperAutoRec);
     drawLooperFlagBox(85, 1, 'T', firmware3Settings.looperTimeTravel);
     drawLooperFlagBox(70, 14, 'Q', loopTrackQuantizeSelection(track));
     drawLooperFlagBox(85, 14, 'C', firmware3Settings.looperRecordCc);
-    display.drawRect(101, 1, 24, 24, SSD1306_WHITE);
+    display.drawRect(101, 1, 18, 24, SSD1306_WHITE);
     display.setTextSize(2);
-    display.setCursor(107, 6);
+    display.setCursor(104, 6);
     display.print(looperTrackModeSummaryLetter());
     display.setTextSize(1);
-    display.setCursor(80, 31);
+    display.setCursor(78, 31);
     display.print(F("T"));
     display.print(track + 1U);
-    display.print(' ');
-    static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
-    display.print(quantize[loopTrackQuantizeSelection(track)]);
+    const uint8_t summaryQuant = loopTrackQuantizeSelection(track);
+    if (summaryQuant) {
+      // Quantize Off says nothing at all. The track label alone means free.
+      display.print(' ');
+      static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
+      display.print(quantize[summaryQuant]);
+    }
     return;
   }
   String value;
