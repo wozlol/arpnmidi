@@ -290,7 +290,7 @@ depends on a single control:
 - Holding the encoder switch into a panic is a deliberate emergency reset, not
   just a silence: on top of the usual panic, all notes off and the transport
   stopped, it also gives the loop a clean slate. Unlike the eye/pad's
-  stop-then-clear press and the three-button chord, this clear is
+  stop-then-clear press and holding three buttons together, this clear is
   one-directional on purpose: it only ever clears whatever is still live and
   leaves an already-cleared track exactly alone, it never undoes, so there is
   no ambiguity about which way a held panic goes. The clear runs first and
@@ -399,18 +399,18 @@ Select, Arm, Clear leaves the performer armed and ready with the old content
 now out of the way; Undo is the opposite choice and cancels that pending arm
 when it restores the old content instead.
 
-In Looper mode the buttons also read as a chord: a fresh press counts however
-many of the four are physically down at that instant, no waiting, no
-window, since none is needed, holding a second or third button down later
-still leaves the earlier ones reading as held. One button still means its
-own per-track action, two down together means stop or play, three down
-together means the whole-loop clear or undo.
+In Looper mode the buttons also respond to more than one held down at once: a
+fresh press counts however many of the four are physically down at that
+instant, no waiting, no window, since none is needed, holding a second or
+third button down later still leaves the earlier ones reading as held. One
+button still means its own per-track action, two down together means stop
+or play, three down together means the whole-loop clear or undo.
 
 - Two buttons down together is the same stop the eye or pad sensor gives on
   its first press: finish anything mid-capture and stop the transport. Doing
   it again while already stopped plays instead of chaining into that
-  sensor's stop-then-clear escalation, so this chord is a plain play/stop
-  toggle from the buttons alone.
+  sensor's stop-then-clear escalation, so this is a plain play/stop toggle
+  from the buttons alone.
 - Three buttons down together is the same undoable whole-loop clear the
   eye/pad reaches on a second stop-then-clear press: clear every track that
   has anything audible, or if every track is already cleared, bring them all

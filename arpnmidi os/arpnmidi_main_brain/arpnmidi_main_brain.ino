@@ -8062,10 +8062,10 @@ void handleLooperButton(uint8_t button) {
 // Two physical buttons held together in Looper mode is the same stop the eye
 // or pad sensor gives on its first press: finish anything mid-capture and
 // stop the transport. Doing it again while already stopped plays instead of
-// chaining into that sensor's stop-then-clear escalation, since the
-// three-button chord below is the dedicated way to reach a clear from the
-// physical buttons.
-void handleLooperTwoButtonChord() {
+// chaining into that sensor's stop-then-clear escalation, since holding
+// three buttons together, below, is the dedicated way to reach a clear from
+// the physical buttons.
+void handleLooperTwoButtonHold() {
   const uint64_t nowUs = time_us_64();
   if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
     finishActiveMultitrackRecording(nowUs, false);
@@ -8086,7 +8086,7 @@ void handleLooperTwoButtonChord() {
 // clear-all gesture the eye/pad reaches on a second stop-then-clear press:
 // clear every track that has anything audible, or if every track is already
 // cleared, bring them all back instead.
-void handleLooperThreeButtonChord() {
+void handleLooperThreeButtonHold() {
   const uint64_t nowUs = time_us_64();
   if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) {
     finishActiveMultitrackRecording(nowUs, false);
@@ -8205,9 +8205,9 @@ void pollButtons() {
       if (pressed) {
         const uint8_t heldCount = heldPhysicalButtonCount();
         if (heldCount >= 3) {
-          handleLooperThreeButtonChord();
+          handleLooperThreeButtonHold();
         } else if (heldCount == 2) {
-          handleLooperTwoButtonChord();
+          handleLooperTwoButtonHold();
         } else {
           handleLooperButton(button);
         }
