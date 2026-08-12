@@ -3202,7 +3202,7 @@ uint8_t loopTrackQuantizeSelection(uint8_t track) {
 // grid while a pad stays free.
 uint32_t multitrackQuantizeUs(uint8_t track) {
   static constexpr uint8_t divisions[5] = {
-    DIV_1_64, DIV_1_32, DIV_1_16, DIV_1_8, DIV_1_4
+    DIV_1_4, DIV_1_8, DIV_1_16, DIV_1_32, DIV_1_64
   };
   const uint8_t selection = loopTrackQuantizeSelection(track);
   if (selection == 0) return 0;
@@ -9949,7 +9949,7 @@ const char *loopLengthSummaryName(uint8_t selection) {
 }
 
 const char *loopQuantizeSummaryName(uint8_t selection) {
-  static const char *const names[] = {"q-", "q64", "q32", "q16", "q8", "q4"};
+  static const char *const names[] = {"q-", "q4", "q8", "q16", "q32", "q64"};
   return names[clampU8(selection, 0, 5)];
 }
 
@@ -10019,7 +10019,7 @@ void drawLooperSettingsScreen() {
     if (summaryQuant) {
       // Quantize Off says nothing at all. The track label alone means free.
       display.print(' ');
-      static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
+      static const char *const quantize[] = {"OFF", "1/4", "1/8", "1/16", "1/32", "1/64"};
       display.print(quantize[summaryQuant]);
     }
     return;
@@ -10028,7 +10028,7 @@ void drawLooperSettingsScreen() {
   if (looperSettingsUi.cursor == 0) value = String(track + 1U);
   else if (looperSettingsUi.cursor == 1) value = loopLengthSelectionName(loopTrackLengthSelection[track]);
   else if (looperSettingsUi.cursor == 2) {
-    static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
+    static const char *const quantize[] = {"OFF", "1/4", "1/8", "1/16", "1/32", "1/64"};
     value = quantize[loopTrackQuantizeSelection(track)];
   } else if (looperSettingsUi.cursor == 3) {
     static const char *const modes[] = {"LAYERS", "PARTS SOLO", "MANUAL"};
