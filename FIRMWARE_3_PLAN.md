@@ -163,14 +163,20 @@ Track modes:
 - Manual leaves working-track selection to the performer.
 
 Each track stores note ons, note offs, and optional pruned CC automation.
-Quantize is per track and can be Off or a straight division from 1/64 through
-1/4. The track being written owns the setting, so a drum part can land on a grid
-while a pad stays free. The LOOPER summary shows each track's length and
-quantize together, which is why lengths read as 2Br rather than 2 Bars, and its
-Q flag box is a master indicator lit whenever any track has a quantize set,
-not just the selected one. The LOOPER submenu itself, Track, Length, Track
-Quantize, New Track's mode, Auto Arm, Time Travel, Rec CC, Transport, Back,
-groups the per-track fields first.
+Quantize is per track and can be Off or any straight, dotted, or triplet
+division from 1/4 down through 1/64T, the same order and range the main
+Division list uses on its short end, just without 1/2 and 1/1, the looper
+never needed anything looser than a quarter note for. The track being
+written owns the setting, so a drum part can land on a grid while a pad
+stays free. The LOOPER summary shows each track's length and quantize
+together, which is why lengths read as 2Br rather than 2 Bars; a straight
+division there keeps its "q" prefix (q4, q8, q16...), but a dotted or
+triplet division drops it, since the name already carries its own D or T
+letter and dropping "q" is what keeps rows like 32T fitting. Its Q flag box
+is a master indicator lit whenever any track has a quantize set, not just
+the selected one. The LOOPER submenu itself, Track, Length, Track Quantize,
+New Track's mode, Auto Arm, Time Travel, Rec CC, Transport, Back, groups the
+per-track fields first.
 
 ### Working-track and note-ownership rules
 

@@ -394,6 +394,11 @@ constexpr uint8_t LIVE_TARGET_COUNT = 5;  // Main plus Looper Tracks 1-4.
 // and stay bound to LIVE_TARGET_COUNT, untouched.
 constexpr uint8_t SELECTD_LIVE_TARGET = LIVE_TARGET_COUNT;            // = 5
 constexpr uint8_t STUTTER_ECHO_TARGET_COUNT = LIVE_TARGET_COUNT + 1;  // = 6
+// Off, then every straight/dotted/triplet division from 1/4 down through
+// 1/64T, the same order and range the main Division list uses on its short
+// end, just without the 1/2 and 1/1 the looper never needed anything looser
+// than a quarter note for.
+constexpr uint8_t LOOP_QUANTIZE_DIVISION_COUNT = DIVISION_COUNT - DIV_1_4;  // 14
 constexpr uint8_t STUTTER_BUTTON_DIVISION_COUNT = 6;
 // Stutter shares the rolling capture engine with Time Travel. Its long choices
 // are meter-aware bars, followed by the ordinary musical divisions from long
@@ -3231,19 +3236,17 @@ void adoptFreeTrackOneTempo() {
 
 uint8_t loopTrackQuantizeSelection(uint8_t track) {
   if (track >= arpnmidi3::kLoopTrackCount) return 0;
-  return clampU8(firmware3Settings.looperQuantize[track], 0, 5);
+  return clampU8(firmware3Settings.looperQuantize[track], 0, LOOP_QUANTIZE_DIVISION_COUNT);
 }
 
 // Quantize belongs to the track being written, so a drum part can land on a
 // grid while a pad stays free.
 uint32_t multitrackQuantizeUs(uint8_t track) {
-  static constexpr uint8_t divisions[5] = {
-    DIV_1_4, DIV_1_8, DIV_1_16, DIV_1_32, DIV_1_64
-  };
   const uint8_t selection = loopTrackQuantizeSelection(track);
   if (selection == 0) return 0;
+  const uint8_t division = DIV_1_4 + (selection - 1);
   return static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
-      musicalDurationUs(kDivisionPulseSteps[divisions[selection - 1]])));
+      musicalDurationUs(kDivisionPulseSteps[division])));
 }
 
 void refreshLoopUiState() {
@@ -4622,7 +4625,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (!looperSettingsUi.editing) return 8;
       if (looperSettingsUi.cursor == 0) return arpnmidi3::kLoopTrackCount - 1;
       if (looperSettingsUi.cursor == 1) return multitrackLooper.selectedTrack() == 0 ? 6 : 5;
-      if (looperSettingsUi.cursor == 2) return 5;
+      if (looperSettingsUi.cursor == 2) return LOOP_QUANTIZE_DIVISION_COUNT;
       if (looperSettingsUi.cursor == 3) return static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual);
       return 1;
     case SET_MUTE_SOLO: return LOOP_MIX_BACK_SLOT;
@@ -5137,7 +5140,7 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
         setLoopTrackLengthSelection(track, value);
       } else if (looperSettingsUi.cursor == 2) {
         firmware3Settings.looperQuantize[multitrackLooper.selectedTrack()] =
-            clampU8(value, 0, 5);
+            clampU8(value, 0, LOOP_QUANTIZE_DIVISION_COUNT);
       } else if (looperSettingsUi.cursor == 3) {
         firmware3Settings.looperTrackMode =
           clampU8(value, 0, static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
@@ -5395,7 +5398,7 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
   s.looperTrackMode = clampU8(s.looperTrackMode, 0,
       static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
   for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
-    s.looperQuantize[track] = clampU8(s.looperQuantize[track], 0, 5);
+    s.looperQuantize[track] = clampU8(s.looperQuantize[track], 0, LOOP_QUANTIZE_DIVISION_COUNT);
   }
   s.looperRecordCc = s.looperRecordCc ? 1 : 0;
   s.stutterTimeoutBars = clampU8(s.stutterTimeoutBars, 1, 16);
@@ -10008,8 +10011,14 @@ const char *loopLengthSummaryName(uint8_t selection) {
 }
 
 const char *loopQuantizeSummaryName(uint8_t selection) {
-  static const char *const names[] = {"q-", "q4", "q8", "q16", "q32", "q64"};
-  return names[clampU8(selection, 0, 5)];
+  // Off, then one entry per division from 1/4 through 1/64T. A straight
+  // division keeps the "q" prefix; a dotted or triplet name already carries
+  // its own D or T letter, so dropping "q" there is what keeps it fitting.
+  static const char *const names[] = {
+    "q-", "q4", "8D", "4T", "q8", "16D", "8T", "q16", "32D", "16T",
+    "q32", "64D", "32T", "q64", "64T"
+  };
+  return names[clampU8(selection, 0, LOOP_QUANTIZE_DIVISION_COUNT)];
 }
 
 char looperTrackModeSummaryLetter() {
@@ -10078,8 +10087,7 @@ void drawLooperSettingsScreen() {
     if (summaryQuant) {
       // Quantize Off says nothing at all. The track label alone means free.
       display.print(' ');
-      static const char *const quantize[] = {"OFF", "1/4", "1/8", "1/16", "1/32", "1/64"};
-      display.print(quantize[summaryQuant]);
+      display.print(kDivisionNames[DIV_1_4 + summaryQuant - 1]);
     }
     return;
   }
@@ -10087,8 +10095,8 @@ void drawLooperSettingsScreen() {
   if (looperSettingsUi.cursor == 0) value = String(track + 1U);
   else if (looperSettingsUi.cursor == 1) value = loopLengthSelectionName(loopTrackLengthSelection[track]);
   else if (looperSettingsUi.cursor == 2) {
-    static const char *const quantize[] = {"OFF", "1/4", "1/8", "1/16", "1/32", "1/64"};
-    value = quantize[loopTrackQuantizeSelection(track)];
+    const uint8_t selection = loopTrackQuantizeSelection(track);
+    value = selection == 0 ? String("OFF") : String(kDivisionNames[DIV_1_4 + selection - 1]);
   } else if (looperSettingsUi.cursor == 3) {
     static const char *const modes[] = {"LAYERS", "PARTS SOLO", "MANUAL"};
     value = modes[firmware3Settings.looperTrackMode];
