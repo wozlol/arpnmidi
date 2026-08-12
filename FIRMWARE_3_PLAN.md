@@ -36,13 +36,23 @@ notes, arp, playback, recording, or pending UI work are active.
   starvation bound. There is no periodic refresh. Events that change nothing
   on the selected screen must not mark the display dirty, so a quiet screen
   costs zero frames during a performance
-- A push is a full-frame, blocking I2C transfer, about 20 ms at 400 kHz
-  regardless of how little changed, and it holds the outgoing MIDI drain off
-  the wire for the whole transfer since both live on this core. LOOPER and
-  LOOP MIX change on nearly every click while the performer is actively
-  working the loop, so those two screens use a 300 ms cap instead of the
-  general 50 ms, coalescing a flurry of clicks into fewer pushes rather than
-  paying the block on each one
+- A push is a blocking I2C transfer that holds the outgoing MIDI drain off the
+  wire for its whole duration since both live on this core. A full 1024-byte
+  frame costs about 20 ms at 400 kHz regardless of how little changed, so
+  pushDisplayChanges keeps a shadow copy of the last pushed frame, diffs it
+  page by page (eight 8-row bands) against the freshly redrawn one, and pushes
+  only the pages that actually differ through the SSD1306's own page/column
+  addressing, at whatever is left of that 20 ms once the untouched pages are
+  skipped. The one place this still cannot help is the moment something
+  touches every page at once, a full screen change, where it costs the same
+  as the old always-push-everything display() it replaces. Anything that
+  pushes straight through display() instead, the screen saver, the panic
+  overlay, and the busy hourglass, invalidates the shadow on its way out so
+  the next diffed push resyncs fully rather than trusting stale pixels.
+  LOOPER and LOOP MIX still change on nearly every click while the performer
+  is actively working the loop, so those two screens keep the 300 ms cap
+  instead of the general 50 ms on top of this, coalescing a flurry of clicks
+  into fewer, now cheaper, pushes rather than paying a block on each one
 - VL53L0X distance-sensor polling, data-ready peek first so a slow or wedged
   sensor costs one register read instead of a blocking wait
 

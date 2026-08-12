@@ -172,6 +172,15 @@ MIDI_CREATE_CUSTOM_INSTANCE(HardwareSerial, Serial2, DinMIDI,
                             InterBrainSerialSettings);
 bool core1_separate_stack = true;
 Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire1, -1);
+// Mirrors what's actually on the panel right now, one byte per column per
+// 8-row page, so a push can tell which pages changed since the last one and
+// skip the rest. Starts invalid so the very first push is always a full,
+// guaranteed-correct sync; anything that pushes straight through
+// display.display() instead of pushDisplayChanges() (the screen saver, the
+// panic overlay, the busy hourglass) also has to invalidate it, since the
+// panel now holds pixels this shadow never recorded.
+uint8_t displayShadowBuffer[SCREEN_W * ((SCREEN_H + 7) / 8)];
+bool displayShadowValid = false;
 VL53L0X tof;
 #if ARPNMIDI_ENABLE_RGB_LED
 Adafruit_NeoPixel onboardRgb(1, PIN_RGB_LED, NEO_GRB + NEO_KHZ800);
@@ -10277,6 +10286,71 @@ void drawScreenSaver() {
   display.setCursor(0, random(56));
   display.print(F("woz.lol"));
   display.display();
+  displayShadowValid = false;
+}
+
+// Adafruit_SSD1306::display() always pushes the whole 1024-byte buffer, one
+// I2C transaction chunked to the platform's write-buffer size, with no way to
+// restrict it to part of the panel. Its own chunking loop is private, so this
+// repeats that same chunking by hand over an arbitrary byte range instead.
+void pushDisplayDataRange(const uint8_t *data, uint16_t count) {
+  constexpr uint16_t kWireMaxPayload = 31;  // 32-byte Wire buffer minus the
+                                             // 0x40 data-stream control byte
+  while (count > 0) {
+    const uint16_t chunk = count < kWireMaxPayload ? count : kWireMaxPayload;
+    Wire1.beginTransmission(OLED_ADDR);
+    Wire1.write((uint8_t)0x40);
+    for (uint16_t i = 0; i < chunk; ++i) Wire1.write(data[i]);
+    Wire1.endTransmission();
+    data += chunk;
+    count -= chunk;
+  }
+}
+
+// Pushes only the 8-row pages that actually changed since the last push,
+// instead of the whole panel. A full push is a blocking ~20ms I2C transfer
+// that holds this core's outgoing MIDI drain off the wire the entire time;
+// LOOPER and LOOP MIX redraw on almost every click, and most of those clicks
+// only touch one or two of the panel's eight pages, so most pushes shrink to
+// a few ms instead. The addressing mode set in begin() is horizontal, so a
+// column range held at the full width and a page range narrowed to just the
+// changed band lets the changed pages stream out as one plain contiguous
+// slice of the local buffer, same order the hardware already expects.
+void pushDisplayChanges() {
+  constexpr uint8_t kPages = (SCREEN_H + 7) / 8;
+  uint8_t *buf = display.getBuffer();
+  if (!displayShadowValid) {
+    display.display();
+    memcpy(displayShadowBuffer, buf, sizeof(displayShadowBuffer));
+    displayShadowValid = true;
+    return;
+  }
+  uint8_t page = 0;
+  while (page < kPages) {
+    uint8_t *pageBuf = buf + page * SCREEN_W;
+    uint8_t *pageShadow = displayShadowBuffer + page * SCREEN_W;
+    if (memcmp(pageBuf, pageShadow, SCREEN_W) == 0) {
+      ++page;
+      continue;
+    }
+    uint8_t rangeEnd = page;
+    while (rangeEnd + 1 < kPages &&
+           memcmp(buf + (rangeEnd + 1) * SCREEN_W,
+                  displayShadowBuffer + (rangeEnd + 1) * SCREEN_W,
+                  SCREEN_W) != 0) {
+      ++rangeEnd;
+    }
+    display.ssd1306_command(SSD1306_PAGEADDR);
+    display.ssd1306_command(page);
+    display.ssd1306_command(rangeEnd);
+    display.ssd1306_command(SSD1306_COLUMNADDR);
+    display.ssd1306_command(0);
+    display.ssd1306_command(SCREEN_W - 1);
+    const uint16_t rangeBytes = (rangeEnd - page + 1) * SCREEN_W;
+    pushDisplayDataRange(buf + page * SCREEN_W, rangeBytes);
+    memcpy(displayShadowBuffer + page * SCREEN_W, buf + page * SCREEN_W, rangeBytes);
+    page = rangeEnd + 1;
+  }
 }
 
 void renderDisplayIfNeeded() {
@@ -10304,6 +10378,7 @@ void renderDisplayIfNeeded() {
   if (static_cast<int32_t>(panicConfirmedUntilMs - now) > 0) {
     drawPanicHoldScreen();
     display.display();
+    displayShadowValid = false;
     ui.lastRenderMs = now;
     return;
   }
@@ -10312,7 +10387,7 @@ void renderDisplayIfNeeded() {
   moveRenderedSettingArea();
   drawModeLabel();
   drawModeIndicator();
-  display.display();
+  pushDisplayChanges();
   ui.lastRenderMs = now;
 }
 
@@ -10340,6 +10415,7 @@ void drawBusyHourglassNow() {
   display.drawTriangle(118, y + 1, 126, y + 1, 122, y + 8, SSD1306_WHITE);
   display.drawTriangle(118, y + 16, 126, y + 16, 122, y + 9, SSD1306_WHITE);
   display.display();
+  displayShadowValid = false;
 }
 
 void processDeferredUiActions() {
