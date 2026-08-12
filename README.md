@@ -95,13 +95,12 @@ Recording always follows one working track:
   track to Track 1
 - The Loop Mix screen strikes through cleared tracks and dots the record target,
   and the looper summary shows cleared content as a hollow marker
-- Auto Arm keeps the working track armed and waiting whenever it is empty, so a
-  layer starts on the first note played with no button press, whether that note
-  arrives right away or after a pause. It follows every way the working track
-  can change: hand selection, MMC, a mapped CC, and the auto-advance after a
-  layer completes. It offers the arm once per selection rather than fighting an
-  explicit disarm: cancelling a pending arm stays cancelled until the working
-  track actually changes to something else and back
+- Auto Arm fires in exactly one place: a fixed-length pass concluding on its
+  own because it reached its length. Nothing else ever triggers it, picking a
+  different track by hand included. In Manual mode, where the working track
+  never advances on its own, this continues straight into an overdub of the
+  same track. In Layers and Parts Auto Solo, it arms the track the existing
+  auto-advance just moved to, waiting for the first note with no button press
 
 Changing a populated track's length preserves the instrument's special repeat
 behavior:
