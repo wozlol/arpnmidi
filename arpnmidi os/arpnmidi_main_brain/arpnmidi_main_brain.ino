@@ -9784,9 +9784,9 @@ void drawLooperSettingsScreen() {
       // content that Undo can still bring back. Nothing is an empty track.
       const int ty = 5 + i * 10;
       if (state.count > 0 && !state.hidden) {
-        display.fillTriangle(58, ty - 3, 58, ty + 3, 63, ty, SSD1306_WHITE);
+        display.fillTriangle(59, ty - 3, 59, ty + 3, 64, ty, SSD1306_WHITE);
       } else if (state.count > 0) {
-        display.drawTriangle(58, ty - 3, 58, ty + 3, 63, ty, SSD1306_WHITE);
+        display.drawTriangle(59, ty - 3, 59, ty + 3, 64, ty, SSD1306_WHITE);
       }
     }
     drawLooperFlagBox(70, 1, 'A', firmware3Settings.looperAutoRec);
