@@ -6955,14 +6955,11 @@ bool processDrumRollCc(uint8_t sourcePort, uint8_t channel, uint8_t cc,
   }
   if (matched) {
     markActivity(false);
-    // Only screens that show division state redraw. A roll hit while sitting
-    // on an unrelated screen changes nothing visible and must not cost a
-    // frame in the middle of playing.
-    if (ui.selectedSetting == SET_DIVISION || ui.selectedSetting == SET_DRUM_MAGIC ||
-        ui.selectedSetting == SET_ARP_MODE || ui.selectedSetting == SET_DIV_NOTES ||
-        liveNoteViewActive()) {
-      ui.dirty = true;
-    }
+    // Playing roll notes is performance, not editing. Settings screens show
+    // stored settings, and no stored setting changes here, so none of them
+    // redraw. The live note views are the one place whose whole purpose is
+    // showing keys as they happen.
+    if (liveNoteViewActive()) ui.dirty = true;
   }
   return matched;
 }
