@@ -63,7 +63,7 @@ Detailed wiring and two-board build information is in the
 - Overdub, replace, Auto Rec, mute, exclusive solo, safe clear, and undo
 - When all Layers tracks are occupied, the next overdub goes onto the oldest
   layer
-- Optional auto quantize from 1/64 through 1/4
+- Optional auto quantize from 1/64 through 1/4, set per track
 - Optional CC recording with bounded smoothing and pruning
 - Optional MIDI transport response, enabled by default
 - MIDI Start, Continue, Stop, Song Select, and useful MMC transport commands
@@ -344,11 +344,12 @@ not need the filesystem partition.
 - There is no EEPROM. The RP2040 has none, and the emulation rewrote a whole
   4 KB flash sector for any change, so a two-byte screen memory cost as much as
   a preset and every save wrote two stores instead of one
-- Automatic writes are deferred until the musical engine is idle, and a change
-  that has been pending for five seconds is written anyway rather than waiting
-  for a loop that may never stop
-- Recording and Time Travel import are the only states that always hold a write
-  back, because a flash pause there would land inside the take
+- Automatic writes wait for the musical engine to be idle. A filesystem write
+  disables interrupts and parks the rendering core for tens of milliseconds, so
+  it is a musical event and never happens while notes, the arp, or a loop are
+  running
+- The busy hourglass appears before a write starts, and the P, L, and E markers
+  on the diagnostics screen show what is still owed. Stopping the loop settles it
 - Loading a preset writes anything still pending for the preset being left
 
 Firmware 3 uses explicit storage schema identities. If the installed preset

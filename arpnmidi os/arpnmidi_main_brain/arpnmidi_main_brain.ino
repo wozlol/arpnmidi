@@ -159,7 +159,7 @@ constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 // deliberately receives a new schema identity instead of carrying migration
 // code. A mismatch installs all factory presets. Increment this value whenever
 // the persisted layout or meaning changes.
-constexpr uint32_t DEVICE_STATE_MAGIC = 0xF3090100UL;
+constexpr uint32_t DEVICE_STATE_MAGIC = 0xF3090101UL;
 constexpr uint8_t MAX_CUSTOM_ARP_EVENTS = 32;
 constexpr uint32_t LOOP_FILE_MAGIC = 0x4C503304UL;  // "LP3" file, schema 4
 constexpr uint8_t DRUM_AFTERTOUCH_MIN_VELOCITY = 42;  // 33% floor.
@@ -704,7 +704,7 @@ struct Firmware3Settings {
   uint8_t looperAutoRec;
   uint8_t looperTimeTravel;
   uint8_t looperTrackMode;
-  uint8_t looperQuantize;
+  uint8_t looperQuantize[arpnmidi3::kLoopTrackCount];
   uint8_t looperRecordCc;
   uint8_t stutterTimeoutBars;
   uint8_t arpOctaves;
@@ -3110,13 +3110,21 @@ void adoptFreeTrackOneTempo() {
   syncMusicalClockConfig(true);
 }
 
-uint32_t multitrackQuantizeUs() {
+uint8_t loopTrackQuantizeSelection(uint8_t track) {
+  if (track >= arpnmidi3::kLoopTrackCount) return 0;
+  return clampU8(firmware3Settings.looperQuantize[track], 0, 5);
+}
+
+// Quantize belongs to the track being written, so a drum part can land on a
+// grid while a pad stays free.
+uint32_t multitrackQuantizeUs(uint8_t track) {
   static constexpr uint8_t divisions[5] = {
     DIV_1_64, DIV_1_32, DIV_1_16, DIV_1_8, DIV_1_4
   };
-  if (firmware3Settings.looperQuantize == 0) return 0;
+  const uint8_t selection = loopTrackQuantizeSelection(track);
+  if (selection == 0) return 0;
   return static_cast<uint32_t>(min<uint64_t>(UINT32_MAX,
-      musicalDurationUs(kDivisionPulseSteps[divisions[firmware3Settings.looperQuantize - 1]])));
+      musicalDurationUs(kDivisionPulseSteps[divisions[selection - 1]])));
 }
 
 void refreshLoopUiState() {
@@ -3190,7 +3198,11 @@ void releaseSilencedMultitrackOutputs() {
 void configureMultitrackLooper() {
   multitrackLooper.setTrackMode(
       static_cast<arpnmidi3::LoopTrackMode>(firmware3Settings.looperTrackMode));
-  multitrackLooper.setRecordQuantizeUs(multitrackQuantizeUs());
+  // The armed or recording track owns the setting; only one track records at a
+  // time, so the working track supplies it until a pass starts.
+  const uint8_t quantizeTrack = (multitrackLooper.recording() || multitrackLooper.recordingArmed())
+      ? multitrackLooper.recordingTrack() : multitrackLooper.selectedTrack();
+  multitrackLooper.setRecordQuantizeUs(multitrackQuantizeUs(quantizeTrack));
 }
 
 void resetLoopCcPruning() {
@@ -4507,7 +4519,9 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       if (looperSettingsUi.cursor == 2) return firmware3Settings.looperAutoRec;
       if (looperSettingsUi.cursor == 3) return firmware3Settings.looperTimeTravel;
       if (looperSettingsUi.cursor == 4) return firmware3Settings.looperTrackMode;
-      if (looperSettingsUi.cursor == 5) return firmware3Settings.looperQuantize;
+      if (looperSettingsUi.cursor == 5) {
+        return loopTrackQuantizeSelection(multitrackLooper.selectedTrack());
+      }
       if (looperSettingsUi.cursor == 6) return firmware3Settings.looperRecordCc;
       return firmware3Settings.looperMidiTransport;
     case SET_MUTE_SOLO: return muteSoloCursor;
@@ -4853,7 +4867,8 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
           clampU8(value, 0, static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
         saveStorageIfAuto();
       } else if (looperSettingsUi.cursor == 5) {
-        firmware3Settings.looperQuantize = clampU8(value, 0, 5);
+        firmware3Settings.looperQuantize[multitrackLooper.selectedTrack()] =
+            clampU8(value, 0, 5);
         saveStorageIfAuto();
       } else if (looperSettingsUi.cursor == 6) {
         firmware3Settings.looperRecordCc = value ? 1 : 0;
@@ -5021,7 +5036,9 @@ Firmware3Settings defaultFirmware3Settings() {
   s.looperAutoRec = 0;
   s.looperTimeTravel = 0;
   s.looperTrackMode = static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Layers);
-  s.looperQuantize = 0;
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    s.looperQuantize[track] = 0;
+  }
   s.looperRecordCc = 0;
   s.stutterTimeoutBars = 4;
   s.arpOctaves = 1;
@@ -5095,7 +5112,9 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
   s.looperTimeTravel = s.looperTimeTravel ? 1 : 0;
   s.looperTrackMode = clampU8(s.looperTrackMode, 0,
       static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
-  s.looperQuantize = clampU8(s.looperQuantize, 0, 5);
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    s.looperQuantize[track] = clampU8(s.looperQuantize[track], 0, 5);
+  }
   s.looperRecordCc = s.looperRecordCc ? 1 : 0;
   s.stutterTimeoutBars = clampU8(s.stutterTimeoutBars, 1, 16);
   s.arpOctaves = clampU8(s.arpOctaves, 1, 4);
@@ -8128,7 +8147,7 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
     case SET_LOOP_BARS: {
       static const char *const names[] = {
         "TRACK", "LENGTH", "AUTO REC", "TIME TRAV", "NEW TRACK",
-        "QUANT", "REC CC", "TRNSPRT", "BACK"
+        "TRK QUANT", "REC CC", "TRNSPRT", "BACK"
       };
       index = looperSettingsUi.cursor; label = names[index]; return true;
     }
@@ -9410,11 +9429,17 @@ String loopLengthSelectionName(uint8_t selection) {
   return names[clampU8(selection, 0, 6)];
 }
 
+// Short enough that each summary row can also carry its quantize value.
 const char *loopLengthSummaryName(uint8_t selection) {
   static const char *const names[] = {
-    "1/4 Bar", "1/2 Bar", "1 Bar", "2 Bars", "4 Bars", "8 Bars", "Free"
+    "1/4B", "1/2B", "1Br", "2Br", "4Br", "8Br", "Free"
   };
   return names[clampU8(selection, 0, 6)];
+}
+
+const char *loopQuantizeSummaryName(uint8_t selection) {
+  static const char *const names[] = {"q-", "q64", "q32", "q16", "q8", "q4"};
+  return names[clampU8(selection, 0, 5)];
 }
 
 char looperTrackModeSummaryLetter() {
@@ -9437,17 +9462,20 @@ void drawLooperFlagBox(uint8_t x, uint8_t y, char label, bool enabled) {
 void drawLooperSettingsScreen() {
   static const char *const names[] = {
     "TRACK", "LENGTH", "AUTO REC", "TIME TRAV", "NEW TRACK",
-    "QUANT", "REC CC", "TRNSPRT", "BACK"
+    "TRK QUANT", "REC CC", "TRNSPRT", "BACK"
   };
   const uint8_t track = multitrackLooper.selectedTrack();
   if (ui.menuMode == MENU_SELECT) {
     display.setTextSize(1);
     for (uint8_t i = 0; i < arpnmidi3::kLoopTrackCount; ++i) {
-      display.setCursor(0, 2 + i * 10);
+      const int y = 2 + i * 10;
+      display.setCursor(0, y);
       display.print(i == track ? F(">") : F(" "));
       display.print(i + 1U);
-      display.print(F("-"));
+      display.setCursor(14, y);
       display.print(loopLengthSummaryName(loopTrackLengthSelection[i]));
+      display.setCursor(42, y);
+      display.print(loopQuantizeSummaryName(loopTrackQuantizeSelection(i)));
       const arpnmidi3::LoopTrackState &state = multitrackLooper.track(i);
       // Filled is audible content. Hollow is cleared content that Undo can
       // still bring back. Nothing at all is an empty track.
@@ -9456,7 +9484,7 @@ void drawLooperSettingsScreen() {
     }
     drawLooperFlagBox(70, 1, 'R', firmware3Settings.looperAutoRec);
     drawLooperFlagBox(85, 1, 'T', firmware3Settings.looperTimeTravel);
-    drawLooperFlagBox(70, 14, 'Q', firmware3Settings.looperQuantize);
+    drawLooperFlagBox(70, 14, 'Q', loopTrackQuantizeSelection(track));
     drawLooperFlagBox(85, 14, 'C', firmware3Settings.looperRecordCc);
     display.drawRect(101, 1, 24, 24, SSD1306_WHITE);
     display.setTextSize(2);
@@ -9464,8 +9492,11 @@ void drawLooperSettingsScreen() {
     display.print(looperTrackModeSummaryLetter());
     display.setTextSize(1);
     display.setCursor(90, 31);
+    display.print(F("T"));
+    display.print(track + 1U);
+    display.print(' ');
     static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
-    display.print(quantize[firmware3Settings.looperQuantize]);
+    display.print(quantize[loopTrackQuantizeSelection(track)]);
     return;
   }
   String value;
@@ -9478,7 +9509,7 @@ void drawLooperSettingsScreen() {
     value = modes[firmware3Settings.looperTrackMode];
   } else if (looperSettingsUi.cursor == 5) {
     static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
-    value = quantize[firmware3Settings.looperQuantize];
+    value = quantize[loopTrackQuantizeSelection(track)];
   } else if (looperSettingsUi.cursor == 6) value = onOff(firmware3Settings.looperRecordCc);
   else if (looperSettingsUi.cursor == 7) value = onOff(firmware3Settings.looperMidiTransport);
   drawSubmenuField(names[looperSettingsUi.cursor], value, looperSettingsUi.editing);

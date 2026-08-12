@@ -144,7 +144,10 @@ Track modes:
 - Manual leaves working-track selection to the performer.
 
 Each track stores note ons, note offs, and optional pruned CC automation.
-Quantize can be Off or a straight division from 1/64 through 1/4.
+Quantize is per track and can be Off or a straight division from 1/64 through
+1/4. The track being written owns the setting, so a drum part can land on a grid
+while a pad stays free. The LOOPER summary shows each track's length and
+quantize together, which is why lengths read as 2Br rather than 2 Bars.
 
 ### Working-track and note-ownership rules
 
@@ -275,12 +278,13 @@ on a track always means the first action and a single press cannot reach Clear.
 - Time Travel/Stutter rolling history stored only in RAM
 - Auto Save as the one device-global storage preference
 
-Automatic writes wait for a quiet musical moment, but not indefinitely. A
-performer who leaves loops running and then powers down would otherwise lose
-every setting changed in the session, so a write that has been pending without
-further changes for five seconds proceeds even while the loop plays. Recording
-and Time Travel import always hold a write back, since a flash pause there would
-land inside the take. Loading a preset flushes anything still pending for the
+A flash write is a musical event on this chip, not a background chore. The
+filesystem disables interrupts and parks the rendering core for the whole erase
+and program, which costs tens of milliseconds with no MIDI input, no display,
+and no scheduling. Writes therefore wait for the engine to be genuinely quiet,
+however long that takes, and the busy hourglass appears before one starts. The
+dirty markers on the diagnostics screen show what is still owed; stopping the
+loop is what settles it. Loading a preset flushes anything still pending for the
 preset being left.
 
 Firmware 3 does not migrate incompatible prototype preset layouts. A schema
