@@ -1097,6 +1097,9 @@ constexpr uint8_t LOOP_MIX_MODE_BASE = arpnmidi3::kLoopTrackCount;
 constexpr uint8_t LOOP_MIX_BACK_SLOT = LOOP_MIX_MODE_BASE + LOOP_MIX_MODE_COUNT;
 // Arm is what the screen is reached for most, so it is where the screen opens.
 uint8_t loopMixMode = LOOP_MIX_ARM;
+uint8_t loopMixLastClickedMode = 0xFF;
+uint32_t loopMixModeClickMs = 0;
+constexpr uint32_t LOOP_MIX_DOUBLE_CLICK_MS = 700UL;
 SubmenuUiState arpMenuUi;
 SubmenuUiState liveVelocityUi;
 SubmenuUiState liveNoteLengthUi;
@@ -3347,6 +3350,12 @@ void selectLooperTrack(uint8_t track) {
   const bool retarget = multitrackLooper.recordingArmed() &&
                         multitrackLooper.recordingTrack() != track;
   multitrackLooper.selectTrack(track);
+  // Loop Mix shows the engine's working track, so its cursor follows every
+  // selection change, including the auto-advance after a layer completes.
+  if (ui.selectedSetting == SET_MUTE_SOLO && ui.menuMode == MENU_EDIT &&
+      muteSoloCursor < arpnmidi3::kLoopTrackCount) {
+    muteSoloCursor = track;
+  }
   if (retarget) {
     configureMultitrackLooper();
     multitrackLooper.armRecord(track, multitrackFixedLengthUs(track), false);
@@ -4917,6 +4926,11 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       break;
     case SET_MUTE_SOLO:
       muteSoloCursor = clampU8(value, 0, LOOP_MIX_BACK_SLOT);
+      // Turning onto a track in Loop Mix selects it in the engine, the same
+      // as hold-and-turn on the summary screen.
+      if (muteSoloCursor < arpnmidi3::kLoopTrackCount) {
+        selectLooperTrack(muteSoloCursor);
+      }
       break;
     case SET_PARAMETER_LOCK:
       if (!parameterLockUi.editing) parameterLockUi.cursor = clampU8(value, 0, 2);
@@ -6184,9 +6198,26 @@ void activateClickAction() {
         applyLoopMixModeToTrack(muteSoloCursor);
       } else if (muteSoloCursor < LOOP_MIX_BACK_SLOT) {
         const uint8_t picked = muteSoloCursor - LOOP_MIX_MODE_BASE;
+        const uint32_t clickMs = millis();
+        const bool secondClick = picked == loopMixMode &&
+            loopMixLastClickedMode == picked &&
+            (clickMs - loopMixModeClickMs) <= LOOP_MIX_DOUBLE_CLICK_MS;
+        loopMixLastClickedMode = picked;
+        loopMixModeClickMs = clickMs;
         if (picked == loopMixMode &&
             (picked == LOOP_MIX_SOLO || picked == LOOP_MIX_MUTE)) {
           resetLoopMixMuteAndSolo();
+        } else if (secondClick && picked == LOOP_MIX_CLEAR) {
+          // Double-clicking Clear is the full wipe: all four tracks gone for
+          // good, undo material included.
+          multitrackLooper.clearAll(releaseMultitrackOutput, nullptr);
+          releaseSilencedMultitrackOutputs();
+          loopSafeClearArmed = false;
+          markLoopStorageDirty();
+        } else if (secondClick && picked == LOOP_MIX_ARM) {
+          // Double-clicking Arm leaves the screen, the same as Back.
+          ui.menuMode = MENU_SELECT;
+          ui.deferredExitWork = true;
         } else {
           loopMixMode = picked;
         }
@@ -8344,6 +8375,24 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
   }
 }
 
+// Holding the knob fired the global panic. The screen says only that, in the
+// same face as the yellow titles, centered in the blue section, until the
+// confirmation window passes.
+void drawPanicHoldScreen() {
+  display.setFont(&FreeSans9pt7b);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(F("KNOB HOLD"), 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_W - static_cast<int16_t>(w)) / 2, 36);
+  display.print(F("KNOB HOLD"));
+  display.getTextBounds(F("PANIC"), 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_W - static_cast<int16_t>(w)) / 2, 58);
+  display.print(F("PANIC"));
+  display.setFont();
+}
+
 void drawModeLabel() {
   display.fillRect(0, MODE_INFO_Y, SCREEN_W, MODE_INFO_H, SSD1306_BLACK);
   display.setTextColor(SSD1306_WHITE);
@@ -9952,6 +10001,12 @@ void renderDisplayIfNeeded() {
   ui.dirty = false;
   ui.inSaver = false;
   display.clearDisplay();
+  if (static_cast<int32_t>(panicConfirmedUntilMs - now) > 0) {
+    drawPanicHoldScreen();
+    display.display();
+    ui.lastRenderMs = now;
+    return;
+  }
   renderMainTop();
   drawLoopStatusIcon();
   moveRenderedSettingArea();
@@ -10355,7 +10410,7 @@ void loop() {
   if (panicConfirmedUntilMs &&
       static_cast<int32_t>(millis() - panicConfirmedUntilMs) >= 0) {
     panicConfirmedUntilMs = 0;
-    if (ui.selectedSetting == SET_PANIC) ui.dirty = true;
+    ui.dirty = true;  // the panic overlay covers every screen, so always redraw
   }
   processDeferredUiActions();
   pollPresetStoragePersistence();
