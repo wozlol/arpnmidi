@@ -271,16 +271,17 @@ depends on a single control:
   the thru channel while playing over a loop.
 - Holding the encoder switch into a panic is a deliberate emergency reset, not
   just a silence: on top of the usual panic, all notes off and the transport
-  stopped, it also gives the loop a clean slate through the same undoable
-  clear-all/undo-all the eye/pad's stop-then-clear press and the three-button
-  chord reach, so a held panic never destroys a take outright. The clear/undo
-  runs first and panic last, since undoing a clear can retrigger held notes
-  and panic's all-channel sweep is the most exhaustive kill-everything pass
-  there is, the one thing that has to get the final word so nothing the
-  clear/undo stirs up can slip past it and stick. This is scoped to the held
-  gesture specifically; a quick tap on the PANIC screen, a mapped Feature
-  Button panic, and the panic a preset load fires on its way out all stay
-  silence-only.
+  stopped, it also gives the loop a clean slate. Unlike the eye/pad's
+  stop-then-clear press and the three-button chord, this clear is
+  one-directional on purpose: it only ever clears whatever is still live and
+  leaves an already-cleared track exactly alone, it never undoes, so there is
+  no ambiguity about which way a held panic goes. The clear runs first and
+  panic last, since panic's all-channel sweep is the most exhaustive
+  kill-everything pass there is, the one thing that has to get the final word
+  so nothing the clear stirs up can slip past it and stick. This is scoped to
+  the held gesture specifically; a quick tap on the PANIC screen, a mapped
+  Feature Button panic, and the panic a preset load fires on its way out all
+  stay silence-only.
 
 ### Retained length behavior
 
@@ -323,6 +324,21 @@ Main and each looper track have independent settings for:
 
 All note schedulers have fixed capacities and close their owned notes when
 disabled, retargeted, muted, cleared, or stopped.
+
+Stutter and Echo have one further target beyond Main and the four fixed
+tracks: SELECTD, its own independent settings rather than a share of any
+track's own, whose real target dynamically follows whichever loop track is
+currently selected. A note from that track feeds SELECTD's pipeline, tagged
+with SELECTD's own target slot, alongside the note's own track's normal
+processing, never in place of it: SELECTD never repeats the dry note a
+second time, only whatever it stutters or echoes on top. The moment the
+selected track changes, `selectLooperTrack` tears down SELECTD's stutter
+repeater and echo tails and releases its held output before anything from
+the new track can reach it, so nothing keeps replaying old, orphaned content
+from a track that is no longer selected, and nothing is left stuck sounding
+from the one that was. Velocity and Note Length do not have SELECTD.
+Both submenus lead with their length/repeat-size parameter and end with the
+target picker, right before Back.
 
 ## Routing and mappings
 

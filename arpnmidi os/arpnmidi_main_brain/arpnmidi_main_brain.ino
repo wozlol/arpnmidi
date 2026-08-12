@@ -387,6 +387,13 @@ constexpr uint8_t ARP_DIVISION_FOLLOW_DRUM = DIVISION_COUNT;
 constexpr uint8_t DRUM_DIVISION_FOLLOW_ARP = DIVISION_COUNT;
 constexpr uint8_t DRUM_DIVISION_FREE = DIVISION_COUNT + 1;
 constexpr uint8_t LIVE_TARGET_COUNT = 5;  // Main plus Looper Tracks 1-4.
+// Stutter and Echo get a sixth target, SELECTD, beyond the five above: it
+// dynamically mirrors whichever loop track is currently selected, using its
+// own independent settings and runtime state rather than sharing that
+// track's own fixed slot. Velocity and Note Length do not have this option
+// and stay bound to LIVE_TARGET_COUNT, untouched.
+constexpr uint8_t SELECTD_LIVE_TARGET = LIVE_TARGET_COUNT;            // = 5
+constexpr uint8_t STUTTER_ECHO_TARGET_COUNT = LIVE_TARGET_COUNT + 1;  // = 6
 constexpr uint8_t STUTTER_BUTTON_DIVISION_COUNT = 6;
 // Stutter shares the rolling capture engine with Time Travel. Its long choices
 // are meter-aware bars, followed by the ordinary musical divisions from long
@@ -736,7 +743,7 @@ struct Firmware3Settings {
   uint16_t userScaleMask;
   uint8_t routerLowNotes[16];
   uint8_t routerHighNotes[16];
-  LiveTargetSettings liveTargets[LIVE_TARGET_COUNT];
+  LiveTargetSettings liveTargets[STUTTER_ECHO_TARGET_COUNT];
 };
 
 // The file is a small header followed by one complete record per preset slot.
@@ -980,16 +987,16 @@ arpnmidi3::FourTrackLooper multitrackLooper;
 arpnmidi3::RollingHistory rollingHistory;
 arpnmidi3::EchoEngine echoEngine;
 arpnmidi3::NoteLengthEngine noteLengthEngine;
-arpnmidi3::HistoryRepeater stutterRepeaters[LIVE_TARGET_COUNT];
+arpnmidi3::HistoryRepeater stutterRepeaters[STUTTER_ECHO_TARGET_COUNT];
 TimeTravelImportJob timeTravelImport;
-uint8_t finalOutputNoteRefs[LIVE_TARGET_COUNT][16][128];
-bool stutterSettingWasEnabled[LIVE_TARGET_COUNT];
-bool stutterTimedOut[LIVE_TARGET_COUNT];
+uint8_t finalOutputNoteRefs[STUTTER_ECHO_TARGET_COUNT][16][128];
+bool stutterSettingWasEnabled[STUTTER_ECHO_TARGET_COUNT];
+bool stutterTimedOut[STUTTER_ECHO_TARGET_COUNT];
 bool noteLengthSettingWasEnabled[LIVE_TARGET_COUNT];
-bool echoSettingWasEnabled[LIVE_TARGET_COUNT];
+bool echoSettingWasEnabled[STUTTER_ECHO_TARGET_COUNT];
 bool featureButtonCcHeld[FEATURE_BUTTON_COUNT];
-uint8_t activeStutterLengthSelection[LIVE_TARGET_COUNT];
-uint64_t stutterStopUs[LIVE_TARGET_COUNT];
+uint8_t activeStutterLengthSelection[STUTTER_ECHO_TARGET_COUNT];
+uint64_t stutterStopUs[STUTTER_ECHO_TARGET_COUNT];
 uint8_t multitrackPlaybackHeld[arpnmidi3::kLoopTrackCount][16][16];
 uint16_t multitrackPlaybackHeldCount[arpnmidi3::kLoopTrackCount];
 bool loopStorageDirty = false;
@@ -2062,7 +2069,7 @@ void setQuickJumpEnabled(bool enabled) {
 
 void sendTargetFinal(uint8_t target, uint8_t sourcePort,
                      uint8_t status, uint8_t data1, uint8_t data2) {
-  if (target >= LIVE_TARGET_COUNT) return;
+  if (target >= STUTTER_ECHO_TARGET_COUNT) return;
   const uint8_t type = status & 0xF0;
   if ((type == 0x90 || type == 0x80) && data1 <= 127) {
     uint8_t &refs = finalOutputNoteRefs[target][status & 0x0F][data1];
@@ -2081,7 +2088,7 @@ void sendTargetFinal(uint8_t target, uint8_t sourcePort,
 }
 
 void releaseFinalTarget(uint8_t target) {
-  if (target >= LIVE_TARGET_COUNT) return;
+  if (target >= STUTTER_ECHO_TARGET_COUNT) return;
   for (uint8_t channel = 0; channel < 16; ++channel) {
     for (uint8_t note = 0; note < 128; ++note) {
       uint8_t &refs = finalOutputNoteRefs[target][channel][note];
@@ -2130,11 +2137,40 @@ void emitStutterEvent(void *, uint8_t historyTarget,
   if (target < LIVE_TARGET_COUNT) processPostStutterEvent(target, 255, event);
 }
 
+// SELECTD's echo scheduling only, no dry pass-through: the note itself
+// already goes out once through its own track's target, so SELECTD must
+// never repeat that part, only add whatever repeats it generates on top.
+void processSelectdEcho(const arpnmidi3::LoopMidiEvent &event) {
+  const uint8_t type = event.status & 0xF0;
+  const LiveTargetSettings &selectd = firmware3Settings.liveTargets[SELECTD_LIVE_TARGET];
+  if (!selectd.echoEnabled || (type != 0x90 && type != 0x80)) return;
+  if (type == 0x90 && event.data2 > 0) {
+    echoEngine.noteOn(time_us_64(), SELECTD_LIVE_TARGET, event.status, event.data1,
+                      event.data2, echoConfigForTarget(SELECTD_LIVE_TARGET));
+  } else {
+    echoEngine.noteOff(time_us_64(), SELECTD_LIVE_TARGET, event.status, event.data1);
+  }
+}
+
 void emitNoteLengthEvent(void *, uint8_t target, uint8_t sourcePort,
                          const arpnmidi3::LoopMidiEvent &event) {
   rollingHistory.push(time_us_64(), HISTORY_OUTPUT_TARGET_BASE + target, event);
-  if (stutterRepeaters[target].active()) return;
-  processPostStutterEvent(target, sourcePort, event);
+  if (!stutterRepeaters[target].active()) {
+    processPostStutterEvent(target, sourcePort, event);
+  }
+  // SELECTD mirrors whichever loop track is currently selected. If this
+  // note's own target is that track, and SELECTD has stutter or echo turned
+  // on, the same event also feeds SELECTD's own independent pipeline, tagged
+  // with its own target slot so its rolling history, stutter repeater, echo
+  // state, and held-note refs never mix with the track's own. It never
+  // passes the dry note through a second time, only whatever it repeats.
+  const LiveTargetSettings &selectd = firmware3Settings.liveTargets[SELECTD_LIVE_TARGET];
+  if (target >= 1 && target <= arpnmidi3::kLoopTrackCount &&
+      target == multitrackLooper.selectedTrack() + 1U &&
+      (selectd.stutterEnabled || selectd.echoEnabled)) {
+    rollingHistory.push(time_us_64(), HISTORY_OUTPUT_TARGET_BASE + SELECTD_LIVE_TARGET, event);
+    processSelectdEcho(event);
+  }
 }
 
 void sendFanout(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
@@ -2227,7 +2263,7 @@ void clearOutputOwnership() {
 }
 
 void panicMidiOnly() {
-  for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
+  for (uint8_t target = 0; target < STUTTER_ECHO_TARGET_COUNT; ++target) {
     deactivateStutter(target);
   }
   noteLengthEngine.reset(emitNoteLengthEvent, nullptr);
@@ -2239,7 +2275,7 @@ void panicMidiOnly() {
   loopAllOff();
   multitrackLooper.cancelRecording();
   timeTravelImport.active = false;
-  for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
+  for (uint8_t target = 0; target < STUTTER_ECHO_TARGET_COUNT; ++target) {
     releaseFinalTarget(target);
   }
   memset(stutterSettingWasEnabled, 0, sizeof(stutterSettingWasEnabled));
@@ -3458,9 +3494,13 @@ void armSelectedMultitrack(bool overdub) {
 // keeps its track: only stopping it can move the write target.
 void selectLooperTrack(uint8_t track) {
   if (track >= arpnmidi3::kLoopTrackCount) return;
+  const uint8_t previousTrack = multitrackLooper.selectedTrack();
   const bool retarget = multitrackLooper.recordingArmed() &&
                         multitrackLooper.recordingTrack() != track;
   multitrackLooper.selectTrack(track);
+  // SELECTD's Stutter/Echo dynamically follows the working track, so a real
+  // change here has to tear down whatever it was doing on the old one.
+  if (track != previousTrack) releaseSelectdTarget();
   // Loop Mix shows the engine's working track, so its cursor follows every
   // selection change, including the auto-advance after a layer completes.
   if (ui.selectedSetting == SET_MUTE_SOLO && ui.menuMode == MENU_EDIT &&
@@ -3509,6 +3549,18 @@ void clearOrUndoAllLoopTracks() {
   // along with it. Undo restores content, not the selection, so it leaves
   // wherever the working track already was alone.
   if (anyLive) selectLooperTrack(0);
+}
+
+// Hold-to-panic's clear is one-directional on purpose, unlike the eye/pad's
+// stop-then-clear escalation above: it only ever clears whatever is still
+// live and leaves any track that's already cleared exactly alone, so it can
+// never restore an old take the performer meant to leave gone. safeClear is
+// already a no-op on a track with nothing in it, cleared or truly empty.
+void clearAllLiveLoopTracks() {
+  for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+    multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
+  }
+  selectLooperTrack(0);
 }
 
 bool finishActiveMultitrackRecording(uint64_t nowUs, bool startIfStopped) {
@@ -3847,7 +3899,7 @@ void tickLooper() {
 }
 
 void tickEcho() {
-  for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
+  for (uint8_t target = 0; target < STUTTER_ECHO_TARGET_COUNT; ++target) {
     const bool enabled = firmware3Settings.liveTargets[target].echoEnabled != 0;
     if (!enabled && echoSettingWasEnabled[target]) {
       echoEngine.stopTarget(target, emitEchoEvent, nullptr);
@@ -3901,7 +3953,7 @@ uint32_t stutterLengthUs(uint8_t target) {
 }
 
 bool activateStutter(uint8_t target, uint64_t nowUs) {
-  if (target >= LIVE_TARGET_COUNT) return false;
+  if (target >= STUTTER_ECHO_TARGET_COUNT) return false;
   const uint32_t lengthUs = stutterLengthUs(target);
   if (!stutterRepeaters[target].activate(rollingHistory, nowUs, lengthUs,
                                         HISTORY_OUTPUT_TARGET_BASE + target)) return false;
@@ -3918,13 +3970,30 @@ bool activateStutter(uint8_t target, uint64_t nowUs) {
 }
 
 void deactivateStutter(uint8_t target) {
-  if (target >= LIVE_TARGET_COUNT) return;
+  if (target >= STUTTER_ECHO_TARGET_COUNT) return;
   stutterRepeaters[target].deactivate(emitStutterEvent, nullptr);
+}
+
+// SELECTD's stutter/echo state is tied to whichever track is currently
+// selected, not to a track of its own, so the moment that changes its old
+// state has to be torn down: otherwise its repeater would keep replaying the
+// old track's captured notes, or its echo tails and held output refs would
+// just hang with no note-off ever coming from a track that is no longer
+// selected. stutterSettingWasEnabled is reset too, not just deactivated,
+// since tickStutter only reactivates a target on the false-to-true edge of
+// its enabled setting, which never fires here, this stutter's own enabled
+// flag never actually changed.
+void releaseSelectdTarget() {
+  deactivateStutter(SELECTD_LIVE_TARGET);
+  stutterSettingWasEnabled[SELECTD_LIVE_TARGET] = false;
+  stutterTimedOut[SELECTD_LIVE_TARGET] = false;
+  echoEngine.stopTarget(SELECTD_LIVE_TARGET, emitEchoEvent, nullptr);
+  releaseFinalTarget(SELECTD_LIVE_TARGET);
 }
 
 void tickStutter() {
   const uint64_t nowUs = time_us_64();
-  for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
+  for (uint8_t target = 0; target < STUTTER_ECHO_TARGET_COUNT; ++target) {
     const bool enabled = firmware3Settings.liveTargets[target].stutterEnabled != 0;
     if (!enabled) {
       if (stutterRepeaters[target].active()) deactivateStutter(target);
@@ -4477,17 +4546,18 @@ int16_t settingRangeMax(uint8_t settingId) {
       return 200;
     case SET_STUTTER:
       if (!stutterUi.editing) return 4;
-      if (stutterUi.cursor == 0) return LIVE_TARGET_COUNT;
+      if (stutterUi.cursor == 0) return STUTTER_LENGTH_COUNT;
       if (stutterUi.cursor == 1) return 2;
-      if (stutterUi.cursor == 2) return STUTTER_LENGTH_COUNT;
-      return 17;
+      if (stutterUi.cursor == 2) return 17;
+      return STUTTER_ECHO_TARGET_COUNT;
     case SET_ECHO:
       if (!echoUi.editing) return 6;
-      if (echoUi.cursor == 0) return LIVE_TARGET_COUNT;
+      if (echoUi.cursor == 0) return STUTTER_LENGTH_COUNT;
       if (echoUi.cursor == 1) return 2;
       if (echoUi.cursor == 2) return 101;
-      if (echoUi.cursor == 5) return 33;
-      return STUTTER_LENGTH_COUNT;
+      if (echoUi.cursor == 3) return STUTTER_LENGTH_COUNT;
+      if (echoUi.cursor == 4) return 33;
+      return STUTTER_ECHO_TARGET_COUNT;
     case SET_DIVISION: return ARP_DIVISION_FOLLOW_DRUM;
     case SET_VELOCITY: return 127;
     case SET_LENGTH: return 100;
@@ -4611,20 +4681,20 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       return firmware3Settings.liveTargets[liveNoteLengthTarget].noteLengthPercent;
     case SET_STUTTER:
       if (!stutterUi.editing) return stutterUi.cursor;
-      if (stutterUi.cursor == 0) return stutterTarget;
-      if (stutterUi.cursor == 1) return firmware3Settings.liveTargets[stutterTarget].stutterEnabled;
-      if (stutterUi.cursor == 2) {
+      if (stutterUi.cursor == 0) {
         return firmware3Settings.liveTargets[stutterTarget].stutterLengthSelection;
       }
-      return firmware3Settings.stutterTimeoutBars;
+      if (stutterUi.cursor == 1) return firmware3Settings.liveTargets[stutterTarget].stutterEnabled;
+      if (stutterUi.cursor == 2) return firmware3Settings.stutterTimeoutBars;
+      return stutterTarget;
     case SET_ECHO:
       if (!echoUi.editing) return echoUi.cursor;
-      if (echoUi.cursor == 0) return echoTarget;
+      if (echoUi.cursor == 0) return firmware3Settings.liveTargets[echoTarget].echoLength;
       if (echoUi.cursor == 1) return firmware3Settings.liveTargets[echoTarget].echoEnabled;
       if (echoUi.cursor == 2) return firmware3Settings.liveTargets[echoTarget].echoWet;
-      if (echoUi.cursor == 3) return firmware3Settings.liveTargets[echoTarget].echoLength;
-      if (echoUi.cursor == 4) return firmware3Settings.liveTargets[echoTarget].echoDelay;
-      return firmware3Settings.liveTargets[echoTarget].echoDrift + 16;
+      if (echoUi.cursor == 3) return firmware3Settings.liveTargets[echoTarget].echoDelay;
+      if (echoUi.cursor == 4) return firmware3Settings.liveTargets[echoTarget].echoDrift + 16;
+      return echoTarget;
     case SET_DIVISION: return settings.division;
     case SET_VELOCITY: return settings.arpVelocity;
     case SET_LENGTH: return settings.arpLengthPct;
@@ -4865,22 +4935,22 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       break;
     case SET_STUTTER:
       if (!stutterUi.editing) stutterUi.cursor = clampU8(value, 0, 4);
-      else if (stutterUi.cursor == 0) stutterTarget = clampU8(value, 0, LIVE_TARGET_COUNT - 1);
-      else if (stutterUi.cursor == 1) requestStutterState(stutterTarget, value != 0);
-      else if (stutterUi.cursor == 2) requestStutterState(stutterTarget,
+      else if (stutterUi.cursor == 0) requestStutterState(stutterTarget,
           firmware3Settings.liveTargets[stutterTarget].stutterEnabled != 0,
           clampU8(value, 0, STUTTER_LENGTH_COUNT - 1));
-      else firmware3Settings.stutterTimeoutBars = clampU8(value, 1, 16);
+      else if (stutterUi.cursor == 1) requestStutterState(stutterTarget, value != 0);
+      else if (stutterUi.cursor == 2) firmware3Settings.stutterTimeoutBars = clampU8(value, 1, 16);
+      else stutterTarget = clampU8(value, 0, STUTTER_ECHO_TARGET_COUNT - 1);
       break;
     case SET_ECHO:
       if (!echoUi.editing) echoUi.cursor = clampU8(value, 0, 6);
-      else if (echoUi.cursor == 0) echoTarget = clampU8(value, 0, LIVE_TARGET_COUNT - 1);
+      else if (echoUi.cursor == 0) firmware3Settings.liveTargets[echoTarget].echoLength = clampU8(value, 0, STUTTER_LENGTH_COUNT - 1);
       else if (echoUi.cursor == 1) firmware3Settings.liveTargets[echoTarget].echoEnabled = value ? 1 : 0;
       else if (echoUi.cursor == 2) firmware3Settings.liveTargets[echoTarget].echoWet = clampU8(value, 0, 100);
-      else if (echoUi.cursor == 3) firmware3Settings.liveTargets[echoTarget].echoLength = clampU8(value, 0, STUTTER_LENGTH_COUNT - 1);
-      else if (echoUi.cursor == 4) firmware3Settings.liveTargets[echoTarget].echoDelay = clampU8(value, 0, STUTTER_LENGTH_COUNT - 1);
-      else firmware3Settings.liveTargets[echoTarget].echoDrift =
+      else if (echoUi.cursor == 3) firmware3Settings.liveTargets[echoTarget].echoDelay = clampU8(value, 0, STUTTER_LENGTH_COUNT - 1);
+      else if (echoUi.cursor == 4) firmware3Settings.liveTargets[echoTarget].echoDrift =
           constrain(static_cast<int>(value) - 16, -16, 16);
+      else echoTarget = clampU8(value, 0, STUTTER_ECHO_TARGET_COUNT - 1);
       break;
     case SET_DIVISION:
       settings.division = clampU8(value, 0, ARP_DIVISION_FOLLOW_DRUM);
@@ -5803,7 +5873,7 @@ void applySettingDelta(int delta, bool fastStep) {
             (arpMenuUi.cursor == 2 || arpMenuUi.cursor == 3 || arpMenuUi.cursor == 4)) ||
            (id == SET_LIVE_NOTE_LENGTH && liveNoteLengthUi.editing &&
             liveNoteLengthUi.cursor == 2) ||
-           (id == SET_STUTTER && stutterUi.editing && stutterUi.cursor == 3)) {
+           (id == SET_STUTTER && stutterUi.editing && stutterUi.cursor == 2)) {
     next = wrapIndex(next - 1, maxValue) + 1;
   }
   else if (id == SET_VELOCITY) next = constrain(next, 1, 127);
@@ -6667,14 +6737,15 @@ void pollEncoder() {
   if (encoder.switchDown && !encoder.turnWhilePressed &&
       (now - encoder.pressStartMs) >= LONG_HOLD_PANIC_MS) {
     // The held gesture is a deliberate emergency reset, not just a silence:
-    // it also gives the loop a clean slate, the same undoable clear/undo the
-    // eye/pad's stop-then-clear press and the three-button chord reach, so a
-    // held panic never destroys a take outright. Clear first and panic last:
-    // undoing a clear can retrigger held notes, and panic's all-channel
-    // sweep is the most exhaustive kill-everything pass there is, so it has
-    // to run after, not before, or anything the clear/undo stirs up could
-    // slip past it and stick.
-    clearOrUndoAllLoopTracks();
+    // it also gives the loop a clean slate, so a held panic never leaves an
+    // old take sitting there. Unlike the eye/pad's stop-then-clear press,
+    // this is one-directional on purpose: it only ever clears whatever is
+    // still live, never undoes an already-cleared track, so there is no
+    // ambiguity about which way a held panic goes. Clear first and panic
+    // last: panic's all-channel sweep is the most exhaustive kill-everything
+    // pass there is, so it has to run after, not before, or anything the
+    // clear stirs up could slip past it and stick.
+    clearAllLiveLoopTracks();
     markLoopStorageDirty();
     refreshLoopUiState();
     panicAll();
@@ -6930,7 +7001,7 @@ uint8_t featureTargetFromBlock(uint8_t id, uint8_t base) {
 }
 
 void requestStutterState(uint8_t target, bool enabled, int16_t lengthSelection) {
-  if (target >= LIVE_TARGET_COUNT) return;
+  if (target >= STUTTER_ECHO_TARGET_COUNT) return;
   if (stutterRepeaters[target].active()) deactivateStutter(target);
   if (lengthSelection >= 0) {
     firmware3Settings.liveTargets[target].stutterLengthSelection =
@@ -8593,11 +8664,11 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
       index = liveNoteLengthUi.cursor; label = names[index]; return true;
     }
     case SET_STUTTER: {
-      static const char *const names[] = {"TARGET", "ON/OFF", "DIVISION", "TIMEOUT", "BACK"};
+      static const char *const names[] = {"DIVISION", "ON/OFF", "TIMEOUT", "TARGET", "BACK"};
       index = stutterUi.cursor; label = names[index]; return true;
     }
     case SET_ECHO: {
-      static const char *const names[] = {"TARGET", "ON/OFF", "WET", "LENGTH", "DELAY", "DRIFT", "BACK"};
+      static const char *const names[] = {"LENGTH", "ON/OFF", "WET", "DELAY", "DRIFT", "TARGET", "BACK"};
       index = echoUi.cursor; label = names[index]; return true;
     }
     case SET_QUICK_JUMP: {
@@ -9242,6 +9313,7 @@ void drawDivNotesScreen(uint8_t cursor) {
 }
 
 String liveTargetName(uint8_t target) {
+  if (target == SELECTD_LIVE_TARGET) return String("SELECTD");
   return target == 0 ? String("MAIN") : String("LOOP ") + String(target);
 }
 
@@ -9691,7 +9763,7 @@ void drawLiveNoteLengthScreen() {
 }
 
 void drawStutterScreen() {
-  static const char *const names[] = {"TARGET", "ON/OFF", "DIVISION", "TIMEOUT", "BACK"};
+  static const char *const names[] = {"DIVISION", "ON/OFF", "TIMEOUT", "TARGET", "BACK"};
   const LiveTargetSettings &target = firmware3Settings.liveTargets[stutterTarget];
   if (ui.menuMode == MENU_SELECT) {
     drawSubmenuField("", liveTargetName(stutterTarget) + " " +
@@ -9701,15 +9773,15 @@ void drawStutterScreen() {
   }
   String value;
   if (stutterUi.editing && cancelSelectedFor(SET_STUTTER)) value = "CANCEL";
-  else if (stutterUi.cursor == 0) value = liveTargetName(stutterTarget);
+  else if (stutterUi.cursor == 0) value = lengthSelectionName(target.stutterLengthSelection);
   else if (stutterUi.cursor == 1) value = onOff(target.stutterEnabled);
-  else if (stutterUi.cursor == 2) value = lengthSelectionName(target.stutterLengthSelection);
-  else if (stutterUi.cursor == 3) value = String(firmware3Settings.stutterTimeoutBars) + " BARS";
+  else if (stutterUi.cursor == 2) value = String(firmware3Settings.stutterTimeoutBars) + " BARS";
+  else if (stutterUi.cursor == 3) value = liveTargetName(stutterTarget);
   drawSubmenuField(names[stutterUi.cursor], value, stutterUi.editing);
 }
 
 void drawEchoScreen() {
-  static const char *const names[] = {"TARGET", "ON/OFF", "WET", "LENGTH", "DELAY", "DRIFT", "BACK"};
+  static const char *const names[] = {"LENGTH", "ON/OFF", "WET", "DELAY", "DRIFT", "TARGET", "BACK"};
   const LiveTargetSettings &echo = firmware3Settings.liveTargets[echoTarget];
   if (ui.menuMode == MENU_SELECT) {
     drawSubmenuField("", liveTargetName(echoTarget) + " " +
@@ -9725,11 +9797,11 @@ void drawEchoScreen() {
     return;
   }
   String value;
-  if (echoUi.cursor == 0) value = liveTargetName(echoTarget);
+  if (echoUi.cursor == 0) value = lengthSelectionName(echo.echoLength);
   else if (echoUi.cursor == 1) value = onOff(echo.echoEnabled);
-  else if (echoUi.cursor == 3) value = lengthSelectionName(echo.echoLength);
-  else if (echoUi.cursor == 4) value = lengthSelectionName(echo.echoDelay);
-  else if (echoUi.cursor == 5) value = String(echo.echoDrift);
+  else if (echoUi.cursor == 3) value = lengthSelectionName(echo.echoDelay);
+  else if (echoUi.cursor == 4) value = String(echo.echoDrift);
+  else if (echoUi.cursor == 5) value = liveTargetName(echoTarget);
   drawSubmenuField(names[echoUi.cursor], value, echoUi.editing);
 }
 

@@ -148,7 +148,12 @@ sensor, a mapped CC, or a button:
 ### Live transformations
 
 Velocity, Notelength, Stutter, and Echo can target Main or any of the four
-looper tracks independently.
+looper tracks independently. Stutter and Echo also have a SELECTD target,
+its own independent settings that dynamically follow whichever loop track is
+currently selected, so one stutter or echo setup can travel with whatever
+track the performer is actively working rather than needing reconfiguring
+per track. Their submenus lead with the length/repeat-size parameter and
+end with the target picker.
 
 - Velocity scales from 0 to 200 percent.
 - Notelength scales from 1 to 200 percent.
