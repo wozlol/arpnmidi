@@ -30,9 +30,11 @@ notes, arp, playback, recording, or pending UI work are active.
 
 ### Main-brain core 1
 
-- OLED rendering when visible state is dirty
-- VL53L0X distance-sensor polling
-- Outgoing 1 Mbps inter-brain UART queue
+- Outgoing 1 Mbps inter-brain UART queue, which outranks everything else here
+- OLED rendering when visible state is dirty, capped at one frame per 50 ms and
+  deferred while outgoing MIDI is queued, with a 100 ms starvation bound
+- VL53L0X distance-sensor polling, data-ready peek first so a slow or wedged
+  sensor costs one register read instead of a blocking wait
 
 The main-to-secondary queue is fixed at 256 messages. It reserves capacity for
 critical note offs and counts normal and critical drops separately.
@@ -306,6 +308,11 @@ The RP2040 main sketch must use the 2 MB flash layout with 512 KB filesystem.
 The board package defaults to no filesystem partition, and with that default
 nothing can be stored at all. The firmware reports the condition at boot and on
 the diagnostics screen rather than failing quietly.
+
+The PANIC screen shows scheduler health measured over the previous second:
+P is the worst main-loop pass in microseconds and L is the worst arp or drum
+step lateness in microseconds. A healthy instrument shows P under about two
+thousand and L in the low thousands.
 
 ## Diagnostics
 

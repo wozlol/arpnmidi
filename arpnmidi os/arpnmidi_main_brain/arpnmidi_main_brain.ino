@@ -910,10 +910,20 @@ SensorRuntime sensorRt;
 PushRuntime pushRt;
 UiState ui;
 uint8_t persistedUiSetting = SET_BPM;
+constexpr uint32_t UI_MIN_FRAME_MS = 50;
+constexpr uint32_t RENDER_STARVED_MS = 100;
 // A failed flash write waits this long before another attempt. Retrying every
 // loop pass would grind the whole instrument, which is far worse than data
 // waiting a few extra seconds.
 uint32_t storageRetryHoldUntilMs = 0;
+// Scheduler health, measured instead of guessed. Worst loop pass and worst
+// step lateness over the previous one-second window, shown on the PANIC
+// diagnostics screen.
+uint32_t perfWindowStartMs = 0;
+uint32_t perfLoopMaxUs = 0;
+uint32_t perfLoopMaxUsShown = 0;
+uint32_t perfLateMaxUs = 0;
+uint32_t perfLateMaxUsShown = 0;
 bool presetStorageDirty = false;
 uint32_t presetStorageDirtyMs = 0;
 uint32_t tapTempoLastMs = 0;
@@ -7556,6 +7566,11 @@ void tickArp() {
       arpGlobalStep = boundary;
       arpNextStepUs = swungGridTimeUs(arpGridOriginUs, boundary, division);
     }
+    if (nowUs > arpNextStepUs) {
+      const uint32_t lateUs = static_cast<uint32_t>(
+          min<uint64_t>(nowUs - arpNextStepUs, UINT32_MAX));
+      if (lateUs > perfLateMaxUs) perfLateMaxUs = lateUs;
+    }
     uint8_t catchUp = 0;
     while (nowUs >= arpNextStepUs && catchUp++ < 4) {
       runArpStep();
@@ -7592,6 +7607,11 @@ void tickArp() {
       while (boundary > 0 && swungGridTimeUs(drumGridOriginUs, boundary, drumDivision) > nowUs) --boundary;
       drumGlobalStep = boundary;
       drumNextStepUs = swungGridTimeUs(drumGridOriginUs, boundary, drumDivision);
+    }
+    if (nowUs > drumNextStepUs) {
+      const uint32_t lateUs = static_cast<uint32_t>(
+          min<uint64_t>(nowUs - drumNextStepUs, UINT32_MAX));
+      if (lateUs > perfLateMaxUs) perfLateMaxUs = lateUs;
     }
     uint8_t catchUp = 0;
     while (nowUs >= drumNextStepUs && catchUp++ < 4) {
@@ -8053,8 +8073,22 @@ void pollSensorHardwareCore1() {
   if ((now - sensorHardwareLastPollMs) < SENSOR_POLL_MS) return;
   sensorHardwareLastPollMs = now;
 
-  const uint16_t mm = tof.readRangeContinuousMillimeters();
-  const bool timedOut = tof.timeoutOccurred();
+  // Peek data-ready first. The library's read blocks polling I2C until a
+  // sample arrives, and this core also drains outgoing MIDI, so a slow or
+  // wedged sensor must cost one register read and nothing more.
+  static uint32_t sensorFreshSampleMs = 0;
+  if (sensorFreshSampleMs == 0) sensorFreshSampleMs = now;
+  uint16_t mm;
+  bool timedOut;
+  if ((tof.readReg(VL53L0X::RESULT_INTERRUPT_STATUS) & 0x07) == 0) {
+    if (now - sensorFreshSampleMs < 250UL) return;
+    mm = 0xFFFF;
+    timedOut = true;
+  } else {
+    mm = tof.readRangeContinuousMillimeters();
+    timedOut = tof.timeoutOccurred();
+  }
+  sensorFreshSampleMs = now;
   ++sensorSampleSequence;
   __dmb();
   sensorSampleMm = mm;
@@ -9489,6 +9523,11 @@ void drawPanicScreen() {
   // Storage is the one subsystem that can fail silently, so it reports plainly.
   // NO FS means the board was built without a filesystem partition and nothing
   // can ever be saved.
+  display.setCursor(0, 56);
+  display.print(F("P")); display.print(perfLoopMaxUsShown);
+  display.print(F("u L")); display.print(perfLateMaxUsShown);
+  display.print(F("u"));
+
   display.setCursor(0, 48);
   if (!littleFsReady) {
     display.print(F("FS NONE - set 512KB FS"));
@@ -9899,6 +9938,10 @@ void renderDisplayIfNeeded() {
   }
 
   if (!ui.dirty) return;
+  // Dirty can be set faster than frames are worth drawing, one drum-roll hit
+  // at a time. Capping the frame rate keeps this core mostly free for the
+  // MIDI drain.
+  if ((now - ui.lastRenderMs) < UI_MIN_FRAME_MS) return;
   // Clear before drawing so a real-time-side change during the I2C transfer
   // leaves dirty asserted for the next frame instead of being lost.
   ui.dirty = false;
@@ -10264,13 +10307,19 @@ void loop1() {
       drawBusyHourglassNow();
       uiBusyShown = true;
     }
-  } else {
+  } else if (secondaryTxDepth() == 0 ||
+             (millis() - ui.lastRenderMs) > RENDER_STARVED_MS) {
+    // A frame push occupies this core and the I2C bus for tens of
+    // milliseconds while queued notes wait. Notes outrank pixels, so a render
+    // only starts when the outgoing queue is empty, with a starvation bound
+    // so the screen still moves under sustained traffic.
     renderDisplayIfNeeded();
   }
   yield();
 }
 
 void loop() {
+  const uint64_t perfPassStartUs = time_us_64();
 #ifdef TINYUSB_NEED_POLLING_TASK
   TinyUSBDevice.task();
 #endif
@@ -10307,4 +10356,17 @@ void loop() {
   pollPresetStoragePersistence();
   pollLoopStoragePersistence();
   pollExtendedPresetPersistence();
+
+  const uint32_t perfPassUs =
+      static_cast<uint32_t>(time_us_64() - perfPassStartUs);
+  if (perfPassUs > perfLoopMaxUs) perfLoopMaxUs = perfPassUs;
+  const uint32_t perfNowMs = millis();
+  if (perfNowMs - perfWindowStartMs >= 1000UL) {
+    perfWindowStartMs = perfNowMs;
+    perfLoopMaxUsShown = perfLoopMaxUs;
+    perfLateMaxUsShown = perfLateMaxUs;
+    perfLoopMaxUs = 0;
+    perfLateMaxUs = 0;
+    if (ui.selectedSetting == SET_PANIC) ui.dirty = true;
+  }
 }
