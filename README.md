@@ -60,7 +60,7 @@ Detailed wiring and two-board build information is in the
 - Per-track lengths from 1/4 bar through 8 bars
 - Track 1 can also establish a Free loop length and make it the musical bar
 - Layers, Parts Auto Solo, and Manual track modes
-- Overdub, replace, Auto Rec, mute, exclusive solo, safe clear, and undo
+- Overdub, replace, Auto Arm, mute, exclusive solo, safe clear, and undo
 - When all Layers tracks are occupied, the next overdub goes onto the oldest
   layer
 - Optional auto quantize from 1/64 through 1/4, set per track
@@ -91,9 +91,15 @@ Recording always follows one working track:
 - A pass that is already recording keeps its track until it is stopped
 - Only a layer that captured something advances the working track
 - In Layers mode the global Clear gesture works on all four tracks at once and
-  only undoes once nothing audible is left to clear
+  only undoes once nothing audible is left to clear, and returns the working
+  track to Track 1
 - The Loop Mix screen strikes through cleared tracks and dots the record target,
   and the looper summary shows cleared content as a hollow marker
+- Auto Arm keeps the working track armed and waiting whenever it is empty, so a
+  layer starts on the first note played with no button press, whether that note
+  arrives right away or after a pause. It follows every way the working track
+  can change: hand selection, MMC, a mapped CC, and the auto-advance after a
+  layer completes
 
 Changing a populated track's length preserves the instrument's special repeat
 behavior:
@@ -345,16 +351,21 @@ not need the filesystem partition.
   4 KB flash sector for any change, so a two-byte screen memory cost as much as
   a preset and every save wrote two stores instead of one
 - A menu edit saves at the moment of commitment: the click that leaves the
-  edited screen. The pause happens right there, never on a delay afterwards
+  edited screen. The pause happens right there, once, whether or not a loop is
+  playing, rather than on a delay afterwards
 - Nothing changed means nothing written. Every save first compares against the
   stored bytes, so navigation, a no-op exit, and a cancelled edit never touch
   flash and never pause
 - Selecting a track is navigation, not content, and does not trigger a save
-- Changes made while the engine is busy, mapped CCs and performance captures,
-  wait for an idle moment. A filesystem write disables interrupts and parks the
-  rendering core, so it never happens while notes, the arp, or a loop are running
-- The busy hourglass appears before a write starts, and the P, L, and E markers
-  on the diagnostics screen show what is still owed
+- Recording is the one state a commit click still defers around, since a
+  flash stall landing inside a take is a genuinely bad moment for one
+- Changes made automatically while the engine is busy, mapped CCs and
+  performance captures, wait for an idle moment rather than forcing themselves
+  through. A filesystem write disables interrupts and parks the rendering
+  core, so an automatic write never happens while notes, the arp, or a loop
+  are running
+- The busy hourglass appears before any write starts, and the S flags plus the
+  PASS/LATE scheduler numbers on the diagnostics screen show what is going on
 - A failed write waits five seconds before another attempt, and a missing
   filesystem stops all attempts, so storage trouble can never grind the
   instrument

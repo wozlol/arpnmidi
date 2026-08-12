@@ -294,13 +294,28 @@ A flash write is a musical event on this chip, not a background chore. The
 filesystem disables interrupts and parks the rendering core for the whole erase
 and program, which costs tens of milliseconds with no MIDI input, no display,
 and no scheduling. Menu edits therefore save synchronously at the exit click,
-where the performer expects the pause. Every save compares against the stored
-bytes first, so nothing is written when nothing changed, which is what makes
-navigation, no-op exits, and cancelled edits free. Performance-time changes
-wait for a genuinely quiet engine. A failed write backs off for five seconds
-and a missing filesystem disables attempts entirely, because retrying every
-loop pass would grind the whole instrument. Loading a preset flushes anything
-still pending for the preset being left.
+where the performer expects the pause, once, whether or not a loop happens to
+be playing: it is a one-shot deliberate action, not a repeating background
+trigger, so it always attempts the write rather than waiting for the engine to
+go quiet. Recording is the one state a commit click still defers around, since
+a stall landing inside a take would corrupt it. Every save compares against
+the stored bytes first, so nothing is written when nothing changed, which is
+what makes navigation, no-op exits, and cancelled edits free regardless of
+engine state. Changes made automatically rather than by a fresh click, mapped
+CCs and performance captures, still wait for a genuinely quiet engine, since
+those can repeat continuously during a performance. A failed write backs off
+for five seconds and a missing filesystem disables attempts entirely, because
+retrying every loop pass would grind the whole instrument. Loading a preset
+flushes anything still pending for the preset being left.
+
+The arp and drum scheduling grid only used to clear reactively, on the next
+note-off after everything went idle. Stopping the looper with no notes
+currently held produced no such event, so the grid lingered at a nonzero
+timestamp indefinitely, which the engine-idle check read as still running,
+permanently blocking every automatic flash write until an unrelated note
+happened to clear it. The idle release now runs every arp tick, so it
+self-heals within one pass of the looper actually going idle, and panic
+triggers it immediately rather than waiting for the next tick.
 
 Firmware 3 does not migrate incompatible prototype preset layouts. A schema
 mismatch installs current factory defaults across all slots. This keeps boot

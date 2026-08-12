@@ -2205,7 +2205,11 @@ void panicMidiOnly() {
   }
   noteLengthEngine.reset(emitNoteLengthEvent, nullptr);
   echoEngine.reset(emitEchoEvent, nullptr);
-  multitrackLooper.stop(releaseMultitrackOutput, nullptr);
+  // Panic already stopped the looper transport here. loopAllOff also releases
+  // the arp/drum scheduling clock immediately, rather than waiting for the
+  // next arp tick to notice the looper went idle, so a hold-and-panic clears
+  // the same state that gates flash writes without any delay.
+  loopAllOff();
   multitrackLooper.cancelRecording();
   timeTravelImport.active = false;
   for (uint8_t target = 0; target < LIVE_TARGET_COUNT; ++target) {
@@ -3073,6 +3077,15 @@ void noteArpOffPassthrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity,
   mappedChannels[inNote] = arpOutputRefOn(sourcePort, q, baseOutCh, !drumSplit, velocity);
 }
 
+// The scheduling grid only used to clear reactively, on the next note-off
+// event after everything went idle. A performer who stops the looper with no
+// notes currently held, the ordinary case, produced no such event, so the
+// grid lingered at a nonzero timestamp indefinitely. arpAnyPlaybackActive()
+// treats that as the engine still running, which permanently blocked every
+// flash write, presets and the loop file alike, until an unrelated note
+// happened to toggle it. Called every arp tick now, so it self-heals within
+// one pass of the looper actually going idle, regardless of which of the
+// many stop paths, push, sensor, CC, panic, or a menu action, got it there.
 void releaseArpClockIfLooperIdle() {
   if (multitrackLooper.playing() || multitrackLooper.recording() ||
       multitrackLooper.recordingArmed()) return;
@@ -3080,6 +3093,8 @@ void releaseArpClockIfLooperIdle() {
   arpHadKeys = false;
   arpGateOffMs = 0;
   arpNextStepUs = 0;
+  drumGateOffMs = 0;
+  drumNextStepUs = 0;
 }
 
 void loopAllOff() {
@@ -3347,6 +3362,21 @@ void armSelectedMultitrack(bool overdub) {
   ui.dirty = true;
 }
 
+// Auto Arm keeps the working track armed and waiting whenever it is empty, so
+// a layer starts on the first note played with no button press: the note
+// arrives right away, or it arrives later, either way it is what begins the
+// take. This runs every pass rather than hooking every place the working
+// track can change, selection by hand, MMC, a mapped CC, or the auto-advance
+// after a layer completes, so it follows all of them the same way. It is
+// inert once armed: nothing plays, nothing is written, until a note arrives.
+void pollLooperAutoArm() {
+  if (!firmware3Settings.looperAutoRec) return;
+  if (multitrackLooper.recording() || multitrackLooper.recordingArmed()) return;
+  if (timeTravelImport.active) return;
+  if (loopTrackHasContent(multitrackLooper.selectedTrack())) return;
+  armSelectedMultitrack(false);
+}
+
 // Every working-track change goes through here.  A record that is armed but not
 // yet started follows the selection, so the track shown on screen and the track
 // about to be written can never disagree.  A pass that is already recording
@@ -3400,6 +3430,10 @@ void clearOrUndoAllLoopTracks() {
     if (anyLive) multitrackLooper.safeClear(track, releaseMultitrackOutput, nullptr);
     else multitrackLooper.undoClear(track);
   }
+  // A whole-loop clear is a fresh start, so the working track resets to 1
+  // along with it. Undo restores content, not the selection, so it leaves
+  // wherever the working track already was alone.
+  if (anyLive) selectLooperTrack(0);
 }
 
 bool finishActiveMultitrackRecording(uint64_t nowUs, bool startIfStopped) {
@@ -3680,10 +3714,9 @@ void recordLoopNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t 
   const uint8_t historyTarget = loopOwnsInput(sourcePort) ? loopTrackForSource(sourcePort) + 1U : 0;
   rollingHistory.push(nowUs, historyTarget, event);
   if (!loopOwnsInput(sourcePort)) {
-    if (firmware3Settings.looperAutoRec && !multitrackLooper.hasAnyData() &&
-        !multitrackLooper.recording() && !multitrackLooper.recordingArmed() && on && velocity > 0) {
-      armSelectedMultitrack(false);
-    }
+    // Auto Arm keeps the working track armed and waiting, so nothing special
+    // happens here on the note that starts a take: it is captured by the same
+    // path as any other armed recording, below.
     if (multitrackLooper.capture(nowUs, event)) markLoopStorageDirty();
     // No refresh here. A captured note changes nothing the screen shows, and
     // this runs once per played note while recording.
@@ -3711,6 +3744,11 @@ void tickLooper() {
     refreshLoopUiState();
   }
   releaseSilencedMultitrackOutputs();
+  // After a fixed-length pass finished above, the working track has already
+  // moved to whatever selectNextAutoLooperTrackAfterCapture picked. Auto Arm
+  // runs after that, in the same pass, so the new track is armed immediately
+  // rather than waiting for the next loop() iteration.
+  pollLooperAutoArm();
 }
 
 void tickEcho() {
@@ -7633,6 +7671,7 @@ void tickArp() {
     drumArpNoteOffs();
     drumGateOffMs = 0;
   }
+  releaseArpClockIfLooperIdle();
   if (!musicalClock.synchronizedAdvanceAllowed(nowUs)) return;
   if (!customMode && arpHeldCount > 0 && (arpNextStepUs == 0 || nowUs >= arpNextStepUs)) {
     const uint8_t division = currentDivisionSetting();
@@ -8384,7 +8423,7 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
     }
     case SET_LOOP_BARS: {
       static const char *const names[] = {
-        "TRACK", "LENGTH", "TRK QUANT", "AUTO REC", "TIME TRAV",
+        "TRACK", "LENGTH", "TRK QUANT", "AUTO ARM", "TIME TRAV",
         "NEW TRACK", "REC CC", "TRNSPRT", "BACK"
       };
       index = looperSettingsUi.cursor; label = names[index]; return true;
@@ -9638,8 +9677,11 @@ void drawPanicScreen() {
   // NO FS means the board was built without a filesystem partition and nothing
   // can ever be saved.
   display.setCursor(0, 56);
-  display.print(F("P")); display.print(perfLoopMaxUsShown);
-  display.print(F("u L")); display.print(perfLateMaxUsShown);
+  // Spelled out rather than single letters: P and L above already mean the
+  // preset and loop dirty flags, and reusing them here for pass/lateness
+  // timing would read as the same thing on a screen this dense.
+  display.print(F("PASS ")); display.print(perfLoopMaxUsShown);
+  display.print(F("u LATE ")); display.print(perfLateMaxUsShown);
   display.print(F("u"));
 
   display.setCursor(0, 48);
@@ -9722,7 +9764,7 @@ void drawLooperFlagBox(uint8_t x, uint8_t y, char label, bool enabled) {
 
 void drawLooperSettingsScreen() {
   static const char *const names[] = {
-    "TRACK", "LENGTH", "TRK QUANT", "AUTO REC", "TIME TRAV",
+    "TRACK", "LENGTH", "TRK QUANT", "AUTO ARM", "TIME TRAV",
     "NEW TRACK", "REC CC", "TRNSPRT", "BACK"
   };
   const uint8_t track = multitrackLooper.selectedTrack();
@@ -9747,7 +9789,7 @@ void drawLooperSettingsScreen() {
         display.drawTriangle(58, ty - 3, 58, ty + 3, 63, ty, SSD1306_WHITE);
       }
     }
-    drawLooperFlagBox(70, 1, 'R', firmware3Settings.looperAutoRec);
+    drawLooperFlagBox(70, 1, 'A', firmware3Settings.looperAutoRec);
     drawLooperFlagBox(85, 1, 'T', firmware3Settings.looperTimeTravel);
     drawLooperFlagBox(70, 14, 'Q', loopTrackQuantizeSelection(track));
     drawLooperFlagBox(85, 14, 'C', firmware3Settings.looperRecordCc);
@@ -10194,14 +10236,18 @@ void processDeferredUiActions() {
       }
     }
     if (storage.autoSave) {
-      // The click that leaves a screen is the moment of commitment, so the
-      // save happens right here, where the performer expects the pause. If
-      // the engine is making sound the idle poll takes it instead.
-      if (!storageWriteAlwaysBlocked() && storageWriteEngineIdle()) {
-        saveStorage();
-      } else {
+      // The click that leaves a screen is a deliberate, one-shot commitment,
+      // not a repeating background trigger, so it always attempts the save
+      // rather than waiting for a playing loop to go quiet: the compare-skip
+      // makes an unchanged setting free, and a real change pays one visible
+      // pause exactly when the performer asked for it, loop playing or not.
+      // Recording is the one state still worth deferring, since a stall
+      // landing inside a take is a genuinely bad moment for one.
+      if (storageWriteAlwaysBlocked()) {
         presetStorageDirty = true;
         presetStorageDirtyMs = millis();
+      } else {
+        saveStorage();
       }
     }
   }
