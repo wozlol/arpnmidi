@@ -1141,6 +1141,7 @@ uint32_t customButtonFlappyMs[4];
 uint8_t looperButtonStep[4];
 uint8_t lastLooperButton = 0xFF;
 uint32_t looperButtonLastMs = 0;
+uint32_t looperScreenClickMs = 0;
 bool chordButtonPlaying[4];
 bool chordLearnArmed = false;
 bool chordClearArmed = false;
@@ -4389,8 +4390,8 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (!looperSettingsUi.editing) return 8;
       if (looperSettingsUi.cursor == 0) return arpnmidi3::kLoopTrackCount - 1;
       if (looperSettingsUi.cursor == 1) return multitrackLooper.selectedTrack() == 0 ? 6 : 5;
-      if (looperSettingsUi.cursor == 4) return static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual);
-      if (looperSettingsUi.cursor == 5) return 5;
+      if (looperSettingsUi.cursor == 2) return 5;
+      if (looperSettingsUi.cursor == 5) return static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual);
       return 1;
     case SET_MUTE_SOLO: return LOOP_MIX_BACK_SLOT;
     case SET_PARAMETER_LOCK:
@@ -4561,12 +4562,12 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       if (!looperSettingsUi.editing) return looperSettingsUi.cursor;
       if (looperSettingsUi.cursor == 0) return multitrackLooper.selectedTrack();
       if (looperSettingsUi.cursor == 1) return loopTrackLengthSelection[multitrackLooper.selectedTrack()];
-      if (looperSettingsUi.cursor == 2) return firmware3Settings.looperAutoRec;
-      if (looperSettingsUi.cursor == 3) return firmware3Settings.looperTimeTravel;
-      if (looperSettingsUi.cursor == 4) return firmware3Settings.looperTrackMode;
-      if (looperSettingsUi.cursor == 5) {
+      if (looperSettingsUi.cursor == 2) {
         return loopTrackQuantizeSelection(multitrackLooper.selectedTrack());
       }
+      if (looperSettingsUi.cursor == 3) return firmware3Settings.looperAutoRec;
+      if (looperSettingsUi.cursor == 4) return firmware3Settings.looperTimeTravel;
+      if (looperSettingsUi.cursor == 5) return firmware3Settings.looperTrackMode;
       if (looperSettingsUi.cursor == 6) return firmware3Settings.looperRecordCc;
       return firmware3Settings.looperMidiTransport;
     case SET_MUTE_SOLO: return muteSoloCursor;
@@ -4903,18 +4904,18 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
         const uint8_t track = multitrackLooper.selectedTrack();
         setLoopTrackLengthSelection(track, value);
       } else if (looperSettingsUi.cursor == 2) {
-        firmware3Settings.looperAutoRec = value ? 1 : 0;
-        saveStorageIfAuto();
-      } else if (looperSettingsUi.cursor == 3) {
-        firmware3Settings.looperTimeTravel = value ? 1 : 0;
-        saveStorageIfAuto();
-      } else if (looperSettingsUi.cursor == 4) {
-        firmware3Settings.looperTrackMode =
-          clampU8(value, 0, static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
-        saveStorageIfAuto();
-      } else if (looperSettingsUi.cursor == 5) {
         firmware3Settings.looperQuantize[multitrackLooper.selectedTrack()] =
             clampU8(value, 0, 5);
+        saveStorageIfAuto();
+      } else if (looperSettingsUi.cursor == 3) {
+        firmware3Settings.looperAutoRec = value ? 1 : 0;
+        saveStorageIfAuto();
+      } else if (looperSettingsUi.cursor == 4) {
+        firmware3Settings.looperTimeTravel = value ? 1 : 0;
+        saveStorageIfAuto();
+      } else if (looperSettingsUi.cursor == 5) {
+        firmware3Settings.looperTrackMode =
+          clampU8(value, 0, static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
         saveStorageIfAuto();
       } else if (looperSettingsUi.cursor == 6) {
         firmware3Settings.looperRecordCc = value ? 1 : 0;
@@ -5838,7 +5839,17 @@ bool handleFirmware3SubmenuClick() {
     case SET_QUICK_JUMP: return finishSubmenuOrEdit(quickJumpUi, 4);
     case SET_DRUM_MAGIC: return finishSubmenuOrEdit(drumMagicUi, 7);
     case SET_BASS_CH: return finishSubmenuOrEdit(bassUi, 3);
-    case SET_LOOP_BARS: return finishSubmenuOrEdit(looperSettingsUi, 8);
+    case SET_LOOP_BARS: {
+      const bool wasEditing = looperSettingsUi.editing;
+      const bool handled = finishSubmenuOrEdit(looperSettingsUi, 8);
+      // Committing any value hops straight back to the LOOPER summary. The
+      // submenu is a place to change one thing, not a place to live.
+      if (wasEditing && !looperSettingsUi.editing && ui.menuMode == MENU_EDIT) {
+        ui.menuMode = MENU_SELECT;
+        ui.deferredExitWork = true;
+      }
+      return handled;
+    }
     case SET_PARAMETER_LOCK:
       if (parameterLockUi.editing) {
         if (cancelSelectedFor(SET_PARAMETER_LOCK)) {
@@ -5918,6 +5929,25 @@ bool handleFirmware3SubmenuClick() {
 }
 
 void activateClickAction() {
+  // A fast double click on the LOOPER summary arms the working track. The
+  // first click of the pair enters the submenu as usual, and the second one
+  // backs out and arms, so slower clicks keep their normal meaning.
+  if (ui.selectedSetting == SET_LOOP_BARS) {
+    const uint32_t clickMs = millis();
+    const bool fastPair = (clickMs - looperScreenClickMs) <= 400UL;
+    looperScreenClickMs = clickMs;
+    if (fastPair && ui.menuMode == MENU_EDIT && !looperSettingsUi.editing &&
+        looperSettingsUi.cursor == 0) {
+      ui.menuMode = MENU_SELECT;
+      toggleLooperArmForTrack(multitrackLooper.selectedTrack());
+      releaseSilencedMultitrackOutputs();
+      refreshLoopUiState();
+      encoder.switchIgnoreUntilMs = millis() + 120;
+      ui.dirty = true;
+      markActivity();
+      return;
+    }
+  }
   if (ui.selectedSetting == SET_PANIC) {
     panicAll();
     return;
@@ -8338,8 +8368,8 @@ bool currentSubmenuLabel(String &label, uint8_t &index) {
     }
     case SET_LOOP_BARS: {
       static const char *const names[] = {
-        "TRACK", "LENGTH", "AUTO REC", "TIME TRAV", "NEW TRACK",
-        "TRK QUANT", "REC CC", "TRNSPRT", "BACK"
+        "TRACK", "LENGTH", "TRK QUANT", "AUTO REC", "TIME TRAV",
+        "NEW TRACK", "REC CC", "TRNSPRT", "BACK"
       };
       index = looperSettingsUi.cursor; label = names[index]; return true;
     }
@@ -9676,8 +9706,8 @@ void drawLooperFlagBox(uint8_t x, uint8_t y, char label, bool enabled) {
 
 void drawLooperSettingsScreen() {
   static const char *const names[] = {
-    "TRACK", "LENGTH", "AUTO REC", "TIME TRAV", "NEW TRACK",
-    "TRK QUANT", "REC CC", "TRNSPRT", "BACK"
+    "TRACK", "LENGTH", "TRK QUANT", "AUTO REC", "TIME TRAV",
+    "NEW TRACK", "REC CC", "TRNSPRT", "BACK"
   };
   const uint8_t track = multitrackLooper.selectedTrack();
   if (ui.menuMode == MENU_SELECT) {
@@ -9717,14 +9747,14 @@ void drawLooperSettingsScreen() {
   String value;
   if (looperSettingsUi.cursor == 0) value = String(track + 1U);
   else if (looperSettingsUi.cursor == 1) value = loopLengthSelectionName(loopTrackLengthSelection[track]);
-  else if (looperSettingsUi.cursor == 2) value = onOff(firmware3Settings.looperAutoRec);
-  else if (looperSettingsUi.cursor == 3) value = onOff(firmware3Settings.looperTimeTravel);
-  else if (looperSettingsUi.cursor == 4) {
-    static const char *const modes[] = {"LAYERS", "PARTS SOLO", "MANUAL"};
-    value = modes[firmware3Settings.looperTrackMode];
-  } else if (looperSettingsUi.cursor == 5) {
+  else if (looperSettingsUi.cursor == 2) {
     static const char *const quantize[] = {"OFF", "1/64", "1/32", "1/16", "1/8", "1/4"};
     value = quantize[loopTrackQuantizeSelection(track)];
+  } else if (looperSettingsUi.cursor == 3) value = onOff(firmware3Settings.looperAutoRec);
+  else if (looperSettingsUi.cursor == 4) value = onOff(firmware3Settings.looperTimeTravel);
+  else if (looperSettingsUi.cursor == 5) {
+    static const char *const modes[] = {"LAYERS", "PARTS SOLO", "MANUAL"};
+    value = modes[firmware3Settings.looperTrackMode];
   } else if (looperSettingsUi.cursor == 6) value = onOff(firmware3Settings.looperRecordCc);
   else if (looperSettingsUi.cursor == 7) value = onOff(firmware3Settings.looperMidiTransport);
   drawSubmenuField(names[looperSettingsUi.cursor], value, looperSettingsUi.editing);
