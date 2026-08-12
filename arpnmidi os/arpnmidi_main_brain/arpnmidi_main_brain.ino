@@ -5515,7 +5515,7 @@ Settings defaultSettings() {
   Settings s{};
   s.manualBpm = 120;
   s.arpMode = ARPSEL_UP;
-  s.division = DIV_1_8;
+  s.division = DIV_1_16;
   s.arpVelocity = 96;
   s.arpLengthPct = 55;
   s.inputChannel = 1;
