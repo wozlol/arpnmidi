@@ -344,12 +344,20 @@ not need the filesystem partition.
 - There is no EEPROM. The RP2040 has none, and the emulation rewrote a whole
   4 KB flash sector for any change, so a two-byte screen memory cost as much as
   a preset and every save wrote two stores instead of one
-- Automatic writes wait for the musical engine to be idle. A filesystem write
-  disables interrupts and parks the rendering core for tens of milliseconds, so
-  it is a musical event and never happens while notes, the arp, or a loop are
-  running
+- A menu edit saves at the moment of commitment: the click that leaves the
+  edited screen. The pause happens right there, never on a delay afterwards
+- Nothing changed means nothing written. Every save first compares against the
+  stored bytes, so navigation, a no-op exit, and a cancelled edit never touch
+  flash and never pause
+- Selecting a track is navigation, not content, and does not trigger a save
+- Changes made while the engine is busy, mapped CCs and performance captures,
+  wait for an idle moment. A filesystem write disables interrupts and parks the
+  rendering core, so it never happens while notes, the arp, or a loop are running
 - The busy hourglass appears before a write starts, and the P, L, and E markers
-  on the diagnostics screen show what is still owed. Stopping the loop settles it
+  on the diagnostics screen show what is still owed
+- A failed write waits five seconds before another attempt, and a missing
+  filesystem stops all attempts, so storage trouble can never grind the
+  instrument
 - Loading a preset writes anything still pending for the preset being left
 
 Firmware 3 uses explicit storage schema identities. If the installed preset

@@ -187,7 +187,7 @@ void restartArpTiming(bool immediate);
 void renderDisplayIfNeeded();
 void arpNoteOffs();
 void drumArpNoteOffs();
-void saveStorage();
+bool saveStorage();
 void saveStorageIfAuto();
 void markLoopStorageDirty();
 void markExtendedPresetDirty();
@@ -779,7 +779,6 @@ struct LoopFileEvent {
   uint8_t data2 = 0;
 };
 
-constexpr uint32_t UI_SCREEN_SAVE_IDLE_MS = 2000UL;
 // The header is written raw at the front of the state file, so its layout is
 // pinned. Any change to it needs a new schema identity.
 static_assert(sizeof(DeviceStateHeader) == 12, "Device state header layout changed");
@@ -911,9 +910,10 @@ SensorRuntime sensorRt;
 PushRuntime pushRt;
 UiState ui;
 uint8_t persistedUiSetting = SET_BPM;
-uint8_t observedUiSetting = SET_BPM;
-bool uiScreenSavePending = false;
-uint32_t uiScreenChangedMs = 0;
+// A failed flash write waits this long before another attempt. Retrying every
+// loop pass would grind the whole instrument, which is far worse than data
+// waiting a few extra seconds.
+uint32_t storageRetryHoldUntilMs = 0;
 bool presetStorageDirty = false;
 uint32_t presetStorageDirtyMs = 0;
 uint32_t tapTempoLastMs = 0;
@@ -3801,28 +3801,31 @@ void markExtendedPresetDirty() {
 }
 
 void pollLoopStoragePersistence() {
-  if (!loopStorageDirty || !storageWriteReady(loopStorageDirtyMs, 750UL)) return;
+  if (!loopStorageDirty || !littleFsReady) return;
+  if (millis() < storageRetryHoldUntilMs) return;
+  if (!storageWriteReady(loopStorageDirtyMs, 750UL)) return;
   showBusyHourglass();
   saveLoopStorageIfAny();
   endBusyHourglass();
+  if (loopStorageDirty) storageRetryHoldUntilMs = millis() + 5000UL;
 }
 
+// The deferred polls exist for changes made while the engine is busy, mapped
+// CCs and captures during a performance. A change made from the menu saves at
+// the exit click instead and never reaches here.
 void pollPresetStoragePersistence() {
-  if (!presetStorageDirty || ui.deferredExitWork) return;
+  if (!presetStorageDirty || ui.deferredExitWork || !littleFsReady) return;
+  if (millis() < storageRetryHoldUntilMs) return;
   if (!storageWriteReady(presetStorageDirtyMs, 750UL)) return;
-  showBusyHourglass();
   saveStorage();
-  extendedPresetDirty = false;
-  endBusyHourglass();
 }
 
 void pollExtendedPresetPersistence() {
   if (!extendedPresetDirty || chordLearnActive || customArpLearning ||
-      ui.deferredExitWork) return;
+      ui.deferredExitWork || !littleFsReady) return;
+  if (millis() < storageRetryHoldUntilMs) return;
   if (!storageWriteReady(extendedPresetDirtyMs, 750UL)) return;
-  showBusyHourglass();
   if (savePresetLearnedContent(storage.currentPreset)) extendedPresetDirty = false;
-  endBusyHourglass();
 }
 
 void clearSavedLoopStorage() {
@@ -4851,8 +4854,9 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_LOOP_BARS:
       if (!looperSettingsUi.editing) looperSettingsUi.cursor = clampU8(value, 0, 8);
       else if (looperSettingsUi.cursor == 0) {
+        // Selection is navigation, not content. It rides along in the loop
+        // file whenever a real change writes it.
         selectLooperTrack(clampU8(value, 0, arpnmidi3::kLoopTrackCount - 1));
-        markLoopStorageDirty();
       }
       else if (looperSettingsUi.cursor == 1) {
         const uint8_t track = multitrackLooper.selectedTrack();
@@ -5170,12 +5174,14 @@ constexpr const char *DEVICE_STATE_PATH = "/state.f3";
 // One scratch record rather than a stack copy: a preset record is far too large
 // to build on the musical core's stack.
 PresetRecord presetScratch;
+PresetRecord presetCompareScratch;
 
 size_t presetRecordOffset(uint8_t slot) {
   return sizeof(DeviceStateHeader) + static_cast<size_t>(slot) * sizeof(PresetRecord);
 }
 
 void fillPresetRecordFromLiveState(PresetRecord &record) {
+  record = PresetRecord{};  // deterministic padding so compares mean something
   record.settings = settings;
   record.firmware3 = firmware3Settings;
   record.featureControls = featureControls;
@@ -5293,11 +5299,25 @@ bool writePresetRecord(uint8_t slot, const PresetRecord &record) {
 // that cannot be read has no settings worth preserving, so the whole live state
 // is written instead and the learn is not lost to a retry loop.
 bool savePresetLearnedContent(uint8_t slot) {
-  const bool readable = readPresetRecord(slot, presetScratch);
-  const Settings stored = presetScratch.settings;
+  if (!littleFsReady) {
+    // Nothing can be stored without a filesystem. Reporting success stops the
+    // caller from retrying forever, and the diagnostics screen already says
+    // FS NONE.
+    storageError = true;
+    return true;
+  }
+  const bool readable = readPresetRecord(slot, presetCompareScratch);
   fillPresetRecordFromLiveState(presetScratch);
-  if (readable) presetScratch.settings = stored;
-  return writePresetRecord(slot, presetScratch);
+  if (readable) presetScratch.settings = presetCompareScratch.settings;
+  if (readable &&
+      memcmp(&presetScratch, &presetCompareScratch, sizeof(PresetRecord)) == 0) {
+    return true;
+  }
+  showBusyHourglass();
+  const bool ok = writePresetRecord(slot, presetScratch);
+  endBusyHourglass();
+  if (!ok) storageRetryHoldUntilMs = millis() + 5000UL;
+  return ok;
 }
 
 // The header carries the device-global state: which preset is live, Auto Save,
@@ -5398,7 +5418,6 @@ void stagePersistedUiSetting(uint8_t settingId) {
   if (settingId >= SETTING_COUNT || !selectableSetting(settingId)) return;
   storage.lastScreen = settingId;
   persistedUiSetting = settingId;
-  uiScreenSavePending = false;
 }
 
 bool loadPersistedUiSetting(uint8_t &settingId) {
@@ -5409,19 +5428,60 @@ bool loadPersistedUiSetting(uint8_t &settingId) {
   return true;
 }
 
-// One save writes one preset record and the header. There is no second store to
-// keep in step, so a preset can no longer be half written.
-void saveStorage() {
+// The old EEPROM emulation had a property worth keeping: writing a byte that
+// already held that value marked nothing dirty, so an exit with no edits never
+// touched flash. These compares restore that property for the state file.
+bool presetRecordDiffersFromStored(uint8_t slot, const PresetRecord &record) {
+  if (!readPresetRecord(slot, presetCompareScratch)) return true;
+  return memcmp(&record, &presetCompareScratch, sizeof(PresetRecord)) != 0;
+}
+
+// The remembered screen alone never justifies a write. Only the fields the
+// performer actually owns can force one.
+bool deviceHeaderCoreDiffers() {
+  File file = LittleFS.open(DEVICE_STATE_PATH, "r");
+  DeviceStateHeader stored{};
+  const bool ok = file &&
+      file.read(reinterpret_cast<uint8_t *>(&stored), sizeof(stored)) == sizeof(stored);
+  if (file) file.close();
+  if (!ok) return true;
+  return stored.currentPreset != storage.currentPreset ||
+         stored.autoSave != storage.autoSave;
+}
+
+// One save writes one preset record and the header, at the moment of
+// commitment. Nothing changed means nothing written, no hourglass, no pause.
+bool saveStorage() {
+  if (!littleFsReady) {
+    storageError = true;
+    presetStorageDirty = false;
+    extendedPresetDirty = false;
+    return false;
+  }
   settings.loadPreset = storage.currentPreset;
   settings.savePreset = storage.currentPreset;
-  stagePersistedUiSetting(ui.selectedSetting);
   fillPresetRecordFromLiveState(presetScratch);
-  const bool ok = writePresetRecord(storage.currentPreset, presetScratch) &&
-                  writeDeviceStateHeader();
+  const bool recordChanged =
+      presetRecordDiffersFromStored(storage.currentPreset, presetScratch);
+  if (!recordChanged && !deviceHeaderCoreDiffers()) {
+    presetStorageDirty = false;
+    extendedPresetDirty = false;
+    return true;
+  }
+  stagePersistedUiSetting(ui.selectedSetting);
+  showBusyHourglass();
+  bool ok = true;
+  if (recordChanged) ok = writePresetRecord(storage.currentPreset, presetScratch);
+  ok = writeDeviceStateHeader() && ok;
+  endBusyHourglass();
   storageError = !ok;
-  if (!ok) return;
+  if (!ok) {
+    storageRetryHoldUntilMs = millis() + 5000UL;
+    return false;
+  }
   extendedPresetDirty = false;
   presetStorageDirty = false;
+  return true;
 }
 
 void saveStorageIfAuto() {
@@ -7576,7 +7636,9 @@ void handleLooperButton(uint8_t button) {
     multitrackLooper.undoClear(button);
     selectLooperTrack(button);
   }
-  if (selectedAction != 0) markLoopStorageDirty();
+  if (selectedAction != 0 && selectedAction != LOOPER_BUTTON_SELECT) {
+    markLoopStorageDirty();
+  }
   releaseSilencedMultitrackOutputs();
   refreshLoopUiState();
   ui.dirty = true;
@@ -9834,9 +9896,6 @@ void drawBusyHourglassNow() {
 
 void processDeferredUiActions() {
   if (!ui.deferredExitWork) return;
-  const bool willWrite = presetStorageDirty || extendedPresetDirty ||
-                         ui.deferredSaveOnly || ui.deferredLoadPreset;
-  if (willWrite) showBusyHourglass();
 
   if (ui.deferredSaveOnly) {
     storage.currentPreset = settings.savePreset;
@@ -9918,34 +9977,26 @@ void processDeferredUiActions() {
         fourButtonUiCursor = 0;
       }
     }
-    saveStorageIfAuto();
+    if (storage.autoSave) {
+      // The click that leaves a screen is the moment of commitment, so the
+      // save happens right here, where the performer expects the pause. If
+      // the engine is making sound the idle poll takes it instead.
+      if (!storageWriteAlwaysBlocked() && storageWriteEngineIdle()) {
+        saveStorage();
+      } else {
+        presetStorageDirty = true;
+        presetStorageDirtyMs = millis();
+      }
+    }
   }
 
   ui.deferredExitWork = false;
   ui.deferredLoadPreset = false;
   ui.deferredSaveOnly = false;
-  if (willWrite) endBusyHourglass();
 
   ui.dirty = true;
 }
 
-void pollUiScreenPersistence() {
-  const uint32_t now = millis();
-  if (ui.selectedSetting != observedUiSetting) {
-    observedUiSetting = ui.selectedSetting;
-    uiScreenSavePending = (ui.selectedSetting != persistedUiSetting);
-    uiScreenChangedMs = now;
-  }
-  if (!uiScreenSavePending || ui.deferredExitWork) return;
-  // Remembering the screen is a convenience, not something the performer made,
-  // so it waits like everything else. A real save carries the screen along
-  // anyway, because it lives in the same header.
-  if (!storageWriteReady(uiScreenChangedMs, UI_SCREEN_SAVE_IDLE_MS)) return;
-  showBusyHourglass();
-  stagePersistedUiSetting(ui.selectedSetting);
-  writeDeviceStateHeader();
-  endBusyHourglass();
-}
 
 void showBootStage(const __FlashStringHelper *line1,
                    const __FlashStringHelper *line2) {
@@ -10138,7 +10189,6 @@ void setup() {
   if (takeUiResumeHint(resumeSetting) && resumeSetting < SETTING_COUNT && selectableSetting(resumeSetting)) {
     ui.selectedSetting = resumeSetting;
   }
-  observedUiSetting = ui.selectedSetting;
   persistedUiSetting = ui.selectedSetting;
   showBootStage(F("Held state..."));
   resetHeldState();
@@ -10209,7 +10259,6 @@ void loop() {
     if (ui.selectedSetting == SET_PANIC) ui.dirty = true;
   }
   processDeferredUiActions();
-  pollUiScreenPersistence();
   pollPresetStoragePersistence();
   pollLoopStoragePersistence();
   pollExtendedPresetPersistence();

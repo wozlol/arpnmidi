@@ -281,11 +281,14 @@ on a track always means the first action and a single press cannot reach Clear.
 A flash write is a musical event on this chip, not a background chore. The
 filesystem disables interrupts and parks the rendering core for the whole erase
 and program, which costs tens of milliseconds with no MIDI input, no display,
-and no scheduling. Writes therefore wait for the engine to be genuinely quiet,
-however long that takes, and the busy hourglass appears before one starts. The
-dirty markers on the diagnostics screen show what is still owed; stopping the
-loop is what settles it. Loading a preset flushes anything still pending for the
-preset being left.
+and no scheduling. Menu edits therefore save synchronously at the exit click,
+where the performer expects the pause. Every save compares against the stored
+bytes first, so nothing is written when nothing changed, which is what makes
+navigation, no-op exits, and cancelled edits free. Performance-time changes
+wait for a genuinely quiet engine. A failed write backs off for five seconds
+and a missing filesystem disables attempts entirely, because retrying every
+loop pass would grind the whole instrument. Loading a preset flushes anything
+still pending for the preset being left.
 
 Firmware 3 does not migrate incompatible prototype preset layouts. A schema
 mismatch installs current factory defaults across all slots. This keeps boot
