@@ -1085,7 +1085,8 @@ enum LoopMixMode : uint8_t {
 };
 constexpr uint8_t LOOP_MIX_MODE_BASE = arpnmidi3::kLoopTrackCount;
 constexpr uint8_t LOOP_MIX_BACK_SLOT = LOOP_MIX_MODE_BASE + LOOP_MIX_MODE_COUNT;
-uint8_t loopMixMode = LOOP_MIX_MUTE;
+// Arm is what the screen is reached for most, so it is where the screen opens.
+uint8_t loopMixMode = LOOP_MIX_ARM;
 SubmenuUiState arpMenuUi;
 SubmenuUiState liveVelocityUi;
 SubmenuUiState liveNoteLengthUi;
@@ -6254,7 +6255,7 @@ void activateClickAction() {
     }
     if (ui.selectedSetting == SET_MUTE_SOLO) {
       muteSoloCursor = 0;
-      loopMixMode = LOOP_MIX_MUTE;
+      loopMixMode = LOOP_MIX_ARM;
     }
     ui.menuMode = MENU_EDIT;
   }

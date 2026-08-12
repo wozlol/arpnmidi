@@ -114,7 +114,7 @@ Ways to reach the looper without leaving the screen you are on:
 - Hold the encoder and turn on either the LOOPER or LOOP MIX screen to change
   the working track
 - Loop Mix applies one mode to whichever track is picked: Solo, Mute, Clear, or
-  Arm. Clear also undoes a track that was cleared and not recorded over. Arm
+  Arm, and opens on Arm. Clear also undoes a track that was cleared and not recorded over. Arm
   selects and arms the picked track, takes the arm back off if it is already the
   target, and starts a stopped or paused transport
 - Clicking Solo or Mute while that mode is already in force resets the whole

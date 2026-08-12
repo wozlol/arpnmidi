@@ -181,7 +181,7 @@ depends on a single control:
 - Holding the encoder and turning changes the working track from the LOOPER and
   LOOP MIX screens, in the summary as well as inside the menu.
 - Loop Mix applies one mode, Solo, Mute, Clear, or Arm, to whichever track is
-  picked. Clear doubles as undo for a track that was cleared and not recorded
+  picked, and opens on Arm. Clear doubles as undo for a track that was cleared and not recorded
   over. Arm selects and arms the picked track, takes the arm back off when it is
   already the target, and starts a stopped or paused transport. Clicking Solo or
   Mute again, while that mode already holds, resets the whole mix instead.
