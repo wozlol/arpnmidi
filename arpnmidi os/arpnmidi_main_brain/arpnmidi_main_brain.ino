@@ -3133,7 +3133,10 @@ bool setLoopTrackLengthSelection(uint8_t track, uint8_t selection) {
     return false;
   }
   if (multitrackLooper.track(track).count > 0) markLoopStorageDirty();
-  saveStorageIfAuto();
+  // The length selection lives in the loop file, not the preset, so
+  // markLoopStorageDirty above is what actually persists it, on its own
+  // idle-gated schedule. A stray preset save here fired on every tick while
+  // scrolling this field for a value the preset was never going to store.
   refreshLoopUiState();
   return true;
 }
@@ -4908,24 +4911,23 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       } else if (looperSettingsUi.cursor == 2) {
         firmware3Settings.looperQuantize[multitrackLooper.selectedTrack()] =
             clampU8(value, 0, 5);
-        saveStorageIfAuto();
       } else if (looperSettingsUi.cursor == 3) {
         firmware3Settings.looperAutoRec = value ? 1 : 0;
-        saveStorageIfAuto();
       } else if (looperSettingsUi.cursor == 4) {
         firmware3Settings.looperTimeTravel = value ? 1 : 0;
-        saveStorageIfAuto();
       } else if (looperSettingsUi.cursor == 5) {
         firmware3Settings.looperTrackMode =
           clampU8(value, 0, static_cast<uint8_t>(arpnmidi3::LoopTrackMode::Manual));
-        saveStorageIfAuto();
       } else if (looperSettingsUi.cursor == 6) {
         firmware3Settings.looperRecordCc = value ? 1 : 0;
-        saveStorageIfAuto();
       } else {
         firmware3Settings.looperMidiTransport = value ? 1 : 0;
-        saveStorageIfAuto();
       }
+      // Every field here lives in the same submenu and commits together: the
+      // click that leaves the edited field saves once, through
+      // finishSubmenuOrEdit below. Saving per tick while scrolling a value,
+      // quant included, wrote to flash on every detent instead of once at
+      // commit.
       break;
     case SET_MUTE_SOLO:
       // Moving the cursor is browsing. The engine's working track changes
