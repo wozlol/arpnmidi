@@ -110,6 +110,21 @@ right where the drum notes happened to gap. Forgetting the grid on release
 now only happens outside that locked state, matching what already happened
 on the arp side.
 
+"Playing" alone was too broad a reason to treat the clock as locked: an
+empty loop, or one that had just been cleared down to nothing, still
+reports `playing()` true with nothing left to actually stay in sync with, a
+mystery clock in every sense the grid-preservation fix above exists to
+avoid. `releaseSilencedMultitrackOutputs`, already called after every clear,
+undo, mute, and solo change, now also stops the transport once every track
+has lost its content, checked by track content and hidden state, not
+audibility, so muting or soloing everything into silence never trips it,
+only an actual clear does. `undoLoopTrackClear` resumes on its own whenever
+an undo makes a track audible again while stopped, since retrigger itself
+does nothing on a stopped loop, so bringing content back keeps working
+exactly as before; this pairing is what lets a genuinely empty loop go
+fully quiet, transport included, rather than sitting in a played-but-silent
+state that fools every downstream "is there a real clock" check.
+
 Arp and Drum schedulers use the measured external tempo when Clock Input is
 Follow/Client. Recorded looper event positions remain microsecond-based. Start,
 Continue, and Stop are synchronized, but recorded loops are not continuously

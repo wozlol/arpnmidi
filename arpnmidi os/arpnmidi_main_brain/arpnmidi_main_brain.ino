@@ -3365,7 +3365,14 @@ void setExclusiveLoopSolo(uint8_t soloTrack, bool enable) {
 void undoLoopTrackClear(uint8_t track) {
   const bool wasAudible = multitrackLooper.audible(track);
   multitrackLooper.undoClear(track);
-  if (!wasAudible && multitrackLooper.audible(track)) retriggerLoopTrackHeldNotes(track);
+  const bool nowAudible = multitrackLooper.audible(track);
+  // A transport stopped because nothing was left audible (or for any other
+  // reason) has to resume before retrigger can put anything back: retrigger
+  // itself does nothing on a stopped loop. Only resume if this undo is what
+  // actually made the track audible again, not on an undo of an empty or
+  // still-inaudible one.
+  if (nowAudible && !multitrackLooper.playing()) multitrackLooper.resume(time_us_64());
+  if (!wasAudible && nowAudible) retriggerLoopTrackHeldNotes(track);
 }
 
 // A track that is no longer playable must not keep notes latched.  Clearing,
@@ -3379,6 +3386,23 @@ void releaseSilencedMultitrackOutputs() {
     if (multitrackLooper.playing() && state.count > 0 && state.lengthUs > 0 &&
         multitrackLooper.audible(track)) continue;
     releaseMultitrackOutput(nullptr, track);
+  }
+  // Nothing left to play back is nothing left to stay in sync with: an
+  // empty or fully-cleared loop that still reports playing() only fools
+  // every "is there a real clock running" check into protecting a grid
+  // nobody can hear, so a fresh note quietly locks onto a mystery clock
+  // instead of restarting the arp/drum grid like it should. This checks
+  // loopTrackHasContent, not audible, on purpose: muting or soloing every
+  // track never touches a track's own content or clear state, so this can
+  // only ever fire from an actual clear, never strand a deliberately muted
+  // performance stopped. undoLoopTrackClear already resumes on its own
+  // whenever an undo makes a track audible again, so this never fights it.
+  if (multitrackLooper.playing()) {
+    bool anyContent = false;
+    for (uint8_t track = 0; track < arpnmidi3::kLoopTrackCount; ++track) {
+      anyContent |= loopTrackHasContent(track);
+    }
+    if (!anyContent) multitrackLooper.stop(releaseMultitrackOutput, nullptr);
   }
 }
 
