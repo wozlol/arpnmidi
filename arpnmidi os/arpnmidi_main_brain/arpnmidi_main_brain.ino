@@ -8492,6 +8492,12 @@ void pollSensorHardwareCore1() {
   if (!sensorRt.present) return;
   const uint32_t now = millis();
   if ((now - sensorHardwareLastPollMs) < SENSOR_POLL_MS) return;
+  // Shares the I2C peripheral (i2c1/Wire1) with the OLED's DMA-driven push.
+  // Touching it here while that transfer is still in flight would corrupt
+  // both. Skip this pass without marking it polled, so the very next
+  // loop1() pass tries again right away instead of waiting out a whole new
+  // interval once the push finishes.
+  if (displayDmaBusy()) return;
   sensorHardwareLastPollMs = now;
 
   // Peek data-ready first. The library's read blocks polling I2C until a
