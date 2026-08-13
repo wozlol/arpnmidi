@@ -4576,13 +4576,13 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_STUTTER:
       if (!stutterUi.editing) return 4;
       if (stutterUi.cursor == 0) return STUTTER_LENGTH_COUNT;
-      if (stutterUi.cursor == 1) return 2;
+      if (stutterUi.cursor == 1) return 1;
       if (stutterUi.cursor == 2) return 17;
       return STUTTER_ECHO_TARGET_COUNT;
     case SET_ECHO:
       if (!echoUi.editing) return 6;
       if (echoUi.cursor == 0) return STUTTER_LENGTH_COUNT;
-      if (echoUi.cursor == 1) return 2;
+      if (echoUi.cursor == 1) return 1;
       if (echoUi.cursor == 2) return 101;
       if (echoUi.cursor == 3) return STUTTER_LENGTH_COUNT;
       if (echoUi.cursor == 4) return 33;
@@ -5925,8 +5925,16 @@ void applySettingDelta(int delta, bool fastStep) {
   else next = wrapIndex(next, maxValue + 1);
 
   if (next == oldValue) return;
+  // Stutter and Echo's ON/OFF field is a plain two-way toggle: reserving a
+  // third position for Cancel there would mean turning past ON before it
+  // wraps back to OFF, so it is excluded here even though the rest of both
+  // submenus keep Cancel.
+  const bool onOffFieldExcludedFromCancel =
+      (id == SET_STUTTER && stutterUi.cursor == 1) ||
+      (id == SET_ECHO && echoUi.cursor == 1);
   const bool cancelSelectable =
-      (submenuCancelEnabled(id) && ui.menuMode == MENU_EDIT &&
+      (!onOffFieldExcludedFromCancel && submenuCancelEnabled(id) &&
+       ui.menuMode == MENU_EDIT &&
        submenuStateForSetting(id) && submenuStateForSetting(id)->editing) ||
       (directCancelEnabled(id) && ui.menuMode == MENU_EDIT) ||
       (id == SET_FOUR_BUTTON && ui.menuMode == MENU_EDIT &&
