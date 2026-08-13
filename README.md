@@ -220,6 +220,8 @@ end with the target picker.
 - A click on a row in the list opens it and starts learning right away,
   showing the current mapping and the learn prompt together; a further click
   leaves for the main menu if it's fast, or just closes the row if it's not
+- Holding the encoder and turning it on an open row clears that mapping
+  instead, showing CLEARED! for a second before closing back to the list
 - Browsing past Features without opening it shows whichever CC Knob or
   Button was mapped most recently
 - Per-target mappings for live effects and looper controls

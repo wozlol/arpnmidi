@@ -1145,6 +1145,11 @@ bool featuresLearnActive = false;
 // FEATURES_DOUBLE_CLICK_MS at its use in activateClickAction.
 uint32_t featuresItemOpenMs = 0;
 constexpr uint32_t FEATURES_DOUBLE_CLICK_MS = 400UL;
+// Set by a hold-and-turn on an open row: clears that row's mapping and
+// shows CLEARED! until this expires, then the row closes back to the list
+// on its own. See encoderTurn and the loop() tick that watches it.
+uint32_t featuresClearedUntilMs = 0;
+constexpr uint32_t FEATURES_CLEARED_FLASH_MS = 1000UL;
 // The summary shown while just browsing past FEATURES, rather than whatever
 // this screen's own list cursor was last left on: the most recently learned
 // mapping, knob or button, so a glance confirms the last thing that was set.
@@ -5140,7 +5145,10 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       if (featuresUiStage == FEATURES_UI_GROUPS) featuresGroupCursor = clampU8(value, 0, 3);
       else {
         // A turn always means "back to browsing the list," wherever it lands.
+        // Also dismisses a CLEARED! flash still showing rather than leaving
+        // it stale on screen until its own timer catches up.
         featuresItemOpen = false;
+        featuresClearedUntilMs = 0;
         if (featuresUiStage == FEATURES_UI_KNOBS) {
           featuresItemCursor = clampU8(value, 0, FEATURE_KNOB_COUNT);
         } else {
@@ -6416,6 +6424,9 @@ void activateClickAction() {
           ui.deferredExitWork = true;
         }
       } else {
+        // A click always answers for itself here, so any CLEARED! flash
+        // still showing from a moment ago is stale the instant this runs.
+        featuresClearedUntilMs = 0;
         const uint8_t count = featuresUiStage == FEATURES_UI_KNOBS
             ? static_cast<uint8_t>(FEATURE_KNOB_COUNT)
             : static_cast<uint8_t>(FEATURE_BUTTON_COUNT);
@@ -6878,6 +6889,25 @@ void encoderTurn(int delta, bool pressed) {
                   ui.selectedSetting == SET_MUTE_SOLO)) {
     selectLooperTrack(static_cast<uint8_t>(wrapIndex(
         multitrackLooper.selectedTrack() + delta, arpnmidi3::kLoopTrackCount)));
+    return;
+  }
+  // Hold and turn from an open FEATURES row clears its mapping. A plain
+  // turn here already means something else, closing the row back to the
+  // list, so this only ever reads while the switch is held: pollEncoder
+  // never calls activateClickAction on the release that follows a turn
+  // like this, so a delayed click still reaches the normal back-to-list
+  // path below untouched, and only a click with no turn in it ever does.
+  if (pressed && ui.selectedSetting == SET_MAP_CC && ui.menuMode == MENU_EDIT &&
+      featuresUiStage != FEATURES_UI_GROUPS && featuresItemOpen) {
+    if (featuresUiStage == FEATURES_UI_KNOBS && featuresItemCursor < FEATURE_KNOB_COUNT) {
+      featureControls.knobs[featuresItemCursor] = FeatureKnobBinding{};
+    } else if (featuresUiStage == FEATURES_UI_BUTTONS &&
+               featuresItemCursor < FEATURE_BUTTON_COUNT) {
+      featureControls.buttons[featuresItemCursor] = FeatureButtonBinding{};
+    }
+    featuresLearnActive = false;
+    featuresClearedUntilMs = millis() + FEATURES_CLEARED_FLASH_MS;
+    ui.dirty = true;
     return;
   }
   if (ui.menuMode == MENU_SELECT) {
@@ -9695,6 +9725,14 @@ void drawFeaturesScreen() {
     }
     return;
   }
+  if (featuresClearedUntilMs) {
+    // Size 3 (as BACK/CLEAR use) would run this past the screen edge at
+    // eight characters, so this one drops to size 2 to stay on screen.
+    display.setTextSize(2);
+    display.setCursor(0, 15);
+    display.print(F("CLEARED!"));
+    return;
+  }
   const uint8_t count = featuresUiStage == FEATURES_UI_KNOBS
       ? static_cast<uint8_t>(FEATURE_KNOB_COUNT)
       : static_cast<uint8_t>(FEATURE_BUTTON_COUNT);
@@ -11226,6 +11264,13 @@ void loop() {
       static_cast<int32_t>(millis() - tapTempoVisibleUntilMs) >= 0) {
     tapTempoVisibleUntilMs = 0;
     if (ui.selectedSetting == SET_BPM) ui.dirty = true;
+  }
+  if (featuresClearedUntilMs &&
+      static_cast<int32_t>(millis() - featuresClearedUntilMs) >= 0) {
+    featuresClearedUntilMs = 0;
+    featuresItemOpen = false;
+    featuresLearnActive = false;
+    if (ui.selectedSetting == SET_MAP_CC) ui.dirty = true;
   }
   if (panicConfirmedUntilMs &&
       static_cast<int32_t>(millis() - panicConfirmedUntilMs) >= 0) {

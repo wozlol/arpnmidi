@@ -439,9 +439,16 @@ target picker, right before Back.
   its detail view and starts learning in the same motion, showing both the
   current mapping and the learn prompt at once. A further click, if it comes
   quickly, leaves the list for the main menu entirely; if it comes after a
-  pause, it just closes that row back to the list. Browsing past Features
-  without having entered it shows whichever CC Knob or Button was mapped
-  most recently, name and mapping, rather than this screen's own list state.
+  pause, it just closes that row back to the list. Holding and turning from
+  an open row instead clears that one mapping, shows CLEARED! for a second,
+  and closes back to the list on its own; a plain turn or a click during
+  that second dismisses it immediately rather than leaving it stale. This
+  reads through the same held-switch state pollEncoder already tracks for
+  every other hold-and-turn gesture, so a click that follows a turn is never
+  mistaken for the normal delayed-click-goes-back path. Browsing past
+  Features without having entered it shows whichever CC Knob or Button was
+  mapped most recently, name and mapping, rather than this screen's own
+  list state.
 - CC Map has sixteen Main-input CC remap slots.
 - Note to CC has sixteen momentary or toggle slots.
 - Parameter Lock stores the latest CC value for each note and CC pair on one
