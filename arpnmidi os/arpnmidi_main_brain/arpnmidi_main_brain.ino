@@ -3904,9 +3904,15 @@ void recordLoopNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t 
     // Auto Arm keeps the working track armed and waiting, so nothing special
     // happens here on the note that starts a take: it is captured by the same
     // path as any other armed recording, below.
+    const bool wasArmed = multitrackLooper.recordingArmed();
     if (multitrackLooper.capture(nowUs, event)) markLoopStorageDirty();
-    // No refresh here. A captured note changes nothing the screen shows, and
-    // this runs once per played note while recording.
+    // Otherwise no refresh here. A captured note changes nothing else the
+    // screen shows, and this runs once per played note while recording. But
+    // the loop status icon shows an open circle while armed and a filled one
+    // while recording, so the one note that flips armed to recording has to
+    // mark the display dirty, or that swap never appears until something
+    // unrelated happens to redraw anyway.
+    if (wasArmed && multitrackLooper.recording()) ui.dirty = true;
   }
 }
 
