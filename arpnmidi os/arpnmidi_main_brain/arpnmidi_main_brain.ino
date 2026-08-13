@@ -994,6 +994,11 @@ uint32_t perfLateMaxUsShown = 0;
 // Ruled out: heldDrumCount stays correct throughout a live-held roll drop
 // (confirmed on hardware), so it is not this reset firing that explains it.
 //
+// Ruled out too: stays at zero through a live-held roll drop (confirmed on
+// hardware), so nothing is racing this target's shared output ref counts
+// either. Still tracked in case it becomes useful again, just no longer
+// on screen.
+//
 // Counts every Note Off sendTargetFinal finds with nothing left on its own
 // ref count to release, so it drops the message rather than send a phantom
 // Off: a silent loss downstream of note tracking, in the shared per-target
@@ -1001,6 +1006,16 @@ uint32_t perfLateMaxUsShown = 0;
 // passes through, drum roll output included since it always resolves to
 // target 0 (Main).
 uint32_t finalRefUnderflowCount = 0;
+// The live-held roll going silent doesn't move LATE, which only measures
+// time already past a due step, so the working theory is drumNextStepUs
+// itself getting computed too far into the future instead: the roll simply
+// waits, on schedule the whole time, for a step that isn't due for many
+// beats. A fresh division note press recomputes it again in
+// syncArpDivisionToGrid and, going by "it comes back without a fresh hat
+// strike," fixes it, which fits. Tracks the largest gap ever seen between
+// now and a freshly computed drumNextStepUs, in milliseconds, to confirm or
+// rule this out directly.
+uint32_t maxDrumScheduleAheadMs = 0;
 bool presetStorageDirty = false;
 uint32_t presetStorageDirtyMs = 0;
 uint32_t tapTempoLastMs = 0;
@@ -8305,6 +8320,11 @@ void tickArp() {
       drumNextStepUs = swungGridTimeUs(drumGridOriginUs, drumGlobalStep, drumDivision);
     }
   }
+  if (drumNextStepUs > nowUs) {
+    const uint32_t aheadMs = static_cast<uint32_t>(
+        min<uint64_t>((drumNextStepUs - nowUs) / 1000ULL, UINT32_MAX));
+    if (aheadMs > maxDrumScheduleAheadMs) maxDrumScheduleAheadMs = aheadMs;
+  }
 }
 
 constexpr uint8_t kButtonPins[4] = {
@@ -10428,7 +10448,7 @@ void drawPanicScreen() {
 
   display.setCursor(0, 36);
   display.print(F("LATE ")); display.print(perfLateMaxUsShown);
-  display.print(F("u FR")); display.print(finalRefUnderflowCount);
+  display.print(F("u AH")); display.print(maxDrumScheduleAheadMs);
   display.print(F(" HC")); display.print(heldDrumCount);
 
   // Storage is the one subsystem that can fail silently, so it reports plainly.
