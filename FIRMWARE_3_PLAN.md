@@ -407,7 +407,13 @@ target picker, right before Back.
 - Quick Jump has input, output, and enable controls.
 - Bass has channel/octave selection and a highest-note limit.
 - Mono Retrig uses last-note priority and recalls the newest still-held note.
-- Features provides continuous CC Knobs and CC-or-note Buttons.
+- Features provides continuous CC Knobs and CC-or-note Buttons, roughly
+  forty-six and eighty of them respectively, browsed as a compact six-row
+  scrolling list, name and a mapped dot only, no CH/CC text, so as many rows
+  as possible fit at once instead of stepping through one at a time. Turning
+  moves the highlighted row and closes any open detail view back to the
+  list; selecting a row opens it into that detail view, name on top and its
+  full mapping below, same as before this list existed.
 - CC Map has sixteen Main-input CC remap slots.
 - Note to CC has sixteen momentary or toggle slots.
 - Parameter Lock stores the latest CC value for each note and CC pair on one

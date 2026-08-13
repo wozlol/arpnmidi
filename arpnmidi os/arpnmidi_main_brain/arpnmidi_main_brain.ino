@@ -1114,6 +1114,9 @@ uint32_t divNotePressCounter = 0;
 uint8_t featuresUiStage = FEATURES_UI_GROUPS;
 uint8_t featuresGroupCursor = 0;
 uint8_t featuresItemCursor = 0;
+// The list is the browsing view; opening one item shows the same detail
+// view this screen always has, closing again the moment the encoder turns.
+bool featuresItemOpen = false;
 bool featuresLearnActive = false;
 uint8_t ccRemapUiStage = CC_REMAP_UI_LIST;
 uint8_t ccRemapCursor = 0;
@@ -5052,10 +5055,14 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_DIV_NOTES: divNotesCursor = clampU8(value, 0, DIV_NOTE_BACK_SLOT); break;
     case SET_MAP_CC:
       if (featuresUiStage == FEATURES_UI_GROUPS) featuresGroupCursor = clampU8(value, 0, 3);
-      else if (featuresUiStage == FEATURES_UI_KNOBS) {
-        featuresItemCursor = clampU8(value, 0, FEATURE_KNOB_COUNT);
-      } else {
-        featuresItemCursor = clampU8(value, 0, FEATURE_BUTTON_COUNT);
+      else {
+        // A turn always means "back to browsing the list," wherever it lands.
+        featuresItemOpen = false;
+        if (featuresUiStage == FEATURES_UI_KNOBS) {
+          featuresItemCursor = clampU8(value, 0, FEATURE_KNOB_COUNT);
+        } else {
+          featuresItemCursor = clampU8(value, 0, FEATURE_BUTTON_COUNT);
+        }
       }
       break;
     case SET_CC_MAP:
@@ -6251,9 +6258,11 @@ void activateClickAction() {
         if (featuresGroupCursor == 0) {
           featuresUiStage = FEATURES_UI_KNOBS;
           featuresItemCursor = 0;
+          featuresItemOpen = false;
         } else if (featuresGroupCursor == 1) {
           featuresUiStage = FEATURES_UI_BUTTONS;
           featuresItemCursor = 0;
+          featuresItemOpen = false;
         } else if (featuresGroupCursor == 2) {
           for (FeatureKnobBinding &binding : featureControls.knobs) {
             binding = FeatureKnobBinding{};
@@ -6277,6 +6286,11 @@ void activateClickAction() {
           featuresUiStage = FEATURES_UI_GROUPS;
           featuresGroupCursor = 0;
           featuresLearnActive = false;
+          featuresItemOpen = false;
+        } else if (!featuresItemOpen) {
+          // First click on a list row opens its detail view; the row itself
+          // was already reached by turning, not clicking.
+          featuresItemOpen = true;
         } else {
           featuresLearnActive = !featuresLearnActive;
         }
@@ -6670,6 +6684,7 @@ void activateClickAction() {
       featuresUiStage = FEATURES_UI_GROUPS;
       featuresGroupCursor = 0;
       featuresLearnActive = false;
+      featuresItemOpen = false;
     }
     if (ui.selectedSetting == SET_CC_MAP) {
       ccRemapUiStage = CC_REMAP_UI_LIST;
@@ -9472,6 +9487,42 @@ void drawFeaturesScreen() {
     display.setTextSize(3);
     display.setCursor(0, 11);
     display.print(F("BACK"));
+    return;
+  }
+  if (!featuresItemOpen) {
+    // A compact scrolling list: every row is just the feature's name and a
+    // dot if it already has a mapping, no CH/CC text, so as many rows as
+    // possible fit at once instead of stepping through features one at a
+    // time. Turning the encoder moves the highlighted row and scrolls the
+    // window to keep it visible; selecting a row opens the same detail view
+    // this screen has always shown below, and turning again closes it back
+    // to the list, scrolled to wherever that turn lands.
+    constexpr uint8_t kVisibleRows = 6;
+    constexpr uint8_t kRowHeight = 8;
+    uint8_t scrollTop = featuresItemCursor >= kVisibleRows
+        ? featuresItemCursor - kVisibleRows + 1 : 0;
+    if (count > kVisibleRows && scrollTop > count - kVisibleRows) {
+      scrollTop = count - kVisibleRows;
+    }
+    display.setTextSize(1);
+    for (uint8_t row = 0; row < kVisibleRows; ++row) {
+      const uint8_t index = scrollTop + row;
+      if (index >= count) break;
+      const int y = row * kRowHeight;
+      display.setCursor(0, y);
+      display.print(index == featuresItemCursor ? F(">") : F(" "));
+      display.print(featuresUiStage == FEATURES_UI_KNOBS
+          ? featureKnobName(index) : featureButtonName(index));
+      bool mapped;
+      if (featuresUiStage == FEATURES_UI_KNOBS) {
+        const FeatureKnobBinding &binding = featureControls.knobs[index];
+        mapped = binding.channel != 0 && binding.cc <= 127;
+      } else {
+        const FeatureButtonBinding &binding = featureControls.buttons[index];
+        mapped = binding.kind != TRIGGER_BINDING_OFF && binding.channel != 0;
+      }
+      if (mapped) display.fillCircle(124, y + 3, 2, SSD1306_WHITE);
+    }
     return;
   }
   const String name = featuresUiStage == FEATURES_UI_KNOBS
