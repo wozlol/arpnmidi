@@ -991,6 +991,12 @@ uint32_t perfLoopMaxUs = 0;
 uint32_t perfLoopMaxUsShown = 0;
 uint32_t perfLateMaxUs = 0;
 uint32_t perfLateMaxUsShown = 0;
+// Counts every time tickArp finds heldDrumCount at zero and resets the
+// drum roll's grid, whether or not a physical drum key is actually still
+// down: the firmware has no independent way to know that, only whatever
+// heldDrumNotes says. A live-held roll going silent while this keeps
+// climbing points at heldDrumCount reading zero when it should not.
+uint32_t drumRollGridResetCount = 0;
 bool presetStorageDirty = false;
 uint32_t presetStorageDirtyMs = 0;
 uint32_t tapTempoLastMs = 0;
@@ -8252,6 +8258,7 @@ void tickArp() {
     if (!loopLocksArpClock()) {
       drumNextStepUs = 0;
       lastDrumRollDivision = -1;
+      ++drumRollGridResetCount;
     }
     return;
   }
@@ -10418,7 +10425,8 @@ void drawPanicScreen() {
   // timing would read as the same thing on a screen this dense.
   display.print(F("PASS ")); display.print(perfLoopMaxUsShown);
   display.print(F("u LATE ")); display.print(perfLateMaxUsShown);
-  display.print(F("u"));
+  display.print(F("u DR")); display.print(drumRollGridResetCount);
+  display.print(F(" HC")); display.print(heldDrumCount);
 
   // Storage is the one subsystem that can fail silently, so it reports plainly.
   // NO FS means the board was built without a filesystem partition and nothing
