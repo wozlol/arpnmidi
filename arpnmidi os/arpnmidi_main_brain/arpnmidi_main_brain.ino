@@ -1016,6 +1016,12 @@ uint32_t finalRefUnderflowCount = 0;
 // now and a freshly computed drumNextStepUs, in milliseconds, to confirm or
 // rule this out directly.
 uint32_t maxDrumScheduleAheadMs = 0;
+// Isolates which half of drumNextStepUs = drumGridOriginUs + drumGlobalStep
+// * stepDuration is responsible for AH: drumGlobalStep read low (under 100)
+// on hardware during a drop, well short of explaining a many-second-ahead
+// result on its own, so this checks whether drumGridOriginUs itself is the
+// part landing far ahead of now instead.
+uint32_t maxDrumOriginAheadMs = 0;
 bool presetStorageDirty = false;
 uint32_t presetStorageDirtyMs = 0;
 uint32_t tapTempoLastMs = 0;
@@ -8325,6 +8331,11 @@ void tickArp() {
         min<uint64_t>((drumNextStepUs - nowUs) / 1000ULL, UINT32_MAX));
     if (aheadMs > maxDrumScheduleAheadMs) maxDrumScheduleAheadMs = aheadMs;
   }
+  if (drumGridOriginUs > nowUs) {
+    const uint32_t originAheadMs = static_cast<uint32_t>(
+        min<uint64_t>((drumGridOriginUs - nowUs) / 1000ULL, UINT32_MAX));
+    if (originAheadMs > maxDrumOriginAheadMs) maxDrumOriginAheadMs = originAheadMs;
+  }
 }
 
 constexpr uint8_t kButtonPins[4] = {
@@ -10447,26 +10458,17 @@ void drawPanicScreen() {
   if (extendedPresetDirty) display.print('E');
 
   display.setCursor(0, 36);
-  display.print(F("LATE ")); display.print(perfLateMaxUsShown);
-  display.print(F("u AH")); display.print(maxDrumScheduleAheadMs);
+  display.print(F("AH")); display.print(maxDrumScheduleAheadMs);
   display.print(F(" GS")); display.print(drumGlobalStep);
 
-  // Storage is the one subsystem that can fail silently, so it reports plainly.
-  // NO FS means the board was built without a filesystem partition and nothing
-  // can ever be saved.
+  // Temporarily standing in for the FS status line while the drum roll
+  // schedule investigation needs the room: DV is currentDrumDivisionSetting's
+  // live return value, OA is the largest gap ever seen between now and
+  // drumGridOriginUs itself, isolating whether the origin or the step count
+  // is what's landing far ahead when AH spikes.
   display.setCursor(0, 42);
-  if (!littleFsReady) {
-    display.print(F("FS NONE - set 512KB FS"));
-  } else if (storageError || loopStorageError) {
-    display.print(F("FS WRITE ERROR"));
-  } else {
-    FSInfo info;
-    display.print(F("FS OK "));
-    if (LittleFS.info(info)) {
-      display.print((info.totalBytes - info.usedBytes) / 1024U);
-      display.print(F("K free"));
-    }
-  }
+  display.print(F("DV")); display.print(currentDrumDivisionSetting());
+  display.print(F(" OA")); display.print(maxDrumOriginAheadMs);
 }
 
 void drawDrumMagicScreen() {
