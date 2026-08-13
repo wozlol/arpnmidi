@@ -10357,28 +10357,30 @@ void drawScaleMenuScreen() {
 
 void drawPanicScreen() {
   const bool confirmed = static_cast<int32_t>(panicConfirmedUntilMs - millis()) > 0;
-  const bool overload = secondaryTxDropped || secondaryTxCriticalDropped ||
-      multitrackLooper.overflowCount() || parameterLockOverflowCount ||
-      loopCcPruneOverflowCount;
   // Eight lines packed into SETTING_AREA_H's 48px at 6px each, not the usual
   // 8px pitch: moveRenderedSettingArea only shifts raw y < SETTING_AREA_H
   // into view, and its target range then overwrites whatever already sat at
-  // that y, so anything drawn past 47 here, PASS/LATE and the FS line used
-  // to sit at 56 and 48, was silently clobbered before it ever reached the
-  // screen. Never actually visible on real hardware since the DMA/shift
-  // rework, only in occupying the buffer briefly.
+  // that y, so anything drawn past 47 here was silently clobbered before it
+  // ever reached the screen, never actually visible on real hardware since
+  // the OLED DMA/shift rework.
+  //
+  // This main brain has no USB host input, only DIN and the secondary
+  // brain's UART, so nothing here distinguishes a USB source anymore. RISK/
+  // OK used to summarize secondaryTxDropped, secondaryTxCriticalDropped,
+  // and the loop overflow count as one derived flag, all three of which are
+  // already shown plainly on the TX and LOOP lines below, so it said
+  // nothing a glance at those didn't already say. PASS (worst single loop()
+  // pass) is dropped the same way: LATE already answers the "is the
+  // scheduler keeping up" question this screen exists to answer, and every
+  // line here has to earn its 6px now that DR/HC need one too.
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   if (confirmed) display.print(F("PANIC SENT  "));
-  display.print(F("D")); display.print(dinIncomingMessageCount);
-  display.print(F(" U")); display.print(usbIncomingMessageCount);
+  display.print(F("DIN ")); display.print(dinIncomingMessageCount);
 
   display.setCursor(0, 6);
   display.print(F("LAST "));
-  if (lastIncomingSource == USB_DEVICE_SOURCE_PORT) display.print(F("U "));
-  else if (lastIncomingSource == 0) display.print(F("D "));
-  else display.print(F("- "));
   if (lastIncomingStatus < 0x10) display.print('0');
   display.print(lastIncomingStatus, HEX);
   display.print(' ');
@@ -10407,7 +10409,6 @@ void drawPanicScreen() {
   display.print(F(" O")); display.print(rollingHistory.overwrittenCount());
 
   display.setCursor(0, 30);
-  display.print(overload ? F("RISK ") : F("OK "));
   if (firmware3Settings.clockInFollow) {
     const uint32_t age = musicalClock.lastExternalClockAgeMs(time_us_64());
     display.print(F("CLK "));
@@ -10420,11 +10421,7 @@ void drawPanicScreen() {
   if (extendedPresetDirty) display.print('E');
 
   display.setCursor(0, 36);
-  // Spelled out rather than single letters: P and L above already mean the
-  // preset and loop dirty flags, and reusing them here for pass/lateness
-  // timing would read as the same thing on a screen this dense.
-  display.print(F("PASS ")); display.print(perfLoopMaxUsShown);
-  display.print(F("u LATE ")); display.print(perfLateMaxUsShown);
+  display.print(F("LATE ")); display.print(perfLateMaxUsShown);
   display.print(F("u DR")); display.print(drumRollGridResetCount);
   display.print(F(" HC")); display.print(heldDrumCount);
 
