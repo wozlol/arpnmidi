@@ -9686,18 +9686,50 @@ String featureButtonName(uint8_t id) {
   return "BUTTON";
 }
 
+// Word-wraps text to fit the screen at text size 1, never splitting a word
+// across lines, one setCursor per line so each lands exactly rather than
+// trusting println's automatic advance. Returns how many lines it printed,
+// so a caller can place whatever comes next below it.
+uint8_t printFeaturesWrapped(const String &text, int16_t x, int16_t y, uint8_t lineHeight) {
+  constexpr uint8_t kMaxCharsPerLine = 21;  // 128px / 6px per char at size 1
+  const int len = text.length();
+  int start = 0;
+  uint8_t lines = 0;
+  while (start < len) {
+    const int end = start + kMaxCharsPerLine;
+    int lineEnd;
+    if (end >= len) {
+      lineEnd = len;
+    } else {
+      const int breakAt = text.lastIndexOf(' ', end);
+      lineEnd = (breakAt > start) ? breakAt : end;
+    }
+    display.setCursor(x, y + lines * lineHeight);
+    display.print(text.substring(start, lineEnd));
+    start = (lineEnd < len && text.charAt(lineEnd) == ' ') ? lineEnd + 1 : lineEnd;
+    ++lines;
+  }
+  return lines;
+}
+
 void drawFeaturesScreen() {
   // Browsing past FEATURES, not inside it: this screen's own list cursor
   // means nothing to a passerby, so show the most recently learned mapping
   // instead of whatever CC KNOBS/CC BUTTONS/CLEAR/BACK was last left on.
+  // Nothing here is persisted across a reboot, so a fresh boot always falls
+  // back to the unmapped prompt even though the actual mappings are still
+  // saved; this summary is not important enough to be worth remembering.
   if (ui.menuMode != MENU_EDIT) {
     display.setTextSize(1);
-    display.setCursor(0, 6);
     if (!featuresLastMappedValid) {
-      display.print(F("FEATURES"));
+      const uint8_t lines =
+          printFeaturesWrapped(F("Map CCs & Notes to Actions"), 0, 6, 9);
+      display.setCursor(0, 6 + lines * 9);
+      display.print(F("Double-click to exit"));
       return;
     }
-    display.println(featuresLastMappedIsButton
+    display.setCursor(0, 6);
+    display.print(featuresLastMappedIsButton
         ? featureButtonName(featuresLastMappedIndex)
         : featureKnobName(featuresLastMappedIndex));
     display.setCursor(0, 15);
@@ -9711,6 +9743,8 @@ void drawFeaturesScreen() {
       display.print(F("CH ")); display.print(binding.channel);
       display.print(F(" CC ")); display.print(binding.cc);
     }
+    display.setCursor(0, 24);
+    display.print(F("Double-click to exit"));
     return;
   }
   if (featuresUiStage == FEATURES_UI_GROUPS) {
