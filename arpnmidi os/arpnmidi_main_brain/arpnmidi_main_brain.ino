@@ -962,23 +962,12 @@ uint8_t observedUiSetting = SET_BPM;
 bool uiScreenSavePending = false;
 uint32_t uiScreenChangedMs = 0;
 constexpr uint32_t UI_SCREEN_SAVE_IDLE_MS = 5000UL;
+// Every screen shares this one frame cap, LOOPER and LOOP MIX included: the
+// DMA-driven push (see pushDisplayFrameDma) no longer blocks this core for
+// its ~20ms, which was the reason those two screens once got a longer,
+// special-cased window of their own.
 constexpr uint32_t UI_MIN_FRAME_MS = 50;
-// LOOPER and LOOP MIX show state that changes with almost every click while
-// the performer is actively working the loop, select, arm, mute, solo, clear,
-// undo, all one dirty screen apiece. A push to this panel is a full-frame,
-// blocking I2C transfer that runs about 20ms at 400kHz regardless of how
-// little changed, and it holds the outgoing MIDI drain, on this same core,
-// off the wire for the entire transfer. A flurry of clicks on an ordinary
-// screen already only pushes one frame every 50ms; these two screens get a
-// longer window so more of that flurry coalesces into one push, trading a
-// slightly less instant icon for a looper that stays on its own time.
-constexpr uint32_t UI_LOOPER_SCREEN_MIN_FRAME_MS = 300;
 constexpr uint32_t RENDER_STARVED_MS = 100;
-
-uint32_t uiMinFrameIntervalMs() {
-  return (ui.selectedSetting == SET_LOOP_BARS || ui.selectedSetting == SET_MUTE_SOLO)
-      ? UI_LOOPER_SCREEN_MIN_FRAME_MS : UI_MIN_FRAME_MS;
-}
 // A failed flash write waits this long before another attempt. Retrying every
 // loop pass would grind the whole instrument, which is far worse than data
 // waiting a few extra seconds.
@@ -1024,7 +1013,6 @@ arpnmidi3::HistoryRepeater stutterRepeaters[STUTTER_ECHO_TARGET_COUNT];
 TimeTravelImportJob timeTravelImport;
 uint8_t finalOutputNoteRefs[STUTTER_ECHO_TARGET_COUNT][16][128];
 bool stutterSettingWasEnabled[STUTTER_ECHO_TARGET_COUNT];
-bool stutterTimedOut[STUTTER_ECHO_TARGET_COUNT];
 bool noteLengthSettingWasEnabled[LIVE_TARGET_COUNT];
 bool echoSettingWasEnabled[STUTTER_ECHO_TARGET_COUNT];
 bool featureButtonCcHeld[FEATURE_BUTTON_COUNT];
@@ -2315,7 +2303,6 @@ void panicMidiOnly() {
     releaseFinalTarget(target);
   }
   memset(stutterSettingWasEnabled, 0, sizeof(stutterSettingWasEnabled));
-  memset(stutterTimedOut, 0, sizeof(stutterTimedOut));
   memset(noteLengthSettingWasEnabled, 0, sizeof(noteLengthSettingWasEnabled));
   memset(echoSettingWasEnabled, 0, sizeof(echoSettingWasEnabled));
   const uint8_t panicArpCh = mainArpOutChannel();
@@ -4035,7 +4022,6 @@ bool activateStutter(uint8_t target, uint64_t nowUs) {
       (firmware3Settings.timeSignature ? 3ULL : 4ULL);
   stutterStopUs[target] = nowUs + musicalDurationUs(barPulses) *
       firmware3Settings.stutterTimeoutBars;
-  stutterTimedOut[target] = false;
   return true;
 }
 
@@ -4056,7 +4042,6 @@ void deactivateStutter(uint8_t target) {
 void releaseSelectdTarget() {
   deactivateStutter(SELECTD_LIVE_TARGET);
   stutterSettingWasEnabled[SELECTD_LIVE_TARGET] = false;
-  stutterTimedOut[SELECTD_LIVE_TARGET] = false;
   echoEngine.stopTarget(SELECTD_LIVE_TARGET, emitEchoEvent, nullptr);
   releaseFinalTarget(SELECTD_LIVE_TARGET);
 }
@@ -4068,11 +4053,10 @@ void tickStutter() {
     if (!enabled) {
       if (stutterRepeaters[target].active()) deactivateStutter(target);
       stutterSettingWasEnabled[target] = false;
-      stutterTimedOut[target] = false;
       continue;
     }
     if (!stutterSettingWasEnabled[target]) {
-      if (!stutterTimedOut[target]) activateStutter(target, nowUs);
+      activateStutter(target, nowUs);
       stutterSettingWasEnabled[target] = true;
     } else if (stutterRepeaters[target].active() &&
                activeStutterLengthSelection[target] !=
@@ -4082,7 +4066,13 @@ void tickStutter() {
     }
     if (stutterRepeaters[target].active() && nowUs >= stutterStopUs[target]) {
       deactivateStutter(target);
-      stutterTimedOut[target] = true;
+      // A real off, not a silent one: flipping the enabled setting itself
+      // means a single fresh trigger (one momentary press, one knob past
+      // zero, one UI toggle) reactivates it, rather than needing an
+      // explicit off/on cycle to clear a hidden "timed out" flag.
+      firmware3Settings.liveTargets[target].stutterEnabled = 0;
+      stutterSettingWasEnabled[target] = false;
+      ui.dirty = true;
     }
     stutterRepeaters[target].tick(nowUs, rollingHistory, emitStutterEvent, nullptr);
   }
@@ -7171,7 +7161,6 @@ void requestStutterState(uint8_t target, bool enabled, int16_t lengthSelection) 
         lengthSelection, STUTTER_LENGTH_MIN_SELECTION, STUTTER_LENGTH_COUNT - 1);
   }
   firmware3Settings.liveTargets[target].stutterEnabled = enabled ? 1 : 0;
-  stutterTimedOut[target] = false;
   stutterSettingWasEnabled[target] = false;
   ui.dirty = true;
 }
@@ -9252,7 +9241,9 @@ void drawLoopStatusIcon() {
   const int y = 1;
   display.fillRect(x, y, 12, 12, SSD1306_BLACK);
 
-  if (armed || recording || overdubbing) {
+  if (recording || overdubbing) {
+    display.fillCircle(x + 5, y + 6, 4, SSD1306_WHITE);
+  } else if (armed) {
     display.drawCircle(x + 5, y + 6, 4, SSD1306_WHITE);
   } else if (playing) {
     display.drawTriangle(x + 2, y + 2, x + 2, y + 10, x + 10, y + 6, SSD1306_WHITE);
@@ -10646,6 +10637,27 @@ void pushDisplayFrameDma() {
   displayDmaInFlight = true;
 }
 
+bool anyStutterActive() {
+  for (uint8_t target = 0; target < STUTTER_ECHO_TARGET_COUNT; ++target) {
+    if (stutterRepeaters[target].active()) return true;
+  }
+  return false;
+}
+
+// A persistent reminder that stutter is currently reshaping what's coming
+// out, on every screen, the same way the loop status icon always shows.
+// Tracks the repeater's own active() state rather than the enabled setting
+// so a failed activation never lights the border for nothing that's really
+// happening; the two agree in every other case, since tickStutter flips the
+// enabled setting itself off in the same step that deactivates the repeater
+// at timeout, so this clears the instant any of the ways stutter turns off
+// does so: the submenu, a mapped knob returning to zero, a momentary
+// button's release, or its own timeout.
+void drawStutterActiveBorder() {
+  if (!anyStutterActive()) return;
+  display.drawRect(0, SETTING_AREA_Y, SCREEN_W, SETTING_AREA_H, SSD1306_WHITE);
+}
+
 void renderDisplayIfNeeded() {
   // Nothing here may touch the frame buffer, or start a command sequence on
   // the same I2C peripheral, while a previous push is still in flight.
@@ -10665,7 +10677,7 @@ void renderDisplayIfNeeded() {
   // Dirty can be set faster than frames are worth drawing, one drum-roll hit
   // at a time. Capping the frame rate keeps this core mostly free for the
   // MIDI drain.
-  if ((now - ui.lastRenderMs) < uiMinFrameIntervalMs()) return;
+  if ((now - ui.lastRenderMs) < UI_MIN_FRAME_MS) return;
   // Clear before drawing so a real-time-side change during the I2C transfer
   // leaves dirty asserted for the next frame instead of being lost.
   ui.dirty = false;
@@ -10682,6 +10694,7 @@ void renderDisplayIfNeeded() {
   moveRenderedSettingArea();
   drawModeLabel();
   drawModeIndicator();
+  drawStutterActiveBorder();
   pushDisplayFrameDma();
   ui.lastRenderMs = now;
 }

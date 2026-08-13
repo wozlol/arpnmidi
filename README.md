@@ -99,6 +99,10 @@ Recording always follows one working track:
   track to Track 1
 - The Loop Mix screen strikes through cleared tracks and dots the record target,
   and the looper summary shows cleared content as a hollow marker
+- A loop status icon in the top right shows on every screen: filled circle for
+  actively recording or overdubbing, open circle for armed and waiting on a
+  first note, triangle for playing, two short bars for stopped with data
+  still in it
 - Auto Arm fires in exactly one place: a fixed-length pass concluding on its
   own because it reached its length. Nothing else ever triggers it, picking a
   different track by hand included. In Manual mode, where the working track
@@ -177,6 +181,11 @@ end with the target picker.
   fixed-length repeat spanning several bars stays useful in a way
   stutter-repeating that much rarely is.
 - Stutter and Echo-generated repeats are kept out of the recorded source loop.
+- A live stutter warning, a thin border around the whole screen, shows on
+  every screen whenever any target actually has a stutter repeat running,
+  and clears the instant it stops, whether that's the timeout, the submenu's
+  own toggle, a mapped knob returning to zero, or a momentary button's
+  release.
 
 ### Routing and note processing
 

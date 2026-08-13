@@ -48,10 +48,10 @@ notes, arp, playback, recording, or pending UI work are active.
   shifting them onto the wire. renderDisplayIfNeeded checks this once at its
   own top, which covers everything reachable through it; the one path that
   runs outside it, the busy-hourglass draw before a flash write freezes core
-  0, waits on it explicitly first. LOOPER and LOOP MIX still change on nearly
-  every click while the performer is actively working the loop, so those two
-  screens keep a 300 ms cap instead of the general 50 ms on top of this,
-  coalescing a flurry of clicks into fewer, now background, pushes
+  0, waits on it explicitly first. Every screen shares the same 50 ms cap,
+  LOOPER and LOOP MIX included: an earlier, longer cap on just those two
+  existed to reduce how often the old blocking push could land badly, which
+  the DMA push no longer does regardless of how often it fires
 - VL53L0X distance-sensor polling, data-ready peek first so a slow or wedged
   sensor costs one register read instead of a blocking wait
 
@@ -169,6 +169,26 @@ Retrig, Order, Length, Learn Custom, Clear Custom, and Back.
   from when the user entered that edit, and keep live editing behavior while the
   value is being changed. `CANCEL` is a selectable item and should only act when
   pressed; rolling onto it must not cancel automatically.
+
+Two persistent overlays, composited on every screen by renderDisplayIfNeeded
+itself rather than owned by whichever screen is showing, so state stays
+visible no matter where the performer has navigated:
+
+- The loop status icon (top right) is a filled circle while any track is
+  actively recording or overdubbing, an open circle while a track is armed
+  and waiting for its first note, a triangle while playing, and two short
+  vertical bars while stopped with data still in it. Nothing shows when the
+  loop is entirely empty and untouched.
+- A 1px border around the whole setting area appears the instant any target,
+  Main, a track, or SELECTD, has a stutter repeater actually active, and
+  disappears the instant none do: the submenu's own ON/OFF, a mapped knob
+  returning to zero, a momentary button's release, and the repeater's own
+  timeout all clear it, since all of them go through requestStutterState or
+  tickStutter's own timeout branch, both of which mark the display dirty. A
+  timeout is a real off, not a silent one: it flips the target's enabled
+  setting itself, so reactivating afterward just takes one fresh trigger,
+  the same single momentary press or knob movement that would have started
+  it the first time, rather than an explicit off/on cycle.
 
 Custom arp capture:
 
