@@ -140,14 +140,13 @@ Ways to reach the looper without leaving the screen you are on:
 The master rec/play trigger takes a double tap from any source, the push, the
 sensor, a mapped CC, or a button:
 
-- In Layers, a double tap safe clears the working track and arms it in the
-  same motion, so the part can be played again with nothing further to
-  press. If that track is neither cleared nor holding content it steps back
-  to the layer just recorded first, because that is the one a performer means
-- In Manual and Parts Auto Solo, a double tap just safe clears the working
-  track, the same single action as any other clear there; arming again is
-  left to the performer, and the working track never changes on its own,
-  since choosing tracks there belongs to the performer
+- A double tap safe clears a track and arms it in the same motion, in every
+  track mode, so the part can be played again with nothing further to press
+- In Layers, that track steps back to the layer just recorded first, when the
+  working track is neither cleared nor holding content, because that is the
+  one a performer means
+- In Manual and Parts Auto Solo, it always clears and arms whichever track is
+  currently selected, since choosing tracks there belongs to the performer
 - A single trigger before anything is played takes a pending arm back off
 - Another double tap brings a cleared track back and plays it, armed or not,
   staying on that same working track since undo restores content, it never

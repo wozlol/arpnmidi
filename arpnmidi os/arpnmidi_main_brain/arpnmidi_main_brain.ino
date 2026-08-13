@@ -3793,20 +3793,20 @@ bool loopMasterDoubleTap() {
   return isDouble;
 }
 
-// The double gesture is the retake control. In Layers it safe clears a layer
-// and arms it in the same motion so the part can be played again with
-// nothing further to press, and a second double brings the old layer back
-// and plays it, armed or not: a pending arm on the just-cleared track is
-// only a plan to record, not a capture, so it is cancelled first and the
-// undo proceeds exactly as if nothing had been armed. Layers steps back to
-// the layer just recorded to do either of those, because that is the one a
-// performer means, but the working track goes no further than that: undo
-// restores content rather than capturing it, so it must not also advance to
-// another track afterward. Manual keeps this a plain clear with no arm, the
-// same single action as anywhere else it clears a track there, since the
-// performer picks the working track and when to arm it themselves. Manual
-// and Parts Auto Solo also stay on the working track throughout: moving
-// between tracks there is the performer's decision alone.
+// The double gesture is the retake control. It safe clears a track and arms
+// it in the same motion, in every track mode, so the part can be played
+// again with nothing further to press. Layers picks which track that is: it
+// steps back to the layer just recorded, because that is the one a
+// performer means, when the working track is neither cleared nor holding
+// content. Manual (and Parts Auto Solo) always clears and arms whichever
+// track is currently selected, since choosing tracks there is the
+// performer's decision alone. A second double brings a cleared track back
+// and plays it, armed or not: a pending arm on it is only a plan to record,
+// not a capture, so it is cancelled first and the undo proceeds exactly as
+// if nothing had been armed. Undo always targets the current working track
+// in every mode; only the clear-and-arm side ever steps back to another one,
+// since undo restores content rather than capturing it, so it must not also
+// advance to another track afterward.
 void handleMultitrackMasterDoubleTap() {
   const uint64_t nowUs = time_us_64();
   const bool layers = multitrackLooper.trackMode() == arpnmidi3::LoopTrackMode::Layers;
@@ -3834,7 +3834,7 @@ void handleMultitrackMasterDoubleTap() {
   } else {
     selectLooperTrack(target);
     multitrackLooper.safeClear(target, releaseMultitrackOutput, nullptr);
-    if (layers) armSelectedMultitrack(false);
+    armSelectedMultitrack(false);
   }
   releaseSilencedMultitrackOutputs();
   markLoopStorageDirty();
