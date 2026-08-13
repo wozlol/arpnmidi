@@ -4068,8 +4068,13 @@ void tickStutter() {
       continue;
     }
     if (!stutterSettingWasEnabled[target]) {
-      activateStutter(target, nowUs);
-      stutterSettingWasEnabled[target] = true;
+      // A short enough window, 1/32T and faster especially, can have nothing
+      // in the rolling history recent enough to fill it: activate() then
+      // fails and there is genuinely nothing to repeat yet. Only latching
+      // this true on success means a failed attempt keeps retrying every
+      // tick instead of giving up silently, so it still catches on the
+      // moment a fresh note lands inside the window.
+      stutterSettingWasEnabled[target] = activateStutter(target, nowUs);
     } else if (stutterRepeaters[target].active() &&
                activeStutterLengthSelection[target] !=
                    firmware3Settings.liveTargets[target].stutterLengthSelection) {
