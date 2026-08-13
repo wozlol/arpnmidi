@@ -4166,9 +4166,15 @@ void pollLoopStoragePersistence() {
 // regardless of how few bytes changed, so a 12-byte header costs the same
 // pause as a full preset. The remembered screen is not worth that pause on
 // every visit, so it only writes once the screen has sat still for a long
-// while AND the engine has nothing going on, five full seconds of neither,
-// not a menu commit's single deliberate click.
+// while AND the engine has been continuously idle for that same five full
+// seconds, not a menu commit's single deliberate click, and never at all
+// with Auto Save off. "Continuously" is the point: the wait restarts from
+// now the instant anything is going on, not just once at screen-change
+// time, so a note held or released anywhere in the window pushes the
+// write back out instead of it landing the moment the engine happens to
+// go quiet after sitting busy through most of the five seconds.
 void pollUiScreenPersistence() {
+  if (!storage.autoSave) return;
   const uint32_t now = millis();
   if (ui.selectedSetting != observedUiSetting) {
     observedUiSetting = ui.selectedSetting;
@@ -4177,6 +4183,10 @@ void pollUiScreenPersistence() {
   }
   if (!uiScreenSavePending || ui.deferredExitWork || !littleFsReady) return;
   if (millis() < storageRetryHoldUntilMs) return;
+  if (!storageWriteEngineIdle()) {
+    uiScreenChangedMs = now;
+    return;
+  }
   if (!storageWriteReady(uiScreenChangedMs, UI_SCREEN_SAVE_IDLE_MS)) return;
   showBusyHourglass();
   stagePersistedUiSetting(ui.selectedSetting);
