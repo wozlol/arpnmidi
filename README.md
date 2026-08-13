@@ -195,6 +195,10 @@ end with the target picker.
 - Bass highest-note split
 - Quick Jump from a chosen input channel to a chosen output channel, with a
   Hold option for preserving held notes across channel changes
+- Quick Jump's output can also be moved live, one CC Button per MIDI channel:
+  pressing one points the output there and turns Quick Jump on, or, if it's
+  already on and already there, turns it back off without losing that output
+  channel. A live move only, never saved to the preset.
 - Sixteen-channel router with output channel, low note, high note, and
   transposition for each channel
 - Notes outside a router row's selected range continue on their original
@@ -211,8 +215,13 @@ end with the target picker.
 
 ### MIDI control and mapping
 
-- Features menu divided into continuous CC Knobs and trigger CC Buttons
-- Trigger features can learn a CC or a MIDI note
+- Features menu divided into continuous CC Knobs and trigger CC Buttons (and
+  Notes: a trigger can learn either)
+- A click on a row in the list opens it and starts learning right away,
+  showing the current mapping and the learn prompt together; a further click
+  leaves for the main menu if it's fast, or just closes the row if it's not
+- Browsing past Features without opening it shows whichever CC Knob or
+  Button was mapped most recently
 - Per-target mappings for live effects and looper controls
 - Separate Arp and Drum division mappings
 - Sixteen Main-input CC-to-channel/CC remap slots

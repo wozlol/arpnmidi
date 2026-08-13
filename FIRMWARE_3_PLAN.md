@@ -422,15 +422,26 @@ target picker, right before Back.
 - The sixteen Router rows store output channel, note-low, note-high, and
   transpose. Notes outside the selected range continue unchanged.
 - Round Robin has cycle and hardware-RNG true-random modes.
-- Quick Jump has input, output, and enable controls.
+- Quick Jump has input, output, and enable controls. Its output can also be
+  moved live from Features' CC Buttons list: one mappable trigger per MIDI
+  channel, each pointing Quick Jump's output at that channel and turning it
+  on, or, pressed again once already on and already there, turning it back
+  off without forgetting that output channel. This move never saves to the
+  preset.
 - Bass has channel/octave selection and a highest-note limit.
 - Mono Retrig uses last-note priority and recalls the newest still-held note.
 - Features provides continuous CC Knobs and CC-or-note Buttons, roughly
-  forty-six and eighty of them respectively, browsed as a compact six-row
-  scrolling list, name and a mapped dot only, no CH/CC text, so as many rows
-  fit at once as possible. Turning moves the highlighted row and closes any
-  open detail view back to the list; selecting a row opens a detail view,
-  name on top and its full mapping below.
+  forty-six and just over a hundred of them respectively (the Quick Jump
+  channel triggers above are part of that Buttons count), browsed as a
+  compact six-row scrolling list, name and a mapped dot only, no CH/CC text,
+  so as many rows fit at once as possible. Turning moves the highlighted row
+  and closes any open detail view back to the list; a click on a row opens
+  its detail view and starts learning in the same motion, showing both the
+  current mapping and the learn prompt at once. A further click, if it comes
+  quickly, leaves the list for the main menu entirely; if it comes after a
+  pause, it just closes that row back to the list. Browsing past Features
+  without having entered it shows whichever CC Knob or Button was mapped
+  most recently, name and mapping, rather than this screen's own list state.
 - CC Map has sixteen Main-input CC remap slots.
 - Note to CC has sixteen momentary or toggle slots.
 - Parameter Lock stores the latest CC value for each note and CC pair on one

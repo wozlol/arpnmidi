@@ -488,7 +488,13 @@ enum FeatureButtonId : uint8_t {
   FEATURE_BUTTON_CLOCK_INPUT,
   FEATURE_BUTTON_CLOCK_OUTPUT,
   FEATURE_BUTTON_PANIC,
-  FEATURE_BUTTON_COUNT
+  // One per MIDI channel, appended last so no existing button ID shifts.
+  // Pressing one is a live-only move, never saved to the preset: it points
+  // Quick Jump's output at that channel and turns Quick Jump on, or, if
+  // Quick Jump is already on and already pointed there, turns it back off
+  // without forgetting that output channel for next time.
+  FEATURE_BUTTON_QUICK_JUMP_CH_BASE,
+  FEATURE_BUTTON_COUNT = FEATURE_BUTTON_QUICK_JUMP_CH_BASE + 16
 };
 
 enum TriggerBindingKind : uint8_t {
@@ -1133,6 +1139,18 @@ uint8_t featuresItemCursor = 0;
 // view this screen always has, closing again the moment the encoder turns.
 bool featuresItemOpen = false;
 bool featuresLearnActive = false;
+// A click from the list both opens the row and starts learning in the same
+// motion. Timestamped so a fast second click, still within this window,
+// reads as "leave the list entirely" instead of "close this one row": see
+// FEATURES_DOUBLE_CLICK_MS at its use in activateClickAction.
+uint32_t featuresItemOpenMs = 0;
+constexpr uint32_t FEATURES_DOUBLE_CLICK_MS = 400UL;
+// The summary shown while just browsing past FEATURES, rather than whatever
+// this screen's own list cursor was last left on: the most recently learned
+// mapping, knob or button, so a glance confirms the last thing that was set.
+bool featuresLastMappedValid = false;
+bool featuresLastMappedIsButton = false;
+uint8_t featuresLastMappedIndex = 0;
 uint8_t ccRemapUiStage = CC_REMAP_UI_LIST;
 uint8_t ccRemapCursor = 0;
 bool ccRemapLearnActive = false;
@@ -6407,11 +6425,26 @@ void activateClickAction() {
           featuresLearnActive = false;
           featuresItemOpen = false;
         } else if (!featuresItemOpen) {
-          // First click on a list row opens its detail view; the row itself
-          // was already reached by turning, not clicking.
+          // A click on a list row opens it and starts learning in the same
+          // motion; the row itself was already reached by turning, not
+          // clicking. Timestamped so a fast second click can tell itself
+          // apart from a normal, unhurried one on the now-open row.
           featuresItemOpen = true;
+          featuresLearnActive = true;
+          featuresItemOpenMs = millis();
+        } else if ((millis() - featuresItemOpenMs) <= FEATURES_DOUBLE_CLICK_MS) {
+          // Fast: the performer meant to leave the list entirely, not just
+          // back out of the one row that fast first click just opened.
+          featuresUiStage = FEATURES_UI_GROUPS;
+          featuresGroupCursor = 0;
+          featuresItemOpen = false;
+          featuresLearnActive = false;
+          ui.menuMode = MENU_SELECT;
+          ui.deferredExitWork = true;
         } else {
-          featuresLearnActive = !featuresLearnActive;
+          // Delayed: just back out of this one row to the list.
+          featuresItemOpen = false;
+          featuresLearnActive = false;
         }
       }
       encoder.switchIgnoreUntilMs = millis() + 120;
@@ -7384,6 +7417,16 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
     markLoopStorageDirty();
   } else if (id == FEATURE_BUTTON_QUICK_JUMP) {
     setQuickJumpEnabled(firmware3Settings.quickJumpEnabled == 0);
+  } else if (id >= FEATURE_BUTTON_QUICK_JUMP_CH_BASE &&
+             id < FEATURE_BUTTON_QUICK_JUMP_CH_BASE + 16) {
+    const uint8_t channel = id - FEATURE_BUTTON_QUICK_JUMP_CH_BASE + 1U;
+    if (firmware3Settings.quickJumpEnabled &&
+        firmware3Settings.quickJumpOutputChannel == channel) {
+      setQuickJumpEnabled(false);
+    } else {
+      firmware3Settings.quickJumpOutputChannel = channel;
+      setQuickJumpEnabled(true);
+    }
   } else if (id == FEATURE_BUTTON_ARP_RETRIGGER) {
     firmware3Settings.arpRetriggerSync ^= 1U;
   } else if (id == FEATURE_BUTTON_ARP_NOTE_ORDER) {
@@ -7491,10 +7534,16 @@ bool captureFeatureCcAssignment(uint8_t channel, uint8_t cc) {
       !featuresLearnActive) return false;
   if (featuresUiStage == FEATURES_UI_KNOBS && featuresItemCursor < FEATURE_KNOB_COUNT) {
     featureControls.knobs[featuresItemCursor] = FeatureKnobBinding{channel, cc};
+    featuresLastMappedValid = true;
+    featuresLastMappedIsButton = false;
+    featuresLastMappedIndex = featuresItemCursor;
   } else if (featuresUiStage == FEATURES_UI_BUTTONS &&
              featuresItemCursor < FEATURE_BUTTON_COUNT) {
     featureControls.buttons[featuresItemCursor] =
         FeatureButtonBinding{channel, cc, TRIGGER_BINDING_CC};
+    featuresLastMappedValid = true;
+    featuresLastMappedIsButton = true;
+    featuresLastMappedIndex = featuresItemCursor;
   } else {
     return false;
   }
@@ -7539,6 +7588,9 @@ bool captureFeatureNoteAssignment(uint8_t channel, uint8_t note, bool pressed) {
       featuresItemCursor >= FEATURE_BUTTON_COUNT) return false;
   featureControls.buttons[featuresItemCursor] =
       FeatureButtonBinding{channel, note, TRIGGER_BINDING_NOTE};
+  featuresLastMappedValid = true;
+  featuresLastMappedIsButton = true;
+  featuresLastMappedIndex = featuresItemCursor;
   featuresLearnActive = false;
   markActivity(false);
   ui.dirty = true;
@@ -9597,15 +9649,50 @@ String featureButtonName(uint8_t id) {
   if (id == FEATURE_BUTTON_CLOCK_INPUT) return "CLOCK INPUT";
   if (id == FEATURE_BUTTON_CLOCK_OUTPUT) return "CLOCK OUTPUT";
   if (id == FEATURE_BUTTON_PANIC) return "PANIC";
+  if (id >= FEATURE_BUTTON_QUICK_JUMP_CH_BASE &&
+      id < FEATURE_BUTTON_QUICK_JUMP_CH_BASE + 16) {
+    return String("JUMP TO CH ") + String(id - FEATURE_BUTTON_QUICK_JUMP_CH_BASE + 1U);
+  }
   return "BUTTON";
 }
 
 void drawFeaturesScreen() {
+  // Browsing past FEATURES, not inside it: this screen's own list cursor
+  // means nothing to a passerby, so show the most recently learned mapping
+  // instead of whatever CC KNOBS/CC BUTTONS/CLEAR/BACK was last left on.
+  if (ui.menuMode != MENU_EDIT) {
+    display.setTextSize(1);
+    display.setCursor(0, 6);
+    if (!featuresLastMappedValid) {
+      display.print(F("FEATURES"));
+      return;
+    }
+    display.println(featuresLastMappedIsButton
+        ? featureButtonName(featuresLastMappedIndex)
+        : featureKnobName(featuresLastMappedIndex));
+    display.setCursor(0, 15);
+    if (featuresLastMappedIsButton) {
+      const FeatureButtonBinding &binding = featureControls.buttons[featuresLastMappedIndex];
+      display.print(F("CH ")); display.print(binding.channel);
+      display.print(binding.kind == TRIGGER_BINDING_CC ? F(" CC ") : F(" NOTE "));
+      display.print(binding.number);
+    } else {
+      const FeatureKnobBinding &binding = featureControls.knobs[featuresLastMappedIndex];
+      display.print(F("CH ")); display.print(binding.channel);
+      display.print(F(" CC ")); display.print(binding.cc);
+    }
+    return;
+  }
   if (featuresUiStage == FEATURES_UI_GROUPS) {
     static const char *const groups[] = {"CC KNOBS", "CC BUTTONS", "CLEAR", "BACK"};
     display.setTextSize(featuresGroupCursor < 2 ? 2 : 3);
     display.setCursor(0, 11);
     display.print(groups[featuresGroupCursor]);
+    if (featuresGroupCursor == 1) {
+      display.setTextSize(1);
+      display.setCursor(0, 29);
+      display.print(F("AND NOTES"));
+    }
     return;
   }
   const uint8_t count = featuresUiStage == FEATURES_UI_KNOBS
@@ -9658,11 +9745,11 @@ void drawFeaturesScreen() {
   display.setTextSize(1);
   display.setCursor(0, 6);
   display.println(name);
-  display.setCursor(0, 23);
-  if (featuresLearnActive) {
-    display.print(featuresUiStage == FEATURES_UI_KNOBS ? F("MOVE A CC") : F("MOVE CC / PLAY NOTE"));
-    return;
-  }
+  // Opening a row now starts learning in the same motion, so the current
+  // mapping and the learn prompt both need to be on screen together: the
+  // mapping moves up here, one row above where it used to sit alone, to
+  // leave the row below free for MOVE A CC / MOVE CC PLAY NOTE.
+  display.setCursor(0, 15);
   if (featuresUiStage == FEATURES_UI_KNOBS) {
     const FeatureKnobBinding &binding = featureControls.knobs[featuresItemCursor];
     if (binding.channel == 0 || binding.cc > 127) display.print(F("UNMAPPED"));
@@ -9679,6 +9766,10 @@ void drawFeaturesScreen() {
       display.print(binding.kind == TRIGGER_BINDING_CC ? F(" CC ") : F(" NOTE "));
       display.print(binding.number);
     }
+  }
+  if (featuresLearnActive) {
+    display.setCursor(0, 23);
+    display.print(featuresUiStage == FEATURES_UI_KNOBS ? F("MOVE A CC") : F("MOVE CC / PLAY NOTE"));
   }
 }
 
