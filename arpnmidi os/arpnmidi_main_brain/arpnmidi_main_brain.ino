@@ -991,12 +991,16 @@ uint32_t perfLoopMaxUs = 0;
 uint32_t perfLoopMaxUsShown = 0;
 uint32_t perfLateMaxUs = 0;
 uint32_t perfLateMaxUsShown = 0;
-// Counts every time tickArp finds heldDrumCount at zero and resets the
-// drum roll's grid, whether or not a physical drum key is actually still
-// down: the firmware has no independent way to know that, only whatever
-// heldDrumNotes says. A live-held roll going silent while this keeps
-// climbing points at heldDrumCount reading zero when it should not.
-uint32_t drumRollGridResetCount = 0;
+// Ruled out: heldDrumCount stays correct throughout a live-held roll drop
+// (confirmed on hardware), so it is not this reset firing that explains it.
+//
+// Counts every Note Off sendTargetFinal finds with nothing left on its own
+// ref count to release, so it drops the message rather than send a phantom
+// Off: a silent loss downstream of note tracking, in the shared per-target
+// output stage every source funneling through that target's final output
+// passes through, drum roll output included since it always resolves to
+// target 0 (Main).
+uint32_t finalRefUnderflowCount = 0;
 bool presetStorageDirty = false;
 uint32_t presetStorageDirtyMs = 0;
 uint32_t tapTempoLastMs = 0;
@@ -2153,7 +2157,10 @@ void sendTargetFinal(uint8_t target, uint8_t sourcePort,
     if (on) {
       if (refs < 0xFF) ++refs;
     } else {
-      if (refs == 0) return;
+      if (refs == 0) {
+        ++finalRefUnderflowCount;
+        return;
+      }
       --refs;
       if (refs > 0) return;
       status = static_cast<uint8_t>(0x80 | (status & 0x0F));
@@ -8258,7 +8265,6 @@ void tickArp() {
     if (!loopLocksArpClock()) {
       drumNextStepUs = 0;
       lastDrumRollDivision = -1;
-      ++drumRollGridResetCount;
     }
     return;
   }
@@ -10422,7 +10428,7 @@ void drawPanicScreen() {
 
   display.setCursor(0, 36);
   display.print(F("LATE ")); display.print(perfLateMaxUsShown);
-  display.print(F("u DR")); display.print(drumRollGridResetCount);
+  display.print(F("u FR")); display.print(finalRefUnderflowCount);
   display.print(F(" HC")); display.print(heldDrumCount);
 
   // Storage is the one subsystem that can fail silently, so it reports plainly.
