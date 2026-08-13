@@ -1061,6 +1061,7 @@ uint8_t mappedLoopArpOffNotes[arpnmidi3::kLoopTrackCount][128];
 uint8_t mappedLoopArpOffChannels[arpnmidi3::kLoopTrackCount][128];
 uint8_t thruOutputRefCount[128];
 uint8_t thruOutputRefChannel[128];
+uint8_t thruOutputRefSourcePort[128];
 uint8_t arpOffOutputRefCount[128];
 uint8_t arpOffOutputChannel[128];
 uint8_t legatoHeldCount[128];
@@ -2282,6 +2283,7 @@ void clearOutputOwnership() {
   memset(mappedLoopArpOffChannels, 0, sizeof(mappedLoopArpOffChannels));
   memset(thruOutputRefCount, 0, sizeof(thruOutputRefCount));
   memset(thruOutputRefChannel, 0, sizeof(thruOutputRefChannel));
+  memset(thruOutputRefSourcePort, 0, sizeof(thruOutputRefSourcePort));
   memset(arpOffOutputRefCount, 0, sizeof(arpOffOutputRefCount));
   memset(arpOffOutputChannel, 0, sizeof(arpOffOutputChannel));
 }
@@ -4312,6 +4314,18 @@ void loadSavedLoopStorage() {
 // every Note Off for that output note would be swallowed, from any source and
 // any track. The channel a note started on is remembered so it can still be
 // released correctly after the setting moves.
+//
+// sendFanout attributes a message to a live target by its sourcePort, and
+// sendTargetFinal keeps its own per-target ref count downstream. Only the
+// claim that actually reaches sendFanout, the first On and the last Off,
+// carries a sourcePort at all here, and those two calls are not guaranteed
+// to be the same source: track A claiming first and track B releasing last
+// is ordinary overlap between two sources holding the same pitch. Sending
+// the Off under track B's sourcePort would credit sendTargetFinal's count
+// for a target that never saw the On, so that count reads zero, the Off is
+// dropped as unmatched, and the note never turns off. The claiming source is
+// remembered here so the Off always goes out under the same source that sent
+// the On, whichever source actually happened to release it last.
 void thruOutputRefOn(uint8_t sourcePort, uint8_t outNote, uint8_t velocity) {
   if (outNote > 127) return;
   const uint8_t outCh = effectiveThruChannel();
@@ -4319,6 +4333,7 @@ void thruOutputRefOn(uint8_t sourcePort, uint8_t outNote, uint8_t velocity) {
   if (sendable) captureChordMemoryOutput(sourcePort, outCh, outNote, velocity);
   if (thruOutputRefCount[outNote]++ == 0) {
     thruOutputRefChannel[outNote] = sendable ? outCh : 0;
+    thruOutputRefSourcePort[outNote] = sourcePort;
     if (sendable) sendFanout(sourcePort, 0x90 | ((outCh - 1) & 0x0F), outNote, velocity);
   }
 }
@@ -4329,7 +4344,7 @@ void thruOutputRefOff(uint8_t sourcePort, uint8_t outNote) {
   const uint8_t outCh = thruOutputRefChannel[outNote];
   thruOutputRefChannel[outNote] = 0;
   if (channelEnabled(outCh)) {
-    sendFanout(sourcePort, 0x80 | ((outCh - 1) & 0x0F), outNote, 0);
+    sendFanout(thruOutputRefSourcePort[outNote], 0x80 | ((outCh - 1) & 0x0F), outNote, 0);
   }
 }
 
