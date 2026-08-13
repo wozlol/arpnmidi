@@ -1103,6 +1103,13 @@ uint64_t arpGridOriginUs = 0;
 uint64_t drumNextStepUs = 0;
 uint32_t drumGateOffMs = 0;
 uint64_t drumGridOriginUs = 0;
+// FREE division mode has no division of its own, only whatever a division
+// note last supplied. A burst of quick taps on that note, released between
+// each one, used to read as "no division" the instant it let go, stopping
+// the whole roll cold on every gap even though a drum note was still held
+// the entire time. Remembering the last one lets the roll keep going at
+// that rate through the gaps; see currentDrumDivisionSetting.
+int8_t lastDrumRollDivision = -1;
 uint32_t drumGlobalStep = 0;
 // arpGlobalStep is a position in musical time: which grid boundary the next
 // step lands on. It is recomputed whenever the grid moves, which happens on
@@ -2949,8 +2956,18 @@ uint8_t currentDivisionSetting() {
 
 int8_t currentDrumDivisionSetting() {
   const int8_t rollSlot = activeDivNoteSlot();
-  if (rollSlot >= 0) return divNoteSlotToDivision(static_cast<uint8_t>(rollSlot));
-  if (firmware3Settings.drumDivision == DRUM_DIVISION_FREE) return -1;
+  if (rollSlot >= 0) {
+    lastDrumRollDivision = divNoteSlotToDivision(static_cast<uint8_t>(rollSlot));
+    return lastDrumRollDivision;
+  }
+  if (firmware3Settings.drumDivision == DRUM_DIVISION_FREE) {
+    // Nothing held right now supplies a division on its own; keep rolling
+    // at whatever it last was rather than stopping, as long as a drum note
+    // is still down to roll. A fresh phrase that never touched a division
+    // note yet has nothing to fall back to, so it stays a single hit until
+    // one is pressed, same as before.
+    return (heldDrumCount > 0) ? lastDrumRollDivision : -1;
+  }
   if (firmware3Settings.drumDivision == DRUM_DIVISION_FOLLOW_ARP) {
     return settings.division < DIVISION_COUNT
         ? static_cast<int8_t>(settings.division)
@@ -8199,7 +8216,10 @@ void tickArp() {
     // brand new origin, the normal Key Press retrigger behavior when Retrig
     // isn't set to Clock Sync, so only skip the reset while the loop has the
     // clock locked.
-    if (!loopLocksArpClock()) drumNextStepUs = 0;
+    if (!loopLocksArpClock()) {
+      drumNextStepUs = 0;
+      lastDrumRollDivision = -1;
+    }
     return;
   }
   if (drumNextStepUs == 0 || nowUs >= drumNextStepUs) {
