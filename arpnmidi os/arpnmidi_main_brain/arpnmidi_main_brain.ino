@@ -593,6 +593,27 @@ struct LiveTargetSettings {
   int8_t echoDrift;
 };
 
+// The as-loaded/as-saved baseline for every field a mapped Feature Knob can
+// touch, so a hold-to-panic or a PANIC screen click can put all of them back
+// exactly where the preset left them, undoing whatever a connected
+// controller's last CC value temporarily set there, without needing the
+// controller itself to move. Captured fresh on every preset load and every
+// save, so it always reflects the most recent thing actually on flash.
+struct FeatureKnobDefaults {
+  uint8_t division = 0;
+  uint8_t drumDivision = 0;
+  uint8_t quickJumpInputChannel = 1;
+  uint8_t quickJumpOutputChannel = 2;
+  uint16_t manualBpm = 120;
+  uint8_t swing = 0;
+  uint8_t arpMode = 0;
+  uint8_t arpVelocity = 100;
+  uint8_t arpLengthPct = 50;
+  uint8_t arpOctaves = 1;
+  LiveTargetSettings liveTargets[STUTTER_ECHO_TARGET_COUNT]{};
+};
+FeatureKnobDefaults featureKnobDefaults;
+
 enum PatternId : uint8_t {
   PAT_MODE = 0,
   PAT_UP_1OCT,
@@ -5707,6 +5728,51 @@ bool initializeDeviceState(bool forceFactoryDefaults) {
   return ok;
 }
 
+void captureFeatureKnobDefaults() {
+  featureKnobDefaults.division = settings.division;
+  featureKnobDefaults.drumDivision = firmware3Settings.drumDivision;
+  featureKnobDefaults.quickJumpInputChannel = firmware3Settings.quickJumpInputChannel;
+  featureKnobDefaults.quickJumpOutputChannel = firmware3Settings.quickJumpOutputChannel;
+  featureKnobDefaults.manualBpm = settings.manualBpm;
+  featureKnobDefaults.swing = firmware3Settings.swing;
+  featureKnobDefaults.arpMode = settings.arpMode;
+  featureKnobDefaults.arpVelocity = settings.arpVelocity;
+  featureKnobDefaults.arpLengthPct = settings.arpLengthPct;
+  featureKnobDefaults.arpOctaves = firmware3Settings.arpOctaves;
+  for (uint8_t i = 0; i < STUTTER_ECHO_TARGET_COUNT; ++i) {
+    featureKnobDefaults.liveTargets[i] = firmware3Settings.liveTargets[i];
+  }
+}
+
+// A mapped Feature Knob's "temp change" is a direct, permanent-looking edit
+// to the live setting; nothing marks it as an override or ever un-applies it
+// on its own, so a controller sitting at a stale non-zero position leaves
+// that value in place indefinitely. This puts every one of those fields
+// back to captureFeatureKnobDefaults' snapshot, whatever the preset actually
+// has saved, so a hold-to-panic or a PANIC screen click both let every
+// mapped knob's effect sleep until the controller sends a fresh value,
+// rather than pretending zero arrived, which is not the same thing for
+// several of these (BPM's zero is 20, Arp Velocity's is 1, Echo Drift's is
+// its most negative value, not "off").
+void restoreFeatureKnobDefaults() {
+  settings.division = featureKnobDefaults.division;
+  firmware3Settings.drumDivision = featureKnobDefaults.drumDivision;
+  firmware3Settings.quickJumpInputChannel = featureKnobDefaults.quickJumpInputChannel;
+  firmware3Settings.quickJumpOutputChannel = featureKnobDefaults.quickJumpOutputChannel;
+  settings.manualBpm = featureKnobDefaults.manualBpm;
+  firmware3Settings.swing = featureKnobDefaults.swing;
+  settings.arpMode = featureKnobDefaults.arpMode;
+  settings.arpVelocity = featureKnobDefaults.arpVelocity;
+  settings.arpLengthPct = featureKnobDefaults.arpLengthPct;
+  firmware3Settings.arpOctaves = featureKnobDefaults.arpOctaves;
+  for (uint8_t i = 0; i < STUTTER_ECHO_TARGET_COUNT; ++i) {
+    firmware3Settings.liveTargets[i] = featureKnobDefaults.liveTargets[i];
+  }
+  syncArpDivisionToGrid();
+  syncMusicalClockConfig(false);
+  ui.dirty = true;
+}
+
 void loadCurrentPreset() {
   screenSaverForceNow = false;
   memset(parameterLockHeldNotes, 0, sizeof(parameterLockHeldNotes));
@@ -5746,6 +5812,7 @@ void loadCurrentPreset() {
   extendedPresetDirty = false;
   settings.loadPreset = storage.currentPreset;
   settings.savePreset = storage.currentPreset;
+  captureFeatureKnobDefaults();
   ui.dirty = true;
 }
 
@@ -5802,6 +5869,7 @@ bool saveStorage() {
   if (!recordChanged && !deviceHeaderCoreDiffers()) {
     presetStorageDirty = false;
     extendedPresetDirty = false;
+    captureFeatureKnobDefaults();
     return true;
   }
   stagePersistedUiSetting(ui.selectedSetting);
@@ -5817,6 +5885,10 @@ bool saveStorage() {
   }
   extendedPresetDirty = false;
   presetStorageDirty = false;
+  // What just landed on flash is the new as-booted baseline: any live
+  // Feature Knob value now saved with it is no longer a temp override, a
+  // panic reset should keep it, not revert past it.
+  captureFeatureKnobDefaults();
   return true;
 }
 
@@ -6246,6 +6318,9 @@ void activateClickAction() {
     }
   }
   if (ui.selectedSetting == SET_PANIC) {
+    // Same as the held encoder gesture: put every mapped Feature Knob's live
+    // value back to what the preset has saved before the panic sweep itself.
+    restoreFeatureKnobDefaults();
     panicAll();
     return;
   }
@@ -6822,6 +6897,11 @@ void pollEncoder() {
     clearAllLiveLoopTracks();
     markLoopStorageDirty();
     refreshLoopUiState();
+    // Every mapped Feature Knob's live value goes back to what the preset
+    // actually has saved too, so a controller sitting at a stale non-zero
+    // position can't keep BPM, swing, velocity, or anything else parked
+    // somewhere the preset never asked for.
+    restoreFeatureKnobDefaults();
     panicAll();
     encoder.turnWhilePressed = true;
   }

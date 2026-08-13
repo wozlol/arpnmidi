@@ -338,9 +338,25 @@ depends on a single control:
   panic last, since panic's all-channel sweep is the most exhaustive
   kill-everything pass there is, the one thing that has to get the final word
   so nothing the clear stirs up can slip past it and stick. This is scoped to
-  the held gesture specifically; a quick tap on the PANIC screen, a mapped
-  Feature Button panic, and the panic a preset load fires on its way out all
-  stay silence-only.
+  the held gesture specifically; a mapped Feature Button panic, and the
+  panic a preset load fires on its way out, stay silence-only.
+- A mapped Feature Knob's live value is a direct, permanent-looking edit to
+  the setting; nothing marks it as a temporary override or ever un-applies
+  it, so a connected controller sitting at a stale non-zero position leaves
+  that value in place indefinitely, whether or not it ever gets saved into
+  the preset. Both the held encoder gesture and a quick tap on the PANIC
+  screen also put every Feature-Knob-touchable field, Velocity, Note Length,
+  Stutter, Echo, Arp Division, Drum Division, Quick Jump's channels, BPM,
+  Swing, Arp Mode, Arp Velocity, Arp Length, and Arp Octaves, back to
+  whatever the preset actually has saved, captured fresh on every preset
+  load and every save so it always reflects the most recent thing actually
+  on flash. This is deliberately not the same as pretending every mapped
+  knob's CC just read zero: zero is not "default" for most of them, BPM's
+  zero is 20, Arp Velocity's is 1, Echo Drift's is its most negative value,
+  and several also force their feature on at zero rather than leave it at
+  whatever the preset had it set to. Loop track selection and loop track
+  length are left alone, neither one is a preset-level setting to begin
+  with.
 
 ### Retained length behavior
 
