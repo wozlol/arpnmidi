@@ -36,13 +36,22 @@ notes, arp, playback, recording, or pending UI work are active.
   starvation bound. There is no periodic refresh. Events that change nothing
   on the selected screen must not mark the display dirty, so a quiet screen
   costs zero frames during a performance
-- A push is a full-frame, blocking I2C transfer, about 20 ms at 400 kHz
-  regardless of how little changed, and it holds the outgoing MIDI drain off
-  the wire for the whole transfer since both live on this core. LOOPER and
-  LOOP MIX change on nearly every click while the performer is actively
-  working the loop, so those two screens use a 300 ms cap instead of the
-  general 50 ms, coalescing a flurry of clicks into fewer pushes rather than
-  paying the block on each one
+- A push is the full 1024-byte frame, about 20 ms at 400 kHz regardless of how
+  little changed, but this core no longer sits through the transfer: it hands
+  the frame to a DMA channel paced by the I2C peripheral's own DREQ (its "FIFO
+  has room" signal) and returns immediately, so the wire time runs in the
+  background while this core goes back to draining outgoing MIDI. Nothing may
+  touch the frame buffer, or start any other transaction on that same I2C
+  peripheral, while a push is still in flight, checked by polling both the
+  DMA channel and the peripheral's own bus-activity bit, since DMA finishing
+  only means every byte reached the FIFO, not that the peripheral is done
+  shifting them onto the wire. renderDisplayIfNeeded checks this once at its
+  own top, which covers everything reachable through it; the one path that
+  runs outside it, the busy-hourglass draw before a flash write freezes core
+  0, waits on it explicitly first. LOOPER and LOOP MIX still change on nearly
+  every click while the performer is actively working the loop, so those two
+  screens keep a 300 ms cap instead of the general 50 ms on top of this,
+  coalescing a flurry of clicks into fewer, now background, pushes
 - VL53L0X distance-sensor polling, data-ready peek first so a slow or wedged
   sensor costs one register read instead of a blocking wait
 

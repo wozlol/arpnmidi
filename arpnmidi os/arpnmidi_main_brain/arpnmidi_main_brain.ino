@@ -33,6 +33,8 @@
 #include <Wire.h>
 #include <LittleFS.h>
 #include <hardware/watchdog.h>
+#include <hardware/dma.h>
+#include <hardware/i2c.h>
 #include <MIDI.h>
 #if ARPNMIDI_ENABLE_RGB_LED
 #include <Adafruit_NeoPixel.h>
@@ -10387,7 +10389,73 @@ void drawScreenSaver() {
   display.display();
 }
 
+// DMA-paced push of the OLED's full 1024-byte frame over I2C, so this core
+// only has to start the transfer, not sit through the whole ~20ms of it
+// while the outgoing MIDI queue waits. The RP2040's I2C peripheral (i2c1,
+// the block Wire1 already configured pins and clock speed for) paces the
+// DMA controller off its own TX FIFO room, its DREQ, so once this call
+// returns, the transfer runs in the background at full bus speed while this
+// core goes back to draining outgoing MIDI. That peripheral encodes a
+// RESTART/STOP bit alongside each data byte in its command register rather
+// than a separate control line, so the DMA source has to be 16-bit words,
+// not raw bytes: one control byte (0x40, the data-stream marker) followed
+// by the 1024 pixel bytes, with STOP set only on the very last word.
+constexpr uint16_t DISPLAY_DMA_FRAME_BYTES = SCREEN_W * ((SCREEN_H + 7) / 8);  // 1024
+int displayDmaChannel = -1;
+bool displayDmaInFlight = false;
+uint16_t displayDmaWords[DISPLAY_DMA_FRAME_BYTES + 1];
+
+// DMA finishing only means every word was handed to the peripheral's FIFO;
+// the peripheral can still be shifting the last few bytes onto the wire and
+// sending the final STOP afterward, so both have to read idle before it is
+// safe to touch the frame buffer again or start another transfer.
+bool displayDmaBusy() {
+  if (!displayDmaInFlight) return false;
+  if (dma_channel_is_busy(displayDmaChannel)) return true;
+  if (i2c1->hw->status & I2C_IC_STATUS_ACTIVITY_BITS) return true;
+  displayDmaInFlight = false;
+  return false;
+}
+
+// A tiny, rare-path safety wait for the few display writers that do not run
+// through renderDisplayIfNeeded and so are not already covered by its own
+// displayDmaBusy() check at the top: without this, one of them could start
+// a conflicting transaction on the same I2C peripheral while a previous
+// DMA-driven push is still finishing in the background.
+void waitForDisplayDma() {
+  while (displayDmaBusy()) tight_loop_contents();
+}
+
+void pushDisplayFrameDma() {
+  if (displayDmaChannel < 0) {
+    display.display();
+    return;
+  }
+  uint8_t *buf = display.getBuffer();
+  displayDmaWords[0] = 0x40;
+  for (uint16_t i = 0; i < DISPLAY_DMA_FRAME_BYTES; ++i) {
+    displayDmaWords[1 + i] = buf[i];
+  }
+  displayDmaWords[DISPLAY_DMA_FRAME_BYTES] |= (1U << 9);  // STOP on the last word
+
+  i2c1->hw->enable = 0;
+  i2c1->hw->tar = OLED_ADDR;
+  i2c1->hw->enable = 1;
+
+  dma_channel_config config = dma_channel_get_default_config(displayDmaChannel);
+  channel_config_set_transfer_data_size(&config, DMA_SIZE_16);
+  channel_config_set_read_increment(&config, true);
+  channel_config_set_write_increment(&config, false);
+  channel_config_set_dreq(&config, i2c_get_dreq(i2c1, true));
+  dma_channel_configure(displayDmaChannel, &config, &i2c1->hw->data_cmd,
+                        displayDmaWords, DISPLAY_DMA_FRAME_BYTES + 1, true);
+  displayDmaInFlight = true;
+}
+
 void renderDisplayIfNeeded() {
+  // Nothing here may touch the frame buffer, or start a command sequence on
+  // the same I2C peripheral, while a previous push is still in flight.
+  if (displayDmaBusy()) return;
   const uint32_t now = millis();
   const uint32_t saverTimeout = screenSaverTimeoutMs(settings.screenSaver);
   if (screenSaverForceNow || (saverTimeout && (now - ui.lastActivityMs) > saverTimeout)) {
@@ -10420,7 +10488,7 @@ void renderDisplayIfNeeded() {
   moveRenderedSettingArea();
   drawModeLabel();
   drawModeIndicator();
-  display.display();
+  pushDisplayFrameDma();
   ui.lastRenderMs = now;
 }
 
@@ -10443,6 +10511,10 @@ void endBusyHourglass() {
 }
 
 void drawBusyHourglassNow() {
+  // Runs outside renderDisplayIfNeeded, so its own displayDmaBusy() check at
+  // the top does not cover this call: a previous DMA-driven push could
+  // still be reading the frame buffer or still own the I2C peripheral.
+  waitForDisplayDma();
   const int y = SETTING_AREA_Y + 23;
   display.fillRect(116, y, 12, 18, SSD1306_BLACK);
   display.drawTriangle(118, y + 1, 126, y + 1, 122, y + 8, SSD1306_WHITE);
@@ -10583,6 +10655,11 @@ void setupDisplay() {
   display.setTextColor(SSD1306_WHITE);
   showBootStage(F("Display OK"), F("Starting..."));
   display.display();
+  // Claimed once and reused for every push; required:true panics on boot if
+  // every channel is somehow already spoken for, loudly, rather than
+  // silently falling back to a blocking display() that would race a DMA
+  // push that in fact never started.
+  displayDmaChannel = dma_claim_unused_channel(true);
 }
 
 void setupSensor() {
