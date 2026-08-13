@@ -10449,7 +10449,7 @@ void drawPanicScreen() {
   display.setCursor(0, 36);
   display.print(F("LATE ")); display.print(perfLateMaxUsShown);
   display.print(F("u AH")); display.print(maxDrumScheduleAheadMs);
-  display.print(F(" HC")); display.print(heldDrumCount);
+  display.print(F(" GS")); display.print(drumGlobalStep);
 
   // Storage is the one subsystem that can fail silently, so it reports plainly.
   // NO FS means the board was built without a filesystem partition and nothing
