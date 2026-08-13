@@ -10353,6 +10353,13 @@ void drawPanicScreen() {
   const bool overload = secondaryTxDropped || secondaryTxCriticalDropped ||
       multitrackLooper.overflowCount() || parameterLockOverflowCount ||
       loopCcPruneOverflowCount;
+  // Eight lines packed into SETTING_AREA_H's 48px at 6px each, not the usual
+  // 8px pitch: moveRenderedSettingArea only shifts raw y < SETTING_AREA_H
+  // into view, and its target range then overwrites whatever already sat at
+  // that y, so anything drawn past 47 here, PASS/LATE and the FS line used
+  // to sit at 56 and 48, was silently clobbered before it ever reached the
+  // screen. Never actually visible on real hardware since the DMA/shift
+  // rework, only in occupying the buffer briefly.
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
@@ -10360,7 +10367,7 @@ void drawPanicScreen() {
   display.print(F("D")); display.print(dinIncomingMessageCount);
   display.print(F(" U")); display.print(usbIncomingMessageCount);
 
-  display.setCursor(0, 8);
+  display.setCursor(0, 6);
   display.print(F("LAST "));
   if (lastIncomingSource == USB_DEVICE_SOURCE_PORT) display.print(F("U "));
   else if (lastIncomingSource == 0) display.print(F("D "));
@@ -10374,7 +10381,7 @@ void drawPanicScreen() {
   if (lastIncomingData2 < 0x10) display.print('0');
   display.print(lastIncomingData2, HEX);
 
-  display.setCursor(0, 16);
+  display.setCursor(0, 12);
   display.print(F("TX ")); display.print(secondaryTxDepth());
   display.print(F(" H")); display.print(secondaryTxHighWater);
   display.print(F(" D")); display.print(secondaryTxDropped);
@@ -10382,17 +10389,17 @@ void drawPanicScreen() {
     display.print(F(" !")); display.print(secondaryTxCriticalDropped);
   }
 
-  display.setCursor(0, 24);
+  display.setCursor(0, 18);
   display.print(F("LOOP ")); display.print(multitrackLooper.usedEvents());
   display.print('/'); display.print(arpnmidi3::kLoopEventPoolSize);
   display.print(F(" O")); display.print(multitrackLooper.overflowCount());
 
-  display.setCursor(0, 32);
+  display.setCursor(0, 24);
   display.print(F("HIST ")); display.print(rollingHistory.size());
   display.print('/'); display.print(arpnmidi3::kRollingHistoryCapacity);
   display.print(F(" O")); display.print(rollingHistory.overwrittenCount());
 
-  display.setCursor(0, 40);
+  display.setCursor(0, 30);
   display.print(overload ? F("RISK ") : F("OK "));
   if (firmware3Settings.clockInFollow) {
     const uint32_t age = musicalClock.lastExternalClockAgeMs(time_us_64());
@@ -10405,10 +10412,7 @@ void drawPanicScreen() {
   if (loopStorageDirty) display.print('L');
   if (extendedPresetDirty) display.print('E');
 
-  // Storage is the one subsystem that can fail silently, so it reports plainly.
-  // NO FS means the board was built without a filesystem partition and nothing
-  // can ever be saved.
-  display.setCursor(0, 56);
+  display.setCursor(0, 36);
   // Spelled out rather than single letters: P and L above already mean the
   // preset and loop dirty flags, and reusing them here for pass/lateness
   // timing would read as the same thing on a screen this dense.
@@ -10416,7 +10420,10 @@ void drawPanicScreen() {
   display.print(F("u LATE ")); display.print(perfLateMaxUsShown);
   display.print(F("u"));
 
-  display.setCursor(0, 48);
+  // Storage is the one subsystem that can fail silently, so it reports plainly.
+  // NO FS means the board was built without a filesystem partition and nothing
+  // can ever be saved.
+  display.setCursor(0, 42);
   if (!littleFsReady) {
     display.print(F("FS NONE - set 512KB FS"));
   } else if (storageError || loopStorageError) {
