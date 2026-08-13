@@ -378,11 +378,17 @@ Main and each looper track have independent settings for:
 
 - Velocity from 0 to 200 percent
 - Note Length from 1 to 200 percent
-- Stutter enable and division
+- Stutter enable and division, from 1/64T up through a ceiling of one bar;
+  Echo's Length and Delay share the same division list but keep the full
+  range up to 8 bars, since a fixed-length repeat spanning several bars is
+  still musically useful in a way stutter-repeating that much rarely is
 - Echo enable, Wet, Length, Delay, and signed Drift
 
 All note schedulers have fixed capacities and close their owned notes when
-disabled, retargeted, muted, cleared, or stopped.
+disabled, retargeted, muted, cleared, or stopped. Stutter and Echo's one-line
+summary abbreviates a bar count as "N BAR", never the grammatically correct
+"N BARS", since the one-line space has no room for the extra letter; the
+full submenu view underneath still spells it out correctly.
 
 Stutter and Echo have one further target beyond Main and the four fixed
 tracks: SELECTD, its own independent settings rather than a share of any

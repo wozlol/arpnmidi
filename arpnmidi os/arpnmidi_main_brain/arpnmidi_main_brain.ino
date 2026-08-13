@@ -411,6 +411,11 @@ constexpr uint8_t STUTTER_LENGTH_COUNT =
     STUTTER_LENGTH_DIVISION_BASE + DIVISION_COUNT;
 constexpr uint8_t STUTTER_LENGTH_DEFAULT =
     STUTTER_LENGTH_DIVISION_BASE + DIV_1_4;
+// Stutter's own repeat size never needs anything longer than a single bar;
+// only Echo's fixed-length repeats still reach the full multi-bar range.
+// "1 BAR" (index 3 in the shared length list, the last bar option before the
+// ordinary divisions begin) is Stutter's largest choice.
+constexpr uint8_t STUTTER_LENGTH_MIN_SELECTION = STUTTER_BAR_LENGTH_COUNT - 1;
 constexpr uint8_t CC_REMAP_SLOT_COUNT = 16;
 constexpr uint8_t NOTE_CC_SLOT_COUNT = 16;
 constexpr uint8_t NOTE_CC_CANCEL_CHANNEL = 17;
@@ -3965,6 +3970,18 @@ String lengthSelectionName(uint8_t selection) {
   return String(kDivisionNames[selection - STUTTER_LENGTH_DIVISION_BASE]);
 }
 
+// A one-line summary has no room for the grammatically correct plural, so
+// this always says BAR, never BARS, unlike lengthSelectionName above, which
+// detail views with room to spare still use as-is.
+String compactLengthSelectionName(uint8_t selection) {
+  static const char *const compactBarNames[STUTTER_BAR_LENGTH_COUNT] = {
+    "8 BAR", "4 BAR", "2 BAR", "1 BAR"
+  };
+  selection = clampU8(selection, 0, STUTTER_LENGTH_COUNT - 1);
+  if (selection < STUTTER_BAR_LENGTH_COUNT) return String(compactBarNames[selection]);
+  return String(kDivisionNames[selection - STUTTER_LENGTH_DIVISION_BASE]);
+}
+
 uint64_t lengthSelectionPulses(uint8_t selection) {
   selection = clampU8(selection, 0, STUTTER_LENGTH_COUNT - 1);
   if (selection < STUTTER_BAR_LENGTH_COUNT) {
@@ -4578,7 +4595,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       return 200;
     case SET_STUTTER:
       if (!stutterUi.editing) return 4;
-      if (stutterUi.cursor == 0) return STUTTER_LENGTH_COUNT;
+      if (stutterUi.cursor == 0) return STUTTER_LENGTH_COUNT - STUTTER_LENGTH_MIN_SELECTION;
       if (stutterUi.cursor == 1) return 1;
       if (stutterUi.cursor == 2) return 17;
       return STUTTER_ECHO_TARGET_COUNT;
@@ -4714,7 +4731,11 @@ int16_t getSettingValueRaw(uint8_t settingId) {
     case SET_STUTTER:
       if (!stutterUi.editing) return stutterUi.cursor;
       if (stutterUi.cursor == 0) {
-        return firmware3Settings.liveTargets[stutterTarget].stutterLengthSelection;
+        // Edited as a local, 0-based index within Stutter's own shorter
+        // range; the stored value stays in the full shared length space so
+        // display and duration lookups elsewhere need no translation.
+        return firmware3Settings.liveTargets[stutterTarget].stutterLengthSelection -
+            STUTTER_LENGTH_MIN_SELECTION;
       }
       if (stutterUi.cursor == 1) return firmware3Settings.liveTargets[stutterTarget].stutterEnabled;
       if (stutterUi.cursor == 2) return firmware3Settings.stutterTimeoutBars;
@@ -4969,7 +4990,8 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       if (!stutterUi.editing) stutterUi.cursor = clampU8(value, 0, 4);
       else if (stutterUi.cursor == 0) requestStutterState(stutterTarget,
           firmware3Settings.liveTargets[stutterTarget].stutterEnabled != 0,
-          clampU8(value, 0, STUTTER_LENGTH_COUNT - 1));
+          clampU8(value, 0, STUTTER_LENGTH_COUNT - 1 - STUTTER_LENGTH_MIN_SELECTION) +
+              STUTTER_LENGTH_MIN_SELECTION);
       else if (stutterUi.cursor == 1) requestStutterState(stutterTarget, value != 0);
       else if (stutterUi.cursor == 2) firmware3Settings.stutterTimeoutBars = clampU8(value, 1, 16);
       else stutterTarget = clampU8(value, 0, STUTTER_ECHO_TARGET_COUNT - 1);
@@ -5472,8 +5494,8 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
     target.noteLengthEnabled = target.noteLengthEnabled ? 1 : 0;
     target.noteLengthPercent = clampU8(target.noteLengthPercent, 1, 200);
     target.stutterEnabled = target.stutterEnabled ? 1 : 0;
-    target.stutterLengthSelection =
-        clampU8(target.stutterLengthSelection, 0, STUTTER_LENGTH_COUNT - 1);
+    target.stutterLengthSelection = clampU8(
+        target.stutterLengthSelection, STUTTER_LENGTH_MIN_SELECTION, STUTTER_LENGTH_COUNT - 1);
     target.echoEnabled = target.echoEnabled ? 1 : 0;
     target.echoWet = clampU8(target.echoWet, 0, 100);
     target.echoLength = clampU8(target.echoLength, 0, STUTTER_LENGTH_COUNT - 1);
@@ -7062,8 +7084,11 @@ void requestStutterState(uint8_t target, bool enabled, int16_t lengthSelection) 
   if (target >= STUTTER_ECHO_TARGET_COUNT) return;
   if (stutterRepeaters[target].active()) deactivateStutter(target);
   if (lengthSelection >= 0) {
-    firmware3Settings.liveTargets[target].stutterLengthSelection =
-        clampU8(lengthSelection, 0, STUTTER_LENGTH_COUNT - 1);
+    // Enforced here too, not just in the UI's own local-index translation,
+    // so a mapped knob or button can't reach past Stutter's 1-bar ceiling
+    // either.
+    firmware3Settings.liveTargets[target].stutterLengthSelection = clampU8(
+        lengthSelection, STUTTER_LENGTH_MIN_SELECTION, STUTTER_LENGTH_COUNT - 1);
   }
   firmware3Settings.liveTargets[target].stutterEnabled = enabled ? 1 : 0;
   stutterTimedOut[target] = false;
@@ -9879,7 +9904,7 @@ void drawStutterScreen() {
   if (ui.menuMode == MENU_SELECT) {
     drawSubmenuField("", liveTargetName(stutterTarget) + " " +
         (target.stutterEnabled
-            ? lengthSelectionName(target.stutterLengthSelection) : String("OFF")), false);
+            ? compactLengthSelectionName(target.stutterLengthSelection) : String("OFF")), false);
     return;
   }
   String value;
