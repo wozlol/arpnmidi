@@ -150,6 +150,11 @@ constexpr uint8_t ROUND_ROBIN_CH10_TO_2_BIT = 0x02;
 constexpr uint8_t ROUND_ROBIN_RANDOM_BIT = 0x04;
 constexpr uint8_t LOOP_TRACK_SOURCE_BASE = 240;
 constexpr uint8_t STUTTER_SOURCE_BASE = 224;
+// The Division note's own +HAT NOTE substitution runs through the drum
+// pipeline under this source instead of whichever physical port the
+// Division note itself arrived on, so it never shares a held-note slot
+// with a genuine key on the same note. See divNotePlusHeldDrumNotes.
+constexpr uint8_t DIV_NOTE_PLUS_SOURCE_PORT = 235;
 constexpr uint8_t HISTORY_OUTPUT_TARGET_BASE = 16;
 constexpr uint32_t ARP_KEY_SYNC_CAPTURE_MS = 6UL;
 constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
@@ -1055,6 +1060,16 @@ bool loopHeldDrumNotes[128];
 uint8_t loopHeldDrumVelocities[128];
 bool loopTrackHeldDrumNotes[arpnmidi3::kLoopTrackCount][128];
 uint8_t loopTrackHeldDrumVelocities[arpnmidi3::kLoopTrackCount][128];
+// The Division note's own note (+HAT NOTE) plays through this same drum
+// pipeline under its own source, kept apart from the genuine physical key
+// mapped to that same note: both are "physical" in the ordinary sense, so
+// without a slot of their own they would share physicalHeldDrumNotes and
+// releasing either one would stomp the other's claim. Held DIV_NOTE_PLUS_
+// SOURCE_PORT holds nothing back on its own; a genuinely held key survives
+// the Division note letting go, and letting go of the key no longer costs
+// the Division note's own claim either.
+bool divNotePlusHeldDrumNotes[128];
+uint8_t divNotePlusHeldDrumVelocities[128];
 uint8_t mappedThruNotes[128];
 uint8_t mappedLoopThruNotes[arpnmidi3::kLoopTrackCount][128];
 uint8_t mappedThruChordNotes[128][3];
@@ -2398,6 +2413,8 @@ void resetHeldState() {
   memset(loopHeldDrumVelocities, 0, sizeof(loopHeldDrumVelocities));
   memset(loopTrackHeldDrumNotes, 0, sizeof(loopTrackHeldDrumNotes));
   memset(loopTrackHeldDrumVelocities, 0, sizeof(loopTrackHeldDrumVelocities));
+  memset(divNotePlusHeldDrumNotes, 0, sizeof(divNotePlusHeldDrumNotes));
+  memset(divNotePlusHeldDrumVelocities, 0, sizeof(divNotePlusHeldDrumVelocities));
   clearOutputOwnership();
   memset(legatoHeldCount, 0, sizeof(legatoHeldCount));
   memset(legatoHeldVelocity, 0, sizeof(legatoHeldVelocity));
@@ -2746,10 +2763,18 @@ void setInputOwnerState(uint8_t sourcePort, uint8_t note, uint8_t velocity, bool
 }
 
 void setDrumOwnerState(uint8_t sourcePort, uint8_t note, uint8_t velocity, bool on) {
-  bool *ownerNotes = loopOwnsInput(sourcePort)
-      ? loopTrackHeldDrumNotes[loopTrackForSource(sourcePort)] : physicalHeldDrumNotes;
-  uint8_t *ownerVelocities = loopOwnsInput(sourcePort)
-      ? loopTrackHeldDrumVelocities[loopTrackForSource(sourcePort)] : physicalHeldDrumVelocities;
+  bool *ownerNotes;
+  uint8_t *ownerVelocities;
+  if (loopOwnsInput(sourcePort)) {
+    ownerNotes = loopTrackHeldDrumNotes[loopTrackForSource(sourcePort)];
+    ownerVelocities = loopTrackHeldDrumVelocities[loopTrackForSource(sourcePort)];
+  } else if (sourcePort == DIV_NOTE_PLUS_SOURCE_PORT) {
+    ownerNotes = divNotePlusHeldDrumNotes;
+    ownerVelocities = divNotePlusHeldDrumVelocities;
+  } else {
+    ownerNotes = physicalHeldDrumNotes;
+    ownerVelocities = physicalHeldDrumVelocities;
+  }
   ownerNotes[note] = on;
   ownerVelocities[note] = on ? velocity : 0;
   loopHeldDrumNotes[note] = false;
@@ -2761,8 +2786,14 @@ void setDrumOwnerState(uint8_t sourcePort, uint8_t note, uint8_t velocity, bool 
       break;
     }
   }
-  heldDrumNotes[note] = physicalHeldDrumNotes[note] || loopHeldDrumNotes[note];
-  heldDrumVelocities[note] = physicalHeldDrumNotes[note] ? physicalHeldDrumVelocities[note] : loopHeldDrumVelocities[note];
+  heldDrumNotes[note] = physicalHeldDrumNotes[note] || loopHeldDrumNotes[note] ||
+      divNotePlusHeldDrumNotes[note];
+  uint8_t combinedVelocity = physicalHeldDrumNotes[note] ? physicalHeldDrumVelocities[note] : 0;
+  if (!combinedVelocity && divNotePlusHeldDrumNotes[note]) {
+    combinedVelocity = divNotePlusHeldDrumVelocities[note];
+  }
+  if (!combinedVelocity) combinedVelocity = loopHeldDrumVelocities[note];
+  heldDrumVelocities[note] = combinedVelocity;
 }
 
 void rebuildHeldSorted() {
@@ -7955,7 +7986,8 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
     const uint8_t divNoteAction = handleDivNoteOverride(sourcePort, channel, data1, data2, data2 > 0);
     if (divNoteAction == 1) return;
     translateSplitInputToDrum(channel, data1);
-    onInputNote(sourcePort, channel, data1, data2, data2 > 0, divNoteAction != 2);
+    onInputNote(divNoteAction == 2 ? DIV_NOTE_PLUS_SOURCE_PORT : sourcePort,
+                channel, data1, data2, data2 > 0, divNoteAction != 2);
   } else if (type == 0x80) {
     if (channel == settings.inputChannel) captureCustomArpNote(data1, 0, false, time_us_64());
     if (channel == firmware3Settings.parameterLockChannel) parameterLockHeldNotes[data1] = false;
@@ -7963,7 +7995,8 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
     const uint8_t divNoteAction = handleDivNoteOverride(sourcePort, channel, data1, 0, false);
     if (divNoteAction == 1) return;
     translateSplitInputToDrum(channel, data1);
-    onInputNote(sourcePort, channel, data1, 0, false, divNoteAction != 2);
+    onInputNote(divNoteAction == 2 ? DIV_NOTE_PLUS_SOURCE_PORT : sourcePort,
+                channel, data1, 0, false, divNoteAction != 2);
   } else if (type == 0xB0) {
     routeControlChange(sourcePort, channel, data1, data2);
   } else if (type == 0xE0) {
