@@ -173,7 +173,7 @@ end with the target picker.
 - Velocity scales from 0 to 200 percent.
 - Notelength scales from 1 to 200 percent.
 - Stutter uses the shared rolling history for note-safe beat repeats. It
-  defaults to `1/4`, tops out at `1 BAR`, and has a configurable timeout in
+  defaults to `1/8`, tops out at `1 BAR`, and has a configurable timeout in
   bars.
 - Echo provides Wet, Length, Delay division, and signed Drift. Drift accelerates
   or decelerates the repeats for a bouncing-object effect. Echo Length and

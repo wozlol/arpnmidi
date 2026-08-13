@@ -410,7 +410,7 @@ constexpr uint8_t STUTTER_LENGTH_DIVISION_BASE = STUTTER_BAR_LENGTH_COUNT;
 constexpr uint8_t STUTTER_LENGTH_COUNT =
     STUTTER_LENGTH_DIVISION_BASE + DIVISION_COUNT;
 constexpr uint8_t STUTTER_LENGTH_DEFAULT =
-    STUTTER_LENGTH_DIVISION_BASE + DIV_1_4;
+    STUTTER_LENGTH_DIVISION_BASE + DIV_1_8;
 // Stutter's own repeat size never needs anything longer than a single bar;
 // only Echo's fixed-length repeats still reach the full multi-bar range.
 // "1 BAR" (index 3 in the shared length list, the last bar option before the
