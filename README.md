@@ -66,7 +66,8 @@ Detailed wiring and two-board build information is in the
   instant, not just whatever note-on comes next
 - When all Layers tracks are occupied, the next overdub goes onto the oldest
   layer
-- Optional auto quantize from 1/64 through 1/4, set per track
+- Optional auto quantize, set per track: Off, or any straight, dotted, or
+  triplet division from 1/4 down through 1/64T
 - Optional CC recording with bounded smoothing and pruning
 - Optional MIDI transport response, enabled by default
 - MIDI Start, Continue, Stop, Song Select, and useful MMC transport commands
@@ -145,6 +146,16 @@ sensor, a mapped CC, or a button:
   Parts Auto Solo always stay on the working track, since choosing tracks
   there belongs to the performer
 
+Holding the encoder switch into a panic, or a quick tap on the PANIC screen,
+is a deliberate emergency reset on top of the usual all-notes-off: it also
+clears whatever is still live in the loop (undoable, never restores an
+already-cleared track), and puts every mapped Feature Knob's value back to
+whatever the current preset actually has saved, so a connected controller
+sitting at a stale position can't leave tempo, swing, or any other mapped
+parameter stuck somewhere the preset never asked for. A mapped Feature
+Button panic and the panic a preset load fires on its way out stay
+silence-only.
+
 ### Live transformations
 
 Velocity, Notelength, Stutter, and Echo can target Main or any of the four
@@ -158,11 +169,13 @@ end with the target picker.
 - Velocity scales from 0 to 200 percent.
 - Notelength scales from 1 to 200 percent.
 - Stutter uses the shared rolling history for note-safe beat repeats. It
-  defaults to `1/4`, reaches the looper's `8 BARS` maximum, and has a
-  configurable timeout in bars.
+  defaults to `1/4`, tops out at `1 BAR`, and has a configurable timeout in
+  bars.
 - Echo provides Wet, Length, Delay division, and signed Drift. Drift accelerates
   or decelerates the repeats for a bouncing-object effect. Echo Length and
-  Delay reach the same `8 BARS` maximum as Stutter and the looper.
+  Delay reach the looper's `8 BARS` maximum, longer than Stutter's, since a
+  fixed-length repeat spanning several bars stays useful in a way
+  stutter-repeating that much rarely is.
 - Stutter and Echo-generated repeats are kept out of the recorded source loop.
 
 ### Routing and note processing
@@ -199,20 +212,32 @@ end with the target picker.
 - Custom button behaviors: Momentary, Latch, and Flappy Bird
 
 In looper button mode each button owns one track and steps through its enabled
-actions, Select, Arm, Mute, Solo, Clear, and Undo in that order:
+actions, Select, Arm, Mute, Solo, Delete, and Undo in that order:
 
 - The first tap on a track always performs the first enabled action, so a single
-  press can never reach Clear
+  press can never reach Delete
 - The step only advances while the same button keeps being tapped, and the
   gesture closes after 1.5 seconds or as soon as another button is used
-- With the default Select, Arm, Clear, Undo set that reads as tap to select,
-  tap again to arm, tap a third time to clear, tap a fourth time to undo
+- With the default Arm, Delete, Undo set (Select is off by default) that reads
+  as tap to arm, tap again to delete, tap a third time to undo
 - Arm selects the track it arms, the same as Select, and disarms it again on a
   second tap if it is already the pending arm. A pending arm survives a clear
   on its own unrecorded track, so clearing after arming leaves the performer
   still armed with the old content out of the way; undoing that clear cancels
   the arm instead, since bringing old content back and starting a fresh take
   are opposite choices
+
+Holding more than one of the four buttons down at once, in looper mode, reaches
+two whole-loop gestures no single button can: whichever count is reached first,
+two or three, decides what fires, regardless of press order or timing.
+
+- Two buttons down together stops the transport, the same stop the eye or pad
+  sensor gives on its first press. Doing it again while already stopped plays
+  instead, a plain play/stop toggle from the buttons alone.
+- Three buttons down together reaches the same undoable whole-loop clear the
+  eye/pad's second stop-then-clear press does: clears every track that has
+  anything audible, or brings them all back if every track is already cleared.
+  Four down behaves the same as three.
 
 ## Clock and transport
 

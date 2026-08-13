@@ -98,32 +98,23 @@ first. A new arp key phrase joins a rolling drum grid instead of resetting it.
 Engine accessors read stored settings directly, never the composite menu
 accessors, whose raw values follow the submenu cursor and are navigation state.
 
-Releasing every held key already left the arp side of the grid exactly where
-it was, just paused; releasing every held drum note did not, it force-forgot
-the grid every time regardless of what else was going on, so the next hit
-planted a brand new origin at that instant instead of rejoining where the
-beat already was. That is the normal, wanted behavior for a fresh performance
-note when Retrig isn't set to Clock Sync, but while the loop has the clock
-locked, armed, recording, or playing, it must not happen: a captured take
-with no quantize to mask it would show the seam as an audible timing jump
-right where the drum notes happened to gap. Forgetting the grid on release
-now only happens outside that locked state, matching what already happened
-on the arp side.
+Releasing every held key or drum note just pauses stepping and leaves the
+grid exactly where it was; a fresh note rejoins the same grid rather than
+planting a new origin. That preservation only applies while the loop has
+the clock locked: armed, recording, or playing something actually audible.
+Outside that state a fresh note is free to plant a new origin, the normal
+behavior for a performance note when Retrig isn't set to Clock Sync.
 
-"Playing" alone was too broad a reason to treat the clock as locked: an
-empty loop, or one that had just been cleared down to nothing, still
-reports `playing()` true with nothing left to actually stay in sync with, a
-mystery clock in every sense the grid-preservation fix above exists to
-avoid. `releaseSilencedMultitrackOutputs`, already called after every clear,
-undo, mute, and solo change, now also stops the transport once every track
-has lost its content, checked by track content and hidden state, not
-audibility, so muting or soloing everything into silence never trips it,
-only an actual clear does. `undoLoopTrackClear` resumes on its own whenever
-an undo makes a track audible again while stopped, since retrigger itself
-does nothing on a stopped loop, so bringing content back keeps working
-exactly as before; this pairing is what lets a genuinely empty loop go
-fully quiet, transport included, rather than sitting in a played-but-silent
-state that fools every downstream "is there a real clock" check.
+"Playing" alone is not enough to count as locked: an empty loop, or one
+that has just been cleared down to nothing, can still report `playing()`
+true with nothing left to actually stay in sync with. `releaseSilenced
+MultitrackOutputs`, already called after every clear, undo, mute, and solo
+change, also stops the transport once every track has lost its content,
+checked by track content and hidden state rather than audibility, so
+muting or soloing everything into silence never stops it, only an actual
+clear does. `undoLoopTrackClear` resumes the transport on its own whenever
+an undo is what makes a track audible again while stopped, since retrigger
+itself does nothing on a stopped loop.
 
 Arp and Drum schedulers use the measured external tempo when Clock Input is
 Follow/Client. Recorded looper event positions remain microsecond-based. Start,
@@ -151,19 +142,13 @@ history, which prevents recursive growth.
 Thru output is shared, ref-counted per output note across every source, so a
 note sounding from two places is turned off once, and remembers the channel
 it actually went out on at the moment it started, not whatever the current
-setting says, so a mid-note channel change can't strand it. That memory only
-helps if the Note Off actually reaches it: `onInputNote` compares an
-incoming message's channel against the current input channel setting before
-anything else, and a message on any other channel is forwarded raw,
-bypassing thru's claim-release step entirely. A loop note recorded while its
-channel matched the input channel still owns a thru claim by the time its
-release comes due, an arbitrary time later for a clear or undo forcing the
-release rather than the note ending on its own, so if the input channel
-setting had moved on by then, the release used to take the raw path and
-never reach the claim, leaving the note stuck sounding on the channel it was
-actually sent on. A Note Off now always tries to release a thru claim first,
-regardless of which channel path it otherwise takes; harmless for a note
-thru never claimed.
+setting says, so a mid-note channel change can't strand it. `onInputNote`
+compares an incoming message's channel against the current input channel
+setting before anything else, and a message on any other channel is
+forwarded raw; a Note Off always tries to release a thru claim first
+regardless of that, so a loop note recorded while its channel matched the
+input channel still gets released correctly even if the input channel
+setting has since moved on, harmless for a note thru never claimed.
 
 ## Arpeggiator and drums
 
@@ -304,18 +289,11 @@ depends on a single control:
   Every double tap's first press, on its own, still runs the ordinary
   single-trigger logic, since there is no way to know in advance a second
   press is coming. If the working track already has content and is playing,
-  that first press silently begins an overdub take, one that the second
-  press's recognized double tap then finishes. `finishRecording` used to
-  decide whether a pass captured anything by checking `track.count > 0`,
-  correct for a replace, which always starts from zero, but wrong for an
-  overdub onto existing content, where that count is never zero regardless of
-  whether the accidental pass added a single event. A genuinely empty
-  overdub pass therefore used to read as a completed take and silently
-  auto-advance the working track, right as the second press's own logic ran,
-  landing the clear or undo on whatever track it advanced to instead of the
-  one actually selected. The fix tracks each pass's starting count and checks
-  `track.count > recordStartCount_` instead, so an overdub that captured
-  nothing is correctly recognized as empty and never triggers the advance.
+  that first press silently begins an overdub take, which the second press's
+  recognized double tap then finishes; `finishRecording` tracks each pass's
+  starting event count and only counts it as captured if that count grew, so
+  an overdub pass that added nothing never auto-advances the working track
+  out from under the second press.
 - Auto Arm fires in exactly one place: the instant a fixed-length pass
   concludes on its own because it reached its length, inside the same check
   that already decides whether the pass captured anything. Nothing else
@@ -323,29 +301,27 @@ depends on a single control:
   Manual mode, where the working track never advances on its own, this
   continues straight into an overdub of the same track, which is itself never
   time-limited so no repeated re-trigger is needed. In Layers and Parts Auto
-  Solo it arms the track the existing auto-advance just moved to. An earlier,
-  broader version polled continuously and re-armed on every idle pass
-  regardless of history, which could never be turned off and, worse, kept
-  restarting a capture pass mid-note, which is what was leaving notes stuck on
-  the thru channel while playing over a loop.
+  Solo it arms the track the existing auto-advance just moved to.
 - Holding the encoder switch into a panic is a deliberate emergency reset, not
   just a silence: on top of the usual panic, all notes off and the transport
-  stopped, it also gives the loop a clean slate. Unlike the eye/pad's
-  stop-then-clear press and holding three buttons together, this clear is
-  one-directional on purpose: it only ever clears whatever is still live and
-  leaves an already-cleared track exactly alone, it never undoes, so there is
-  no ambiguity about which way a held panic goes. The clear runs first and
-  panic last, since panic's all-channel sweep is the most exhaustive
-  kill-everything pass there is, the one thing that has to get the final word
-  so nothing the clear stirs up can slip past it and stick. This is scoped to
-  the held gesture specifically; a mapped Feature Button panic, and the
-  panic a preset load fires on its way out, stay silence-only.
+  stopped, it also gives the loop a clean slate and puts every mapped Feature
+  Knob's value back to whatever the preset has saved (see below). Unlike the
+  eye/pad's stop-then-clear press and holding three buttons together, the
+  loop clear here is one-directional on purpose: it only ever clears whatever
+  is still live and leaves an already-cleared track exactly alone, it never
+  undoes, so there is no ambiguity about which way a held panic goes. Both
+  resets run first and panic last, since panic's all-channel sweep is the
+  most exhaustive kill-everything pass there is, the one thing that has to
+  get the final word so nothing either reset stirs up can slip past it and
+  stick. This is scoped to the held gesture and a quick tap on the PANIC
+  screen; a mapped Feature Button panic and the panic a preset load fires on
+  its way out stay silence-only.
 - A mapped Feature Knob's live value is a direct, permanent-looking edit to
   the setting; nothing marks it as a temporary override or ever un-applies
   it, so a connected controller sitting at a stale non-zero position leaves
   that value in place indefinitely, whether or not it ever gets saved into
-  the preset. Both the held encoder gesture and a quick tap on the PANIC
-  screen also put every Feature-Knob-touchable field, Velocity, Note Length,
+  the preset. Holding the encoder into a panic and a quick tap on the PANIC
+  screen both put every Feature-Knob-touchable field, Velocity, Note Length,
   Stutter, Echo, Arp Division, Drum Division, Quick Jump's channels, BPM,
   Swing, Arp Mode, Arp Velocity, Arp Length, and Arp Octaves, back to
   whatever the preset actually has saved, captured fresh on every preset
@@ -432,10 +408,9 @@ target picker, right before Back.
 - Features provides continuous CC Knobs and CC-or-note Buttons, roughly
   forty-six and eighty of them respectively, browsed as a compact six-row
   scrolling list, name and a mapped dot only, no CH/CC text, so as many rows
-  as possible fit at once instead of stepping through one at a time. Turning
-  moves the highlighted row and closes any open detail view back to the
-  list; selecting a row opens it into that detail view, name on top and its
-  full mapping below, same as before this list existed.
+  fit at once as possible. Turning moves the highlighted row and closes any
+  open detail view back to the list; selecting a row opens a detail view,
+  name on top and its full mapping below.
 - CC Map has sixteen Main-input CC remap slots.
 - Note to CC has sixteen momentary or toggle slots.
 - Parameter Lock stores the latest CC value for each note and CC pair on one
@@ -527,14 +502,11 @@ still requires the engine to be genuinely idle on top of that, so browsing
 through several screens in a row does not attempt a write after every stop
 along the way.
 
-The arp and drum scheduling grid only used to clear reactively, on the next
-note-off after everything went idle. Stopping the looper with no notes
-currently held produced no such event, so the grid lingered at a nonzero
-timestamp indefinitely, which the engine-idle check read as still running,
-permanently blocking every automatic flash write until an unrelated note
-happened to clear it. The idle release now runs every arp tick, so it
-self-heals within one pass of the looper actually going idle, and panic
-triggers it immediately rather than waiting for the next tick.
+The arp and drum scheduling grid's idle release runs every arp tick, so an
+idle looper is recognized as idle within one pass rather than depending on
+an unrelated note-off to notice, and an automatic flash write is never
+permanently blocked behind it. Panic also triggers this release immediately
+rather than waiting for the next tick.
 
 Firmware 3 does not migrate incompatible prototype preset layouts. A schema
 mismatch installs current factory defaults across all slots. This keeps boot
