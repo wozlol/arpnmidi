@@ -140,15 +140,18 @@ Ways to reach the looper without leaving the screen you are on:
 The master rec/play trigger takes a double tap from any source, the push, the
 sensor, a mapped CC, or a button:
 
-- A double tap safe clears a layer and arms it, so the part can be played again
-- A single trigger before anything is played takes that arm back off
-- Another double tap brings the cleared layer back and plays it, staying on
-  that same working track since undo restores content, it never counts as a
-  capture
-- In Layers, a double tap that lands on a track that is neither cleared nor
-  holding content steps back to the layer just recorded first. Manual and
-  Parts Auto Solo always stay on the working track, since choosing tracks
-  there belongs to the performer
+- In Layers, a double tap safe clears the working track and arms it in the
+  same motion, so the part can be played again with nothing further to
+  press. If that track is neither cleared nor holding content it steps back
+  to the layer just recorded first, because that is the one a performer means
+- In Manual and Parts Auto Solo, a double tap just safe clears the working
+  track, the same single action as any other clear there; arming again is
+  left to the performer, and the working track never changes on its own,
+  since choosing tracks there belongs to the performer
+- A single trigger before anything is played takes a pending arm back off
+- Another double tap brings a cleared track back and plays it, armed or not,
+  staying on that same working track since undo restores content, it never
+  counts as a capture
 
 Holding the encoder switch into a panic, or a quick tap on the PANIC screen,
 is a deliberate emergency reset on top of the usual all-notes-off: it also
