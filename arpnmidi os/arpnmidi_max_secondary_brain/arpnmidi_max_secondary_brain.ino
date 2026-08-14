@@ -113,6 +113,43 @@ constexpr uint32_t USB_HUB_RESET_PULSE_MS = 25;
 constexpr uint32_t USB_HUB_RESET_RELEASE_SETTLE_MS = 5;
 constexpr size_t CORE_MIDI_QUEUE_CAPACITY = 128;
 
+// The GP4/GP5 link to the main brain carries plain MIDI bytes, so these two
+// values are picked from the handful of status bytes the MIDI spec leaves
+// permanently undefined/reserved: no compliant sender, hosted device, or
+// external gear will ever produce them, so there is no message they could
+// ever collide with, and each is its own complete one-byte message, no
+// running status or data bytes to keep in sync. Both directions intercept
+// their own byte before it reaches externalMidi/sendSecondaryOutputs or the
+// main brain's own MIDI parser, so neither one ever leaks out as if it were
+// real MIDI. Must match arpnmidi_main_brain.ino exactly.
+//
+// MAIN_BRAIN_BOOT_SYNC_BYTE: sent once by the main brain right after its own
+// setup(), so a main-brain-only reboot (flashing, watchdog, brownout) always
+// gets a clean handshake even if the reset glitched a partial byte onto the
+// wire first. This side resets mainBrainParser to a fresh state on receipt,
+// same as this side's own setup() already leaves it, discarding whatever
+// stray status/data bytes were mid-flight when the reset happened rather
+// than leaving them to desync the next real message. A secondary-only
+// reboot needs no matching signal in the other direction: this side's own
+// mainBrainParser already starts fresh on its own setup(), and the main
+// brain's MIDI library resyncs on the next valid status byte the same way
+// any compliant MIDI receiver does.
+constexpr uint8_t MAIN_BRAIN_BOOT_SYNC_BYTE = 0xF4;
+// SECONDARY_BACK_COMMAND_BYTE: sent once per clean press of the GP26 button,
+// see PIN_MENU_BACK below. The main brain treats receiving it as though Back
+// or Cancel had just been selected out of whatever menu is open, one level
+// up, and does nothing if already at the top.
+constexpr uint8_t SECONDARY_BACK_COMMAND_BYTE = 0xF5;
+
+// A momentary button to GP26, idle low (external pulldown or the internal
+// one enabled below), that asks the main brain to back out of whatever menu
+// it has open. Only meaningful on the OLD_NO_MAX pin profile: GP26 is
+// PIN_MAX_INT, the MAX3421E's own interrupt line, on the NEW_MAX_PCB
+// profile, so this stays off there rather than fight over the pin.
+constexpr uint8_t PIN_MENU_BACK = 26;
+constexpr bool ENABLE_MENU_BACK_BUTTON = !ENABLE_MAX3421E_HOST;
+constexpr uint32_t MENU_BACK_DEBOUNCE_MS = 30;
+
 // Subclass to expose whether a hosted device has a host->device (OUT) endpoint.
 // Sending to a device without one targets endpoint 0 and wedges the entire
 // MAX3421E host stack after a couple seconds. Guard every SendData() with hasOut().
@@ -156,6 +193,8 @@ SerialMidiParser externalParser;
 arpnmidi3::RtQueue<CoreMidiPacket, CORE_MIDI_QUEUE_CAPACITY> maxToIoQueue;
 arpnmidi3::RtQueue<CoreMidiPacket, CORE_MIDI_QUEUE_CAPACITY> ioToMaxQueue;
 uint32_t usbHubLastResetMs = 0;
+bool menuBackPinWasHigh = false;
+uint32_t menuBackPinChangeMs = 0;
 volatile bool ioCoreReady = false;
 volatile bool maxHostReady = false;
 int8_t maxInitResult = 99;
@@ -362,8 +401,26 @@ void processSerialMidiByte(SerialMidiParser &parser, uint8_t b,
 void pumpMainBrainToUsbAndExternal() {
   while (Serial2.available() > 0) {
     const uint8_t b = static_cast<uint8_t>(Serial2.read());
+    if (b == MAIN_BRAIN_BOOT_SYNC_BYTE) {
+      // The main brain just booted and may have glitched a stray byte onto
+      // the wire during its own reset. Drop whatever this parser thought it
+      // was mid-message on rather than let it desync the next real one.
+      mainBrainParser = SerialMidiParser{};
+      continue;
+    }
     externalMidi.write(b);
     processSerialMidiByte(mainBrainParser, b, sendSecondaryOutputs);
+  }
+}
+
+void pollMenuBackButton() {
+  if (!ENABLE_MENU_BACK_BUTTON) return;
+  const bool nowHigh = digitalRead(PIN_MENU_BACK) == HIGH;
+  const uint32_t now = millis();
+  if (nowHigh != menuBackPinWasHigh && (now - menuBackPinChangeMs) > MENU_BACK_DEBOUNCE_MS) {
+    menuBackPinChangeMs = now;
+    menuBackPinWasHigh = nowHigh;
+    if (nowHigh) writeSerialMidi(Serial2, SECONDARY_BACK_COMMAND_BYTE, 0, 0, 1);
   }
 }
 
@@ -460,6 +517,15 @@ void setup() {
   Serial2.setRX(PIN_MAIN_BRAIN_MIDI_RX);
   Serial2.begin(INTER_BRAIN_MIDI_BAUD);
 
+  if (ENABLE_MENU_BACK_BUTTON) {
+    pinMode(PIN_MENU_BACK, INPUT_PULLDOWN);
+    // Read the real starting level rather than assume low, so a button
+    // already held at boot cannot read as a fresh press the instant the
+    // debounce window opens.
+    menuBackPinWasHigh = digitalRead(PIN_MENU_BACK) == HIGH;
+    menuBackPinChangeMs = millis();
+  }
+
   externalMidi.begin(EXTERNAL_MIDI_BAUD);
   __atomic_store_n(&ioCoreReady, true, __ATOMIC_RELEASE);
 }
@@ -472,6 +538,7 @@ void loop() {
   pumpQueuedMaxInputToMainBrain();
   pumpMainBrainToUsbAndExternal();
   pumpExternalToMainBrain();
+  pollMenuBackButton();
 }
 
 void setup1() {

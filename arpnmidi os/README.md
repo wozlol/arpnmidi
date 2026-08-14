@@ -60,6 +60,17 @@ The inter-brain path drains bounded batches and uses bounded queues so dense CC
 traffic cannot monopolize either musical core. The main queue reserves room for
 critical note offs.
 
+The link is plain MIDI bytes end to end, so a receiver on either side
+resyncs on the next valid status byte the same as any compliant MIDI
+parser, no framing of its own to lose track of. Two status bytes the MIDI
+spec leaves permanently undefined are reserved for signaling between the
+boards instead of forwarding as MIDI: the main brain sends one once, right
+after its own setup(), so the secondary resets its inbound parser rather
+than risk staying desynced by a stray byte a main-brain-only reboot may
+have glitched onto the wire; the secondary sends the other on a clean press
+of its own Menu Back button (see the OLD_NO_MAX pin profile below). Neither
+carries any authentication; nothing on this link needs it.
+
 ## Main-brain prototype connections
 
 - GPIO0: serial TX to the planned ESP32-C3
@@ -133,6 +144,12 @@ This is the default for the current prototype:
 - GPIO4: 1 Mbps UART TX to main GPIO5
 - GPIO5: 1 Mbps UART RX from main GPIO4
 - GPIO24: USB2514B `RESET_N`
+- GPIO26: momentary Menu Back button, idle low. A clean press sends a
+  reserved one-byte marker to the main brain over the same UART, treated
+  the same as clicking Back or Cancel out of whatever menu is open, one
+  level up, doing nothing at the top level. Only wired up on this profile:
+  GPIO26 is the MAX3421E interrupt line on the MAX PCB profile below, and
+  this button stays disabled there rather than contend for the pin.
 - MAX3421E host disabled
 
 ### `ARPNMIDI_SECONDARY_PIN_PROFILE_NEW_MAX_PCB`

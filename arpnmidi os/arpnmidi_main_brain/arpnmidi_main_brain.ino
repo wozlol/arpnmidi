@@ -89,6 +89,27 @@ constexpr uint8_t PIN_RGB_LED = 16;
 constexpr uint8_t USB_DEVICE_SOURCE_PORT = 253;
 constexpr uint32_t INTER_BRAIN_MIDI_BAUD = 1000000UL;
 
+// The GP4/GP5 link to the secondary brain carries plain MIDI bytes, so these
+// two values are picked from the handful of status bytes the MIDI spec
+// leaves permanently undefined/reserved: no compliant sender, hosted device,
+// or external gear will ever produce them, so there is no message they
+// could ever collide with, and each is its own complete one-byte message,
+// no running status or data bytes to keep in sync. Must match
+// arpnmidi_max_secondary_brain.ino exactly.
+//
+// MAIN_BRAIN_BOOT_SYNC_BYTE: sent once right after this brain's own setup(),
+// so the secondary always gets a clean handshake after a main-brain-only
+// reboot (flashing, watchdog, brownout) even if the reset glitched a stray
+// byte onto the wire first. The secondary resets its own inbound MIDI
+// parser on receipt rather than risk it staying desynced by whatever was
+// mid-flight when the reset happened.
+constexpr uint8_t MAIN_BRAIN_BOOT_SYNC_BYTE = 0xF4;
+// SECONDARY_BACK_COMMAND_BYTE: the secondary sends this once per clean press
+// of its own GP26 button. Treated the same as selecting Back or Cancel out
+// of whatever menu is currently open, one level up; does nothing if already
+// at the top. See handleMenuBackCommand.
+constexpr uint8_t SECONDARY_BACK_COMMAND_BYTE = 0xF5;
+
 constexpr uint8_t OLED_ADDR = 0x3C;
 constexpr uint8_t SCREEN_W = 128;
 constexpr uint8_t SCREEN_H = 64;
@@ -6326,6 +6347,34 @@ void cancelDirectEdit() {
   ui.dirty = true;
 }
 
+// The secondary's GP26 button asks for the same thing a physical Back or
+// Cancel click would give: one step up out of whatever is open, nothing if
+// already home. Dozens of submenus each track their own stage/cursor state
+// for exactly where "one step up" lands, too much to replicate individually
+// here without real risk of missing one, so this instead does what every
+// one of those Back paths converges on at its outermost point anyway:
+// leave the setting entirely, back to the browsing carousel. That means a
+// screen nested several stages deep (Router's channel/low/high/transpose
+// steps, for instance) jumps all the way out in one press rather than
+// stepping back one stage at a time, a deliberate trade against the size
+// and risk of hand-replicating every submenu's own notion of "back" one
+// stage at a time. A few learn-in-progress flags are cleared directly since
+// they live outside any one submenu's own state and would otherwise stay
+// stuck on after being backed out of.
+void handleMenuBackCommand() {
+  if (ui.menuMode != MENU_EDIT) return;
+  featuresLearnActive = false;
+  ccRemapLearnActive = false;
+  fourButtonLearnActive = false;
+  noteCcLearnActive = false;
+  ui.hasPendingEdit = false;
+  clearEditCancelSelection();
+  ui.menuMode = MENU_SELECT;
+  ui.deferredExitWork = true;
+  ui.dirty = true;
+  markActivity();
+}
+
 bool handleFirmware3SubmenuClick() {
   switch (ui.selectedSetting) {
     case SET_ARP_MODE:
@@ -11169,6 +11218,10 @@ void setupDinMidi() {
   DinMIDI.setHandleStop(handleDinStop);
   DinMIDI.setHandleSongSelect(handleSongSelect);
   DinMIDI.setHandleSystemExclusive(handleDinSystemExclusive);
+  // Tells the secondary this brain just booted fresh, so it resets its own
+  // inbound parser rather than risk staying desynced by a stray byte the
+  // reset itself may have glitched onto the wire.
+  DinSerial.write(MAIN_BRAIN_BOOT_SYNC_BYTE);
 }
 
 void setupUsbDeviceMidi() {
@@ -11359,6 +11412,14 @@ void loop() {
   // Drain a bounded byte batch so USB/CC bursts cannot sit behind one-byte MIDI
   // Library parsing, while still returning promptly to musical scheduling.
   for (uint8_t parsed = 0; parsed < 32 && DinSerial.available() > 0; ++parsed) {
+    // Peeked and consumed directly, ahead of the MIDI library, so it is
+    // never at the library's mercy for how an undefined status byte gets
+    // handled and never risks leaking out as if it were a real message.
+    if (DinSerial.peek() == SECONDARY_BACK_COMMAND_BYTE) {
+      DinSerial.read();
+      handleMenuBackCommand();
+      continue;
+    }
     DinMIDI.read();
   }
   pumpUsbDeviceMidiInput();

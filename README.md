@@ -330,6 +330,12 @@ The current top-level screens are:
 Feature screens use submenus with a Back item. Holding the encoder switch while
 turning changes supported numeric values in steps of ten.
 
+A momentary button on the secondary brain's GPIO26 (the OLD_NO_MAX pin
+profile only) offers the same escape from anywhere: one press backs out of
+whatever setting is open, to the main menu, and does nothing if already
+there. It steps out of the whole setting in one press rather than one
+submenu stage at a time.
+
 ## Main-brain prototype pins
 
 Use the GPIO numbers printed on the RP2040 Zero:
