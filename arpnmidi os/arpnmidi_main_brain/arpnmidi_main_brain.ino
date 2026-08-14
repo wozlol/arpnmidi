@@ -1006,40 +1006,26 @@ uint32_t perfLateMaxUsShown = 0;
 // passes through, drum roll output included since it always resolves to
 // target 0 (Main).
 uint32_t finalRefUnderflowCount = 0;
-// The live-held roll going silent doesn't move LATE, which only measures
-// time already past a due step, so the working theory is drumNextStepUs
-// itself getting computed too far into the future instead: the roll simply
-// waits, on schedule the whole time, for a step that isn't due for many
-// beats. A fresh division note press recomputes it again in
-// syncArpDivisionToGrid and, going by "it comes back without a fresh hat
-// strike," fixes it, which fits. Tracks the largest gap ever seen between
-// now and a freshly computed drumNextStepUs, in milliseconds, to confirm or
-// rule this out directly.
-uint32_t maxDrumScheduleAheadMs = 0;
-// Isolates which half of drumNextStepUs = drumGridOriginUs + drumGlobalStep
-// * stepDuration is responsible for AH: drumGlobalStep read low (under 100)
-// on hardware during a drop, well short of explaining a many-second-ahead
-// result on its own, so this checks whether drumGridOriginUs itself is the
-// part landing far ahead of now instead.
-uint32_t maxDrumOriginAheadMs = 0;
-// Snapshotted at the exact tick maxDrumScheduleAheadMs is set, since DV was
-// a live read on the panic screen and this display has real, established
-// lag: a live read could easily show a value from well after the moment
-// that actually mattered. These are guaranteed to be the true state at the
-// moment things went wrong, not whatever the screen happened to catch.
-uint32_t drumGlobalStepAtWorstAh = 0;
-uint8_t drumDivisionAtWorstAh = 0;
-// AH/GS/DV together show a real, consistent per-step duration behind the
-// far-ahead result (AH/GS lines up with the current division's actual step
-// length both times), and OA rules out the origin being pushed ahead of
-// now. That leaves drumGlobalStep itself being too large for how little
-// time has passed since the origin currently in use, which only makes
-// sense if the origin was re-established recently while the step count
-// carried over from before it. This counts every time tickArp's
-// "drumNextStepUs == 0" branch runs at all, expected exactly once, at the
-// very first drum key of an unbroken hold, and never again until it's
-// truly released.
-uint32_t drumOriginEstablishCount = 0;
+// The PANIC screen's scrolling log of every incoming Note or CC, in the
+// raw hex bytes it arrived as, oldest at the top and newest pushed in at
+// the bottom, so a fresh line's arrival visually scrolls the rest up.
+// Ring-buffered rather than a growing list: only the last kMidiLogCapacity
+// entries are ever worth having on a screen this size.
+struct MidiLogEntry {
+  uint8_t status;
+  uint8_t data1;
+  uint8_t data2;
+};
+constexpr uint8_t kMidiLogCapacity = 6;
+MidiLogEntry midiLog[kMidiLogCapacity];
+uint8_t midiLogNext = 0;
+uint8_t midiLogCount = 0;
+
+void pushMidiLogEntry(uint8_t status, uint8_t data1, uint8_t data2) {
+  midiLog[midiLogNext] = MidiLogEntry{status, data1, data2};
+  midiLogNext = static_cast<uint8_t>((midiLogNext + 1) % kMidiLogCapacity);
+  if (midiLogCount < kMidiLogCapacity) ++midiLogCount;
+}
 bool presetStorageDirty = false;
 uint32_t presetStorageDirtyMs = 0;
 uint32_t tapTempoLastMs = 0;
@@ -8012,6 +7998,10 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
     lastIncomingStatus = status;
     lastIncomingData1 = data1;
     lastIncomingData2 = data2;
+    const uint8_t rawType = status & 0xF0;
+    if (rawType == 0x90 || rawType == 0x80 || rawType == 0xB0) {
+      pushMidiLogEntry(status, data1, data2);
+    }
   }
   const uint8_t type = status & 0xF0;
   uint8_t channel = (status & 0x0F) + 1;
@@ -8314,7 +8304,6 @@ void tickArp() {
   }
   if (drumNextStepUs == 0 || nowUs >= drumNextStepUs) {
     if (drumNextStepUs == 0) {
-      ++drumOriginEstablishCount;
       if (arpNextStepUs != 0) {
         // The arp started this phrase and is the boss. Drums follow its
         // origin with their own division.
@@ -8349,26 +8338,6 @@ void tickArp() {
       ++drumGlobalStep;
       drumNextStepUs = swungGridTimeUs(drumGridOriginUs, drumGlobalStep, drumDivision);
     }
-  }
-  if (drumNextStepUs > nowUs) {
-    const uint32_t aheadMs = static_cast<uint32_t>(
-        min<uint64_t>((drumNextStepUs - nowUs) / 1000ULL, UINT32_MAX));
-    if (aheadMs > maxDrumScheduleAheadMs) {
-      // DV is a live read on the panic screen, and this display has real
-      // lag (established earlier this session), so it can easily show a
-      // value from well after the moment that actually mattered. Snapshot
-      // drumGlobalStep and drumDivision right here, at the exact tick the
-      // worst-ever AH is recorded, so what shows on screen is guaranteed
-      // to be the real state at the moment things went wrong.
-      maxDrumScheduleAheadMs = aheadMs;
-      drumGlobalStepAtWorstAh = drumGlobalStep;
-      drumDivisionAtWorstAh = drumDivision;
-    }
-  }
-  if (drumGridOriginUs > nowUs) {
-    const uint32_t originAheadMs = static_cast<uint32_t>(
-        min<uint64_t>((drumGridOriginUs - nowUs) / 1000ULL, UINT32_MAX));
-    if (originAheadMs > maxDrumOriginAheadMs) maxDrumOriginAheadMs = originAheadMs;
   }
 }
 
@@ -10434,15 +10403,45 @@ void drawScaleMenuScreen() {
 // happens, so they can be read at leisure well after the gesture that
 // produced them, not chased live. Restore the normal PANIC diagnostics
 // (DIN/LAST/TX/LOOP/HIST/CLK/S/FS status) once this is resolved.
+// Six rows of the last incoming Notes/CCs (oldest at the top, so a fresh
+// arrival visually scrolls the rest up), plus two rows of overload/memory
+// counters below: TX is the secondary brain's own outgoing queue
+// (depth/high-water/dropped/critical-dropped), LP is the loop event pool's
+// overflow count, MEM is free heap, FR/HO are two more silent-loss counters
+// worth having on hand, final-output ref underflows and rolling-history
+// overwrites.
 void drawPanicScreen() {
-  display.setTextSize(2);
+  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.print(F("AH")); display.print(maxDrumScheduleAheadMs);
-  display.setCursor(0, 16);
-  display.print(F("GS")); display.print(drumGlobalStepAtWorstAh);
-  display.setCursor(0, 32);
-  display.print(F("RE")); display.print(drumOriginEstablishCount);
+  const uint8_t startIdx = (midiLogCount < kMidiLogCapacity) ? 0 : midiLogNext;
+  for (uint8_t row = 0; row < kMidiLogCapacity; ++row) {
+    display.setCursor(0, row * 6);
+    if (row >= midiLogCount) continue;
+    const uint8_t idx = static_cast<uint8_t>((startIdx + row) % kMidiLogCapacity);
+    const MidiLogEntry &e = midiLog[idx];
+    if (e.status < 0x10) display.print('0');
+    display.print(e.status, HEX);
+    display.print(' ');
+    if (e.data1 < 0x10) display.print('0');
+    display.print(e.data1, HEX);
+    display.print(' ');
+    if (e.data2 < 0x10) display.print('0');
+    display.print(e.data2, HEX);
+  }
+
+  display.setCursor(0, 36);
+  display.print(F("TX")); display.print(secondaryTxDepth());
+  display.print(F(" H")); display.print(secondaryTxHighWater);
+  display.print(F(" D")); display.print(secondaryTxDropped);
+  if (secondaryTxCriticalDropped) {
+    display.print(F(" C")); display.print(secondaryTxCriticalDropped);
+  }
+  display.print(F(" LP")); display.print(multitrackLooper.overflowCount());
+
+  display.setCursor(0, 42);
+  display.print(F("MEM")); display.print(rp2040.getFreeHeap() / 1024U);
+  display.print(F("K FR")); display.print(finalRefUnderflowCount);
+  display.print(F(" HO")); display.print(rollingHistory.overwrittenCount());
 }
 
 void drawDrumMagicScreen() {
