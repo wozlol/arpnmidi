@@ -1049,6 +1049,8 @@ void pushMidiLogEntry(uint8_t status, uint8_t data1, uint8_t data2) {
 }
 bool presetStorageDirty = false;
 uint32_t presetStorageDirtyMs = 0;
+uint32_t storageEngineBusyMs = 0;
+constexpr uint32_t STORAGE_QUIET_WINDOW_MS = 5000UL;
 uint32_t tapTempoLastMs = 0;
 uint32_t tapTempoIntervals[4];
 uint8_t tapTempoIntervalCount = 0;
@@ -1155,6 +1157,8 @@ uint8_t heldSorted[MAX_HELD_NOTES];
 uint8_t heldCount = 0;
 uint8_t arpHeldSorted[MAX_HELD_NOTES];
 uint8_t arpHeldCount = 0;
+uint8_t arpChordSorted[MAX_HELD_NOTES];
+uint8_t arpChordCount = 0;
 uint8_t heldDrumCount = 0;
 int8_t currentBassSource = -1;
 int8_t currentBassOutNote = -1;
@@ -4248,9 +4252,15 @@ bool storageWriteEngineIdle() {
          heldDrumCount == 0 && !arpAnyPlaybackActive();
 }
 
+// "Quiet" means continuously quiet: the busy latch (refreshed every loop
+// iteration) restarts the five-second wait the instant anything musical
+// happens, so a write can never land in the short gap between audition
+// phrases just because the engine happened to be idle at that exact moment.
 bool storageWriteReady(uint32_t dirtySinceMs, uint32_t minimumPendingMs) {
   if (storageWriteAlwaysBlocked() || !storageWriteEngineIdle()) return false;
-  return millis() - dirtySinceMs >= minimumPendingMs;
+  const uint32_t now = millis();
+  if (now - storageEngineBusyMs < STORAGE_QUIET_WINDOW_MS) return false;
+  return now - dirtySinceMs >= minimumPendingMs;
 }
 
 void markLoopStorageDirty() {
@@ -4313,7 +4323,7 @@ void pollUiScreenPersistence() {
 void pollPresetStoragePersistence() {
   if (!presetStorageDirty || ui.deferredExitWork || !littleFsReady) return;
   if (millis() < storageRetryHoldUntilMs) return;
-  if (!storageWriteReady(presetStorageDirtyMs, 750UL)) return;
+  if (!storageWriteReady(presetStorageDirtyMs, STORAGE_QUIET_WINDOW_MS)) return;
   saveStorage();
 }
 
@@ -4321,7 +4331,7 @@ void pollExtendedPresetPersistence() {
   if (!extendedPresetDirty || chordLearnActive || customArpLearning ||
       ui.deferredExitWork || !littleFsReady) return;
   if (millis() < storageRetryHoldUntilMs) return;
-  if (!storageWriteReady(extendedPresetDirtyMs, 750UL)) return;
+  if (!storageWriteReady(extendedPresetDirtyMs, STORAGE_QUIET_WINDOW_MS)) return;
   if (savePresetLearnedContent(storage.currentPreset)) extendedPresetDirty = false;
 }
 
@@ -5428,7 +5438,7 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       break;
     case SET_FORCE_SCALE:
       if (!scaleUi.editing) scaleUi.cursor = clampU8(value, 0, 13);
-      else settings.forceScale = clampU8(value, 0, FORCE_SCALE_COUNT - 1);
+      else settings.forceScale = clampU8(value, SCALE_MAJOR, FORCE_SCALE_COUNT - 1);
       break;
     case SET_GUITAR_PIANO: settings.instrumentView = clampU8(value, 0, 1); break;
     case SET_LIVE_CC:
@@ -5541,7 +5551,10 @@ void sanitizeSettings(Settings &s) {
   s.sensorMode = clampU8(s.sensorMode, 0, SENSOR_MODE_COUNT - 1);
   s.pushMode = clampU8(s.pushMode, 0, SENSOR_MODE_COUNT - 1);
   s.forceKey = clampU8(s.forceKey, 0, 24);
-  s.forceScale = clampU8(s.forceScale, 0, FORCE_SCALE_COUNT - 1);
+  // Scale OFF is retired: Key OFF alone disables the key/scale system, so a
+  // preset stored before the change lands on the Minor default instead.
+  if (s.forceScale == SCALE_OFF) s.forceScale = SCALE_MINOR;
+  s.forceScale = clampU8(s.forceScale, SCALE_MAJOR, FORCE_SCALE_COUNT - 1);
   if (ckeyEnabledForValue(s.forceKey) && scaleIsCombo(s.forceScale)) s.forceScale = SCALE_MAJOR;
   s.instrumentView = clampU8(s.instrumentView, 0, 1);
   s.loadPreset = clampU8(s.loadPreset, 0, PRESET_COUNT - 1);
@@ -6087,7 +6100,7 @@ Settings defaultSettings() {
   s.sensorMode = SENSOR_OFF;
   s.pushMode = SENSOR_OFF;
   s.forceKey = 0;
-  s.forceScale = SCALE_OFF;
+  s.forceScale = SCALE_MINOR;
   s.instrumentView = 0;
   s.loadPreset = 0;
   s.savePreset = 0;
@@ -6190,7 +6203,7 @@ void applySettingDelta(int delta, bool fastStep) {
       }
       next = constrain(candidate, 1, maxValue);
     } else {
-      next = constrain(next, 1, maxValue);
+      next = wrapIndex(next - 1, maxValue) + 1;
     }
   }
   else next = wrapIndex(next, maxValue + 1);
@@ -6441,7 +6454,7 @@ bool handleFirmware3SubmenuClick() {
     case SET_FORCE_SCALE:
       if (scaleUi.editing) {
         if (cancelSelectedFor(SET_FORCE_SCALE)) {
-          settings.forceScale = clampU8(submenuEditBackupValue, 0, FORCE_SCALE_COUNT - 1);
+          settings.forceScale = clampU8(submenuEditBackupValue, SCALE_MAJOR, FORCE_SCALE_COUNT - 1);
         }
         scaleUi.editing = false;
         finishSubmenuParameterEdit();
@@ -7640,6 +7653,10 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
 }
 
 bool processFeatureCc(uint8_t channel, uint8_t cc, uint8_t value) {
+  // Feature Knobs and Feature Buttons are both live performance control:
+  // triggering one resets with the preset and never writes to it. Only the
+  // mapping itself (which CC/note a knob or button listens on) persists,
+  // through the normal menu edit-commit path, not from here.
   bool matched = false;
   for (uint8_t id = 0; id < FEATURE_KNOB_COUNT; ++id) {
     const FeatureKnobBinding &binding = featureControls.knobs[id];
@@ -7659,7 +7676,6 @@ bool processFeatureCc(uint8_t channel, uint8_t cc, uint8_t value) {
     }
     matched = true;
   }
-  if (matched) saveStorageIfAuto();
   return matched;
 }
 
@@ -7827,7 +7843,6 @@ bool processFeatureNote(uint8_t channel, uint8_t note, bool pressed) {
       matched = true;
     }
   }
-  if (matched) saveStorageIfAuto();
   return matched;
 }
 
@@ -8110,30 +8125,30 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
 
 
 int8_t arpModeNextIndex() {
-  if (arpHeldCount == 0) return -1;
+  if (arpChordCount == 0) return -1;
   const uint8_t mode = classicArpModeFromSelection(currentArpSelection());
   const uint32_t phase = arpSequenceStep;
   switch (mode) {
     case ARP_UP:
-      return phase % arpHeldCount;
+      return phase % arpChordCount;
     case ARP_DOWN:
-      return arpHeldCount - 1 - (phase % arpHeldCount);
+      return arpChordCount - 1 - (phase % arpChordCount);
     case ARP_UPDOWN1: {
-      if (arpHeldCount == 1) return 0;
-      const uint8_t period = (arpHeldCount * 2) - 2;
+      if (arpChordCount == 1) return 0;
+      const uint8_t period = (arpChordCount * 2) - 2;
       const uint8_t position = phase % period;
-      return (position < arpHeldCount) ? position : period - position;
+      return (position < arpChordCount) ? position : period - position;
     }
     case ARP_UPDOWN2: {
-      if (arpHeldCount == 1) return 0;
-      const uint8_t period = arpHeldCount * 2;
+      if (arpChordCount == 1) return 0;
+      const uint8_t period = arpChordCount * 2;
       const uint8_t position = phase % period;
-      return (position < arpHeldCount) ? position : period - 1 - position;
+      return (position < arpChordCount) ? position : period - 1 - position;
     }
     case ARP_TRIGGER:
       return 0;
     case ARP_RANDOM:
-      return random(arpHeldCount);
+      return random(arpChordCount);
     case ARP_OFF:
     default:
       return -1;
@@ -8165,11 +8180,36 @@ void arpAddSingleOutput(uint8_t note) {
   sendFanout(255, 0x90 | ((actualCh - 1) & 0x0F), note, currentArpVelocitySetting());
 }
 
-void arpAddOutput(uint8_t note) {
-  uint8_t notes[4];
-  const uint8_t count = buildChordNotes(note, notes);
-  for (uint8_t i = 0; i < count && activeArpCount < MAX_ARP_OUTPUT_NOTES; ++i) {
-    arpAddSingleOutput(notes[i]);
+// Chord mode expands the arp's INPUT, not its output: holding one key with a
+// chord configured is the same as holding every chord tone, so the pattern
+// walks through them instead of restriking the whole chord as a block on
+// every step. Rebuilt fresh each step so chord/key/scale edits made while
+// notes are held apply immediately.
+void rebuildArpChordNotes() {
+  arpChordCount = 0;
+  if (!firmware3Settings.chordEnabled) {
+    for (uint8_t i = 0; i < arpHeldCount; ++i) arpChordSorted[arpChordCount++] = arpHeldSorted[i];
+    return;
+  }
+  for (uint8_t i = 0; i < arpHeldCount; ++i) {
+    uint8_t notes[4];
+    const uint8_t count = buildChordNotes(arpHeldSorted[i], notes);
+    for (uint8_t j = 0; j < count && arpChordCount < MAX_HELD_NOTES; ++j) {
+      bool duplicate = false;
+      for (uint8_t k = 0; k < arpChordCount; ++k) duplicate |= arpChordSorted[k] == notes[j];
+      if (!duplicate) arpChordSorted[arpChordCount++] = notes[j];
+    }
+  }
+  if (!firmware3Settings.arpNoteOrder) {
+    for (uint8_t i = 1; i < arpChordCount; ++i) {
+      const uint8_t value = arpChordSorted[i];
+      uint8_t insert = i;
+      while (insert > 0 && arpChordSorted[insert - 1] > value) {
+        arpChordSorted[insert] = arpChordSorted[insert - 1];
+        --insert;
+      }
+      arpChordSorted[insert] = value;
+    }
   }
 }
 
@@ -8205,7 +8245,8 @@ void runArpStep() {
   const uint8_t arpSelection = currentArpSelection();
   const uint8_t arpPattern = patternFromArpSelection(arpSelection);
   const uint8_t arpMode = classicArpModeFromSelection(arpSelection);
-  const bool mainArpEnabled = channelEnabled(mainArpOutChannel()) && arpMode != ARP_OFF && arpHeldCount > 0;
+  rebuildArpChordNotes();
+  const bool mainArpEnabled = channelEnabled(mainArpOutChannel()) && arpMode != ARP_OFF && arpChordCount > 0;
   if (!mainArpEnabled) {
     arpNoteOffs();
     return;
@@ -8225,9 +8266,9 @@ void runArpStep() {
 
   if (mainArpEnabled && (token.noteIndex == TOK_ALL || arpMode == ARP_TRIGGER)) {
     for (uint8_t octave = 0; octave < firmware3Settings.arpOctaves; ++octave) {
-      for (uint8_t i = 0; i < arpHeldCount && activeArpCount < MAX_ARP_OUTPUT_NOTES; ++i) {
-        const int note = static_cast<int>(arpHeldSorted[i]) + octave * 12;
-        if (note <= 127) arpAddOutput(quantizeUp(note));
+      for (uint8_t i = 0; i < arpChordCount && activeArpCount < MAX_ARP_OUTPUT_NOTES; ++i) {
+        const int note = static_cast<int>(arpChordSorted[i]) + octave * 12;
+        if (note <= 127) arpAddSingleOutput(quantizeUp(note));
       }
     }
   } else if (mainArpEnabled) {
@@ -8235,13 +8276,13 @@ void runArpStep() {
     if (idx == TOK_MODE || arpPattern == PAT_MODE || arpPattern == PAT_RANDOM) {
       idx = arpModeNextIndex();
     }
-    if (idx >= 0 && arpHeldCount > 0) {
-      const uint8_t base = arpHeldSorted[idx % arpHeldCount];
-      const uint8_t octave = (arpSequenceStep / max<uint8_t>(1, arpHeldCount)) %
+    if (idx >= 0 && arpChordCount > 0) {
+      const uint8_t base = arpChordSorted[idx % arpChordCount];
+      const uint8_t octave = (arpSequenceStep / max<uint8_t>(1, arpChordCount)) %
                              max<uint8_t>(1, firmware3Settings.arpOctaves);
       int note = base + token.semitoneOffset + ((token.octaveOffset + octave) * 12);
       note = constrain(note, 0, 127);
-      arpAddOutput(quantizeUp(note));
+      arpAddSingleOutput(quantizeUp(note));
     }
   }
 
@@ -9310,8 +9351,12 @@ bool isRootPc(uint8_t pc, int16_t keyValue = -1) {
 
 void drawGuitarView() {
   bool mask[12];
-  const int16_t key = (ui.selectedSetting == SET_FORCE_KEY) ? effectiveSettingValue(SET_FORCE_KEY) : settings.forceKey;
-  const int16_t scale = (ui.selectedSetting == SET_FORCE_SCALE) ? effectiveSettingValue(SET_FORCE_SCALE) : settings.forceScale;
+  // Always the stored key and scale: on the scale screen effectiveSettingValue
+  // returns the submenu CURSOR while browsing, and feeding a row index into
+  // the mask as a scale id lit every note. Live preview still works because
+  // scrolling the scale value writes settings.forceScale directly.
+  const int16_t key = settings.forceKey;
+  const int16_t scale = settings.forceScale;
   buildScaleMask(mask, key, scale);
   for (uint8_t s = 0; s < 6; ++s) display.drawLine(0, 4 + s * 7, 127, 4 + s * 7, SSD1306_WHITE);
   display.drawLine(5, 0, 5, 42, SSD1306_WHITE);
@@ -9352,8 +9397,8 @@ void drawGuitarView() {
 
 void drawPianoView() {
   bool mask[12];
-  const int16_t key = (ui.selectedSetting == SET_FORCE_KEY) ? effectiveSettingValue(SET_FORCE_KEY) : settings.forceKey;
-  const int16_t scale = (ui.selectedSetting == SET_FORCE_SCALE) ? effectiveSettingValue(SET_FORCE_SCALE) : settings.forceScale;
+  const int16_t key = settings.forceKey;
+  const int16_t scale = settings.forceScale;
   buildScaleMask(mask, key, scale);
   const uint8_t whiteMap[7] = {0, 2, 4, 5, 7, 9, 11};
   for (uint8_t i = 0; i < 7; ++i) {
@@ -11451,6 +11496,7 @@ void loop() {
     ui.dirty = true;  // the panic overlay covers every screen, so always redraw
   }
   processDeferredUiActions();
+  if (!storageWriteEngineIdle()) storageEngineBusyMs = millis();
   pollPresetStoragePersistence();
   pollLoopStoragePersistence();
   pollExtendedPresetPersistence();
