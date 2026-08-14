@@ -1029,6 +1029,17 @@ uint32_t maxDrumOriginAheadMs = 0;
 // moment things went wrong, not whatever the screen happened to catch.
 uint32_t drumGlobalStepAtWorstAh = 0;
 uint8_t drumDivisionAtWorstAh = 0;
+// AH/GS/DV together show a real, consistent per-step duration behind the
+// far-ahead result (AH/GS lines up with the current division's actual step
+// length both times), and OA rules out the origin being pushed ahead of
+// now. That leaves drumGlobalStep itself being too large for how little
+// time has passed since the origin currently in use, which only makes
+// sense if the origin was re-established recently while the step count
+// carried over from before it. This counts every time tickArp's
+// "drumNextStepUs == 0" branch runs at all, expected exactly once, at the
+// very first drum key of an unbroken hold, and never again until it's
+// truly released.
+uint32_t drumOriginEstablishCount = 0;
 bool presetStorageDirty = false;
 uint32_t presetStorageDirtyMs = 0;
 uint32_t tapTempoLastMs = 0;
@@ -8298,6 +8309,7 @@ void tickArp() {
   }
   if (drumNextStepUs == 0 || nowUs >= drumNextStepUs) {
     if (drumNextStepUs == 0) {
+      ++drumOriginEstablishCount;
       if (arpNextStepUs != 0) {
         // The arp started this phrase and is the boss. Drums follow its
         // origin with their own division.
@@ -10425,7 +10437,7 @@ void drawPanicScreen() {
   display.setCursor(0, 16);
   display.print(F("GS")); display.print(drumGlobalStepAtWorstAh);
   display.setCursor(0, 32);
-  display.print(F("DV")); display.print(drumDivisionAtWorstAh);
+  display.print(F("RE")); display.print(drumOriginEstablishCount);
 }
 
 void drawDrumMagicScreen() {
