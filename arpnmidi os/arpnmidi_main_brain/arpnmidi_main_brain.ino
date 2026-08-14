@@ -1022,6 +1022,13 @@ uint32_t maxDrumScheduleAheadMs = 0;
 // result on its own, so this checks whether drumGridOriginUs itself is the
 // part landing far ahead of now instead.
 uint32_t maxDrumOriginAheadMs = 0;
+// Snapshotted at the exact tick maxDrumScheduleAheadMs is set, since DV was
+// a live read on the panic screen and this display has real, established
+// lag: a live read could easily show a value from well after the moment
+// that actually mattered. These are guaranteed to be the true state at the
+// moment things went wrong, not whatever the screen happened to catch.
+uint32_t drumGlobalStepAtWorstAh = 0;
+uint8_t drumDivisionAtWorstAh = 0;
 bool presetStorageDirty = false;
 uint32_t presetStorageDirtyMs = 0;
 uint32_t tapTempoLastMs = 0;
@@ -8329,7 +8336,17 @@ void tickArp() {
   if (drumNextStepUs > nowUs) {
     const uint32_t aheadMs = static_cast<uint32_t>(
         min<uint64_t>((drumNextStepUs - nowUs) / 1000ULL, UINT32_MAX));
-    if (aheadMs > maxDrumScheduleAheadMs) maxDrumScheduleAheadMs = aheadMs;
+    if (aheadMs > maxDrumScheduleAheadMs) {
+      // DV is a live read on the panic screen, and this display has real
+      // lag (established earlier this session), so it can easily show a
+      // value from well after the moment that actually mattered. Snapshot
+      // drumGlobalStep and drumDivision right here, at the exact tick the
+      // worst-ever AH is recorded, so what shows on screen is guaranteed
+      // to be the real state at the moment things went wrong.
+      maxDrumScheduleAheadMs = aheadMs;
+      drumGlobalStepAtWorstAh = drumGlobalStep;
+      drumDivisionAtWorstAh = drumDivision;
+    }
   }
   if (drumGridOriginUs > nowUs) {
     const uint32_t originAheadMs = static_cast<uint32_t>(
@@ -10459,15 +10476,17 @@ void drawPanicScreen() {
 
   display.setCursor(0, 36);
   display.print(F("AH")); display.print(maxDrumScheduleAheadMs);
-  display.print(F(" GS")); display.print(drumGlobalStep);
+  // GS and DV are snapshotted from the exact tick AH last got worse, not
+  // read live, since a live read on this screen can land well after the
+  // moment that actually mattered.
+  display.print(F(" GS")); display.print(drumGlobalStepAtWorstAh);
 
   // Temporarily standing in for the FS status line while the drum roll
-  // schedule investigation needs the room: DV is currentDrumDivisionSetting's
-  // live return value, OA is the largest gap ever seen between now and
-  // drumGridOriginUs itself, isolating whether the origin or the step count
-  // is what's landing far ahead when AH spikes.
+  // schedule investigation needs the room. OA is the largest gap ever seen
+  // between now and drumGridOriginUs itself, isolating whether the origin
+  // or the step count is what's landing far ahead when AH spikes.
   display.setCursor(0, 42);
-  display.print(F("DV")); display.print(currentDrumDivisionSetting());
+  display.print(F("DV")); display.print(drumDivisionAtWorstAh);
   display.print(F(" OA")); display.print(maxDrumOriginAheadMs);
 }
 
