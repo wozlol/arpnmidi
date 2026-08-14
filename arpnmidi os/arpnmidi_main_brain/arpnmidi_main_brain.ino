@@ -10409,85 +10409,23 @@ void drawScaleMenuScreen() {
   drawSubmenuField(name, included ? "INCLUDED" : "OMITTED", false);
 }
 
+// Temporarily replaces the normal diagnostics layout entirely for the drum
+// roll schedule investigation: three large, unhurried lines instead of a
+// dense multi-line readout, since none of AH/GS/DV need to be caught within
+// any particular window. All three are sticky, only ever overwritten by a
+// strictly worse event, snapshotted together at the exact tick that
+// happens, so they can be read at leisure well after the gesture that
+// produced them, not chased live. Restore the normal PANIC diagnostics
+// (DIN/LAST/TX/LOOP/HIST/CLK/S/FS status) once this is resolved.
 void drawPanicScreen() {
-  const bool confirmed = static_cast<int32_t>(panicConfirmedUntilMs - millis()) > 0;
-  // Eight lines packed into SETTING_AREA_H's 48px at 6px each, not the usual
-  // 8px pitch: moveRenderedSettingArea only shifts raw y < SETTING_AREA_H
-  // into view, and its target range then overwrites whatever already sat at
-  // that y, so anything drawn past 47 here was silently clobbered before it
-  // ever reached the screen, never actually visible on real hardware since
-  // the OLED DMA/shift rework.
-  //
-  // This main brain has no USB host input, only DIN and the secondary
-  // brain's UART, so nothing here distinguishes a USB source anymore. RISK/
-  // OK used to summarize secondaryTxDropped, secondaryTxCriticalDropped,
-  // and the loop overflow count as one derived flag, all three of which are
-  // already shown plainly on the TX and LOOP lines below, so it said
-  // nothing a glance at those didn't already say. PASS (worst single loop()
-  // pass) is dropped the same way: LATE already answers the "is the
-  // scheduler keeping up" question this screen exists to answer, and every
-  // line here has to earn its 6px now that DR/HC need one too.
-  display.setTextSize(1);
+  display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
-  if (confirmed) display.print(F("PANIC SENT  "));
-  display.print(F("DIN ")); display.print(dinIncomingMessageCount);
-
-  display.setCursor(0, 6);
-  display.print(F("LAST "));
-  if (lastIncomingStatus < 0x10) display.print('0');
-  display.print(lastIncomingStatus, HEX);
-  display.print(' ');
-  if (lastIncomingData1 < 0x10) display.print('0');
-  display.print(lastIncomingData1, HEX);
-  display.print(' ');
-  if (lastIncomingData2 < 0x10) display.print('0');
-  display.print(lastIncomingData2, HEX);
-
-  display.setCursor(0, 12);
-  display.print(F("TX ")); display.print(secondaryTxDepth());
-  display.print(F(" H")); display.print(secondaryTxHighWater);
-  display.print(F(" D")); display.print(secondaryTxDropped);
-  if (secondaryTxCriticalDropped) {
-    display.print(F(" !")); display.print(secondaryTxCriticalDropped);
-  }
-
-  display.setCursor(0, 18);
-  display.print(F("LOOP ")); display.print(multitrackLooper.usedEvents());
-  display.print('/'); display.print(arpnmidi3::kLoopEventPoolSize);
-  display.print(F(" O")); display.print(multitrackLooper.overflowCount());
-
-  display.setCursor(0, 24);
-  display.print(F("HIST ")); display.print(rollingHistory.size());
-  display.print('/'); display.print(arpnmidi3::kRollingHistoryCapacity);
-  display.print(F(" O")); display.print(rollingHistory.overwrittenCount());
-
-  display.setCursor(0, 30);
-  if (firmware3Settings.clockInFollow) {
-    const uint32_t age = musicalClock.lastExternalClockAgeMs(time_us_64());
-    display.print(F("CLK "));
-    if (age == UINT32_MAX) display.print(F("NONE"));
-    else { display.print(age); display.print(F("ms")); }
-  } else display.print(F("CLK INT"));
-  display.print(F(" S"));
-  if (presetStorageDirty) display.print('P');
-  if (loopStorageDirty) display.print('L');
-  if (extendedPresetDirty) display.print('E');
-
-  display.setCursor(0, 36);
   display.print(F("AH")); display.print(maxDrumScheduleAheadMs);
-  // GS and DV are snapshotted from the exact tick AH last got worse, not
-  // read live, since a live read on this screen can land well after the
-  // moment that actually mattered.
-  display.print(F(" GS")); display.print(drumGlobalStepAtWorstAh);
-
-  // Temporarily standing in for the FS status line while the drum roll
-  // schedule investigation needs the room. OA is the largest gap ever seen
-  // between now and drumGridOriginUs itself, isolating whether the origin
-  // or the step count is what's landing far ahead when AH spikes.
-  display.setCursor(0, 42);
+  display.setCursor(0, 16);
+  display.print(F("GS")); display.print(drumGlobalStepAtWorstAh);
+  display.setCursor(0, 32);
   display.print(F("DV")); display.print(drumDivisionAtWorstAh);
-  display.print(F(" OA")); display.print(maxDrumOriginAheadMs);
 }
 
 void drawDrumMagicScreen() {
