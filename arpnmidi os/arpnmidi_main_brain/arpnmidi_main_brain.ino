@@ -1016,7 +1016,7 @@ struct MidiLogEntry {
   uint8_t data1;
   uint8_t data2;
 };
-constexpr uint8_t kMidiLogCapacity = 6;
+constexpr uint8_t kMidiLogCapacity = 5;
 MidiLogEntry midiLog[kMidiLogCapacity];
 uint8_t midiLogNext = 0;
 uint8_t midiLogCount = 0;
@@ -10403,7 +10403,7 @@ void drawScaleMenuScreen() {
 // happens, so they can be read at leisure well after the gesture that
 // produced them, not chased live. Restore the normal PANIC diagnostics
 // (DIN/LAST/TX/LOOP/HIST/CLK/S/FS status) once this is resolved.
-// Six rows of the last incoming Notes/CCs (oldest at the top, so a fresh
+// Five rows of the last incoming Notes/CCs (oldest at the top, so a fresh
 // arrival visually scrolls the rest up), plus two rows of overload/memory
 // counters below: TX is the secondary brain's own outgoing queue
 // (depth/high-water/dropped/critical-dropped), LP is the loop event pool's
@@ -10429,7 +10429,7 @@ void drawPanicScreen() {
     display.print(e.data2, HEX);
   }
 
-  display.setCursor(0, 36);
+  display.setCursor(0, 30);
   display.print(F("TX")); display.print(secondaryTxDepth());
   display.print(F(" H")); display.print(secondaryTxHighWater);
   display.print(F(" D")); display.print(secondaryTxDropped);
@@ -10438,7 +10438,7 @@ void drawPanicScreen() {
   }
   display.print(F(" LP")); display.print(multitrackLooper.overflowCount());
 
-  display.setCursor(0, 42);
+  display.setCursor(0, 36);
   display.print(F("MEM")); display.print(rp2040.getFreeHeap() / 1024U);
   display.print(F("K FR")); display.print(finalRefUnderflowCount);
   display.print(F(" HO")); display.print(rollingHistory.overwrittenCount());
