@@ -3209,8 +3209,19 @@ void restartArpFromNewKeyPhrase() {
 }
 
 // Called whenever a division might have moved, which a drum roll does on every
-// press and release. Each half only re-grids when its own next step actually
-// lands somewhere new, so rolling drums leaves the arp's timing untouched.
+// press and release. The recomputed step index and next-step time are stored
+// unconditionally: when nothing moved they recompute to exactly the values
+// already there, so the write is a no-op, and rolling drums still leaves the
+// arp's timing untouched. Storing only when the TIME changed, the old guard,
+// silently kept a stale step index whenever a division change happened to
+// land where the old and new grids coincide: releasing a 1/32 roll note
+// exactly on a 16th grid point (every even 32nd step, so right on the beat)
+// recomputed the same next-step time from half the index, skipped the
+// store, and left a 32nd-unit index counting against a 16th-unit grid. The
+// very next step then scheduled index * stepUs with the doubled index,
+// landing seconds in the future, and the roll sat silent until real time
+// caught up to it or the next division change recomputed at a moment where
+// the grids did not coincide.
 void syncArpDivisionToGrid() {
   const uint64_t now = time_us_64();
   if (arpNextStepUs != 0) {
@@ -3221,11 +3232,8 @@ void syncArpDivisionToGrid() {
       const uint64_t stepUs = max<uint64_t>(1, musicalDurationUs(kDivisionPulseSteps[division]));
       uint32_t boundary = static_cast<uint32_t>((now - arpGridOriginUs) / stepUs);
       while (swungGridTimeUs(arpGridOriginUs, boundary, division) < now) ++boundary;
-      const uint64_t nextUs = swungGridTimeUs(arpGridOriginUs, boundary, division);
-      if (nextUs != arpNextStepUs) {
-        arpGlobalStep = boundary;
-        arpNextStepUs = nextUs;
-      }
+      arpGlobalStep = boundary;
+      arpNextStepUs = swungGridTimeUs(arpGridOriginUs, boundary, division);
     }
   }
 
@@ -3245,11 +3253,8 @@ void syncArpDivisionToGrid() {
   while (swungGridTimeUs(drumGridOriginUs, drumBoundary, drumDivision) < now) {
     ++drumBoundary;
   }
-  const uint64_t drumNextUs = swungGridTimeUs(drumGridOriginUs, drumBoundary, drumDivision);
-  if (drumNextUs != drumNextStepUs) {
-    drumGlobalStep = drumBoundary;
-    drumNextStepUs = drumNextUs;
-  }
+  drumGlobalStep = drumBoundary;
+  drumNextStepUs = swungGridTimeUs(drumGridOriginUs, drumBoundary, drumDivision);
 }
 
 void releaseArpPassthroughClaim(uint8_t sourcePort, uint8_t inNote) {
