@@ -11180,19 +11180,15 @@ void processDeferredUiActions() {
       }
     }
     if (storage.autoSave) {
-      // The click that leaves a screen is a deliberate, one-shot commitment,
-      // not a repeating background trigger, so it always attempts the save
-      // rather than waiting for a playing loop to go quiet: the compare-skip
-      // makes an unchanged setting free, and a real change pays one visible
-      // pause exactly when the performer asked for it, loop playing or not.
-      // Recording is the one state still worth deferring, since a stall
-      // landing inside a take is a genuinely bad moment for one.
-      if (storageWriteAlwaysBlocked()) {
-        presetStorageDirty = true;
-        presetStorageDirtyMs = millis();
-      } else {
-        saveStorage();
-      }
+      // The click that leaves a screen used to always save right then, but
+      // that fights the same five-second quiet window every other edit
+      // respects: stepping out of one submenu into another, auditioning
+      // values along the way, kept landing a real flash write between
+      // clicks. Exiting now just marks dirty like any other commit and
+      // leaves it to the deferred poll, so it only writes once things have
+      // actually gone quiet.
+      presetStorageDirty = true;
+      presetStorageDirtyMs = millis();
     }
   }
 
