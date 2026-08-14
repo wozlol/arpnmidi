@@ -1016,7 +1016,7 @@ struct MidiLogEntry {
   uint8_t data1;
   uint8_t data2;
 };
-constexpr uint8_t kMidiLogCapacity = 5;
+constexpr uint8_t kMidiLogCapacity = 4;
 MidiLogEntry midiLog[kMidiLogCapacity];
 uint8_t midiLogNext = 0;
 uint8_t midiLogCount = 0;
@@ -10403,33 +10403,35 @@ void drawScaleMenuScreen() {
 // happens, so they can be read at leisure well after the gesture that
 // produced them, not chased live. Restore the normal PANIC diagnostics
 // (DIN/LAST/TX/LOOP/HIST/CLK/S/FS status) once this is resolved.
-// Five rows of the last incoming Notes/CCs (oldest at the top, so a fresh
-// arrival visually scrolls the rest up), plus two rows of overload/memory
-// counters below: TX is the secondary brain's own outgoing queue
-// (depth/high-water/dropped/critical-dropped), LP is the loop event pool's
-// overflow count, MEM is free heap, FR/HO are two more silent-loss counters
-// worth having on hand, final-output ref underflows and rolling-history
-// overwrites.
+// Four rows of the last incoming Notes/CCs (oldest at the top, so a fresh
+// arrival visually scrolls the rest up), channel first, then NT or CC and
+// its number, then the value, all in decimal rather than hex. Plus two rows
+// of overload/memory counters below: TX is the secondary brain's own
+// outgoing queue (depth/high-water/dropped/critical-dropped), LP is the
+// loop event pool's overflow count, MEM is free heap, FR/HO are two more
+// silent-loss counters worth having on hand, final-output ref underflows
+// and rolling-history overwrites. Six rows at 8px pitch, the usual line
+// height for this font: 6px, used before, is a pixel short of this font's
+// own 7px glyph height and rows visibly overlapped.
 void drawPanicScreen() {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   const uint8_t startIdx = (midiLogCount < kMidiLogCapacity) ? 0 : midiLogNext;
   for (uint8_t row = 0; row < kMidiLogCapacity; ++row) {
-    display.setCursor(0, row * 6);
+    display.setCursor(0, row * 8);
     if (row >= midiLogCount) continue;
-    const uint8_t idx = static_cast<uint8_t>((startIdx + row) % kMidiLogCapacity);
-    const MidiLogEntry &e = midiLog[idx];
-    if (e.status < 0x10) display.print('0');
-    display.print(e.status, HEX);
-    display.print(' ');
-    if (e.data1 < 0x10) display.print('0');
-    display.print(e.data1, HEX);
-    display.print(' ');
-    if (e.data2 < 0x10) display.print('0');
-    display.print(e.data2, HEX);
+    const MidiLogEntry &e = midiLog[static_cast<uint8_t>((startIdx + row) % kMidiLogCapacity)];
+    const uint8_t type = e.status & 0xF0;
+    display.print(F("CH")); display.print((e.status & 0x0F) + 1);
+    if (type == 0xB0) {
+      display.print(F(" CC")); display.print(e.data1);
+    } else {
+      display.print(F(" NT")); display.print(e.data1);
+    }
+    display.print(F(" V")); display.print(e.data2);
   }
 
-  display.setCursor(0, 30);
+  display.setCursor(0, 32);
   display.print(F("TX")); display.print(secondaryTxDepth());
   display.print(F(" H")); display.print(secondaryTxHighWater);
   display.print(F(" D")); display.print(secondaryTxDropped);
@@ -10438,7 +10440,7 @@ void drawPanicScreen() {
   }
   display.print(F(" LP")); display.print(multitrackLooper.overflowCount());
 
-  display.setCursor(0, 36);
+  display.setCursor(0, 40);
   display.print(F("MEM")); display.print(rp2040.getFreeHeap() / 1024U);
   display.print(F("K FR")); display.print(finalRefUnderflowCount);
   display.print(F(" HO")); display.print(rollingHistory.overwrittenCount());
