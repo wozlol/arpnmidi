@@ -448,8 +448,8 @@ target picker, right before Back.
   mistaken for the normal delayed-click-goes-back path. Browsing past
   Features without having entered it shows whichever CC Knob or Button was
   mapped most recently, name and mapping, rather than this screen's own
-  list state, plus a reminder that double-clicking a row exits to the main
-  menu; if nothing has been mapped yet this boot it prompts to map one
+  list state, plus a "Push-Turn Deletes" reminder about the hold-and-turn
+  gesture; if nothing has been mapped yet this boot it prompts to map one
   instead, word-wrapped rather than trusting the display's own wrap to
   never split a word. None of this is persisted; the mappings themselves
   already are, and this summary is not worth remembering on top of that.

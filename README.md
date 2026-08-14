@@ -224,9 +224,9 @@ end with the target picker.
   instead, showing CLEARED! for a second before closing back to the list
 - Browsing past Features without opening it shows whichever CC Knob or
   Button was mapped most recently, or a prompt to map one if nothing has
-  been this boot, plus a reminder that double-clicking a row exits to the
-  main menu. Not persisted; this summary isn't worth remembering across
-  a reboot, the mappings themselves already are.
+  been this boot, plus a "Push-Turn Deletes" reminder about the hold-and-
+  turn gesture above. Not persisted; this summary isn't worth remembering
+  across a reboot, the mappings themselves already are.
 - Per-target mappings for live effects and looper controls
 - Separate Arp and Drum division mappings
 - Sixteen Main-input CC-to-channel/CC remap slots

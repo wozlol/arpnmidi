@@ -9835,7 +9835,7 @@ void drawFeaturesScreen() {
       const uint8_t lines =
           printFeaturesWrapped(F("Map CCs & Notes to Actions"), 0, 6, 9);
       display.setCursor(0, 6 + lines * 9);
-      display.print(F("Double-click to exit"));
+      display.print(F("Push-Turn Deletes"));
       return;
     }
     display.setCursor(0, 6);
@@ -9854,7 +9854,7 @@ void drawFeaturesScreen() {
       display.print(F(" CC ")); display.print(binding.cc);
     }
     display.setCursor(0, 24);
-    display.print(F("Double-click to exit"));
+    display.print(F("Push-Turn Deletes"));
     return;
   }
   if (featuresUiStage == FEATURES_UI_GROUPS) {
