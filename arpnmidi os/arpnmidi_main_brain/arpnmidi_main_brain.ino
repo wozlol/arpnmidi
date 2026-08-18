@@ -273,6 +273,10 @@ enum RouterEditStage : uint8_t {
   ROUTER_STAGE_TRANSPOSE
 };
 
+// Shared between the Features list's own draw scrolling and its hold-turn
+// step size, so a fast turn never jumps further than one screenful.
+constexpr uint8_t FEATURES_LIST_VISIBLE_ROWS = 6;
+
 enum FeaturesUiStage : uint8_t {
   FEATURES_UI_GROUPS = 0,
   FEATURES_UI_KNOBS,
@@ -422,12 +426,22 @@ constexpr uint8_t LIVE_TARGET_COUNT = 5;  // Main plus Looper Tracks 1-4.
 // and stay bound to LIVE_TARGET_COUNT, untouched.
 constexpr uint8_t SELECTD_LIVE_TARGET = LIVE_TARGET_COUNT;            // = 5
 constexpr uint8_t STUTTER_ECHO_TARGET_COUNT = LIVE_TARGET_COUNT + 1;  // = 6
+// Stutter and Echo's own Target field additionally lets MAIN narrow itself to
+// one MIDI channel instead of everything, so its value space is not just the
+// STUTTER_ECHO_TARGET_COUNT array index: selector 0 is MAIN, 1-16 are MAIN
+// scoped to that channel, then Loop 1-4 and SELECTD follow exactly as before.
+// Only MAIN's slot (array index 0) actually reads the channel half of this;
+// Loop tracks and SELECTD ignore it entirely.
+constexpr uint8_t TARGET_SELECTOR_COUNT = 16 + STUTTER_ECHO_TARGET_COUNT;  // = 22
 // Off, then every straight/dotted/triplet division from 1/4 down through
 // 1/64T, the same order and range the main Division list uses on its short
 // end, just without the 1/2 and 1/1 the looper never needed anything looser
 // than a quarter note for.
 constexpr uint8_t LOOP_QUANTIZE_DIVISION_COUNT = DIVISION_COUNT - DIV_1_4;  // 14
-constexpr uint8_t STUTTER_BUTTON_DIVISION_COUNT = 6;
+// DIV_1_2D through DIV_1_64T: straight, dotted, and triplet for every
+// division stutter's own buttons cover, one unbroken run in DivisionId so
+// FEATURE_BUTTON_STUTTER_DIV_BASE offsets can index straight off DIV_1_2D.
+constexpr uint8_t STUTTER_BUTTON_DIVISION_COUNT = DIVISION_COUNT - DIV_1_2D;  // 18
 // Stutter shares the rolling capture engine with Time Travel. Its long choices
 // are meter-aware bars, followed by the ordinary musical divisions from long
 // to short so a mapped knob moves from 8 bars toward 1/64T.
@@ -520,7 +534,13 @@ enum FeatureButtonId : uint8_t {
   // Quick Jump is already on and already pointed there, turns it back off
   // without forgetting that output channel for next time.
   FEATURE_BUTTON_QUICK_JUMP_CH_BASE,
-  FEATURE_BUTTON_COUNT = FEATURE_BUTTON_QUICK_JUMP_CH_BASE + 16
+  // Appended last, same reason as Quick Jump above: these replicate the two
+  // built-in four-physical-button mode sets (LOOPER, CHORD MEMORY) one
+  // position at a time, so a single mapped CC or note can reach one
+  // button's action without occupying the physical button itself.
+  FEATURE_BUTTON_4B_LOOP_BASE = FEATURE_BUTTON_QUICK_JUMP_CH_BASE + 16,
+  FEATURE_BUTTON_4B_CHORD_BASE = FEATURE_BUTTON_4B_LOOP_BASE + 4,
+  FEATURE_BUTTON_COUNT = FEATURE_BUTTON_4B_CHORD_BASE + 4
 };
 
 enum TriggerBindingKind : uint8_t {
@@ -685,8 +705,8 @@ enum SensorModeId : uint8_t {
   SENSOR_PARAM_MINUS3,
   SENSOR_PARAM_FULL,
   SENSOR_DIV3,
-  SENSOR_VEL_DOWN,
-  SENSOR_LEN_DOWN,
+  SENSOR_ARP_VEL_DOWN,
+  SENSOR_ARP_LEN_DOWN,
   SENSOR_ARP_LATCH,
   SENSOR_ARP_LATCH_PLUS,
   SENSOR_ARP_FREEZE,
@@ -723,6 +743,18 @@ enum SensorModeId : uint8_t {
   SENSOR_LOOP_TRIGGER,
   SENSOR_LOOP_REC_PLAY,
   SENSOR_LOOP_STOP_DELETE,
+  // Appended last, same reason as the QUICK_JUMP_CH block elsewhere: no
+  // existing sensor/push mode's stored numeric value shifts.
+  SENSOR_ARP_VEL_UP,
+  SENSOR_ARP_LEN_UP,
+  SENSOR_VEL_DOWN,
+  SENSOR_VEL_UP,
+  SENSOR_LEN_DOWN,
+  SENSOR_LEN_UP,
+  SENSOR_STUTTER,
+  SENSOR_ECHO_WET,
+  SENSOR_ECHO_TIME,
+  SENSOR_ECHO_LENGTH,
   SENSOR_MODE_COUNT
 };
 
@@ -809,6 +841,13 @@ struct Firmware3Settings {
   uint8_t routerLowNotes[16];
   uint8_t routerHighNotes[16];
   LiveTargetSettings liveTargets[STUTTER_ECHO_TARGET_COUNT];
+  // Only meaningful for the MAIN target (index 0). Bit (ch-1) set = that
+  // channel feeds Main's Stutter/Echo; every other channel still passes
+  // through untouched. 0 = MAIN, no filter, apply to everything routed
+  // there, same as before this existed. Loop track and SELECTD targets
+  // never consult this, so they always apply to their own track regardless.
+  uint16_t mainStutterChannelMask;
+  uint16_t mainEchoChannelMask;
 };
 
 // The file is a small header followed by one complete record per preset slot.
@@ -1290,6 +1329,12 @@ uint8_t liveVelocityTarget = 0;
 uint8_t liveNoteLengthTarget = 0;
 uint8_t stutterTarget = 0;
 uint8_t echoTarget = 0;
+// Pure UI navigation: where the Target field's turn-cursor currently sits
+// within the Main/channel area (0 = MAIN, 1-16 = that channel), independent
+// of which channels are actually toggled into mainStutter/EchoChannelMask.
+// Runtime only, never saved.
+uint8_t stutterChannelCursor = 0;
+uint8_t echoChannelCursor = 0;
 uint8_t liveCcCursor = 0;
 uint8_t liveCcNumber = 1;
 uint8_t liveCcValue = 0;
@@ -1406,12 +1451,14 @@ const char *const kForceScaleNames[FORCE_SCALE_COUNT] = {
 
 const char *const kSensorModeNames[SENSOR_MODE_COUNT] = {
   "OFF", "DIV +2", "DIV -2", "DIV +3", "DIV -3", "DIV FULL", "DIV3",
-  "VEL DOWN", "LEN DOWN", "ARP LATCH", "ARP LATCH+", "ARP FREEZE", "ARP FREEZ+",
+  "ARP VEL \x19", "ARP LEN \x19", "ARP LATCH", "ARP LATCH+", "ARP FREEZE", "ARP FREEZ+",
   "PITCH UP", "PITCH DOWN", "NOTES C0", "NOTES C1", "NOTES C2", "NOTES C3",
   "NOTES C4", "NOTES C5", "NOTES C6", "NOTES C7",
   "CC 1", "CC 2", "CC 3", "CC 4", "CC 5", "CC 6", "CC 7", "CC 8", "CC 9",
   "CC 10", "CC 11", "CC 12", "CC 13", "CC 14", "CC 15", "CC 16", "CC 17", "CC 18", "CC 19",
-  "CC103", "Loop Rec/\nPlay/Over", "Loop Stop/\nDelete"
+  "CC103", "Loop Rec/\nPlay/Over", "Loop Stop/\nDelete",
+  "ARP VEL \x18", "ARP LEN \x18", "VEL DOWN", "VEL UP", "LEN DOWN", "LEN UP",
+  "STUTTER", "ECHO WET", "ECHO TIME", "ECHO LEN"
 };
 
 const char *const kNoteNames[12] = {
@@ -2248,11 +2295,22 @@ void emitEchoEvent(void *, uint8_t target, const arpnmidi3::LoopMidiEvent &event
   sendTargetFinal(target, 255, event.status, event.data1, event.data2);
 }
 
+// Mask 0 = MAIN/no filter, matches every channel. Otherwise only channels
+// with their bit set match, so several channels can share Main's Stutter or
+// Echo at once (e.g. every channel a Round Robin spread lands notes on).
+bool mainTargetChannelMatches(uint16_t channelMask, uint8_t status) {
+  if (channelMask == 0) return true;
+  const uint8_t channel = (status & 0x0FU) + 1U;
+  return (channelMask & (1U << (channel - 1U))) != 0;
+}
+
 void processPostStutterEvent(uint8_t target, uint8_t sourcePort,
                              const arpnmidi3::LoopMidiEvent &event) {
   const uint8_t type = event.status & 0xF0;
   const LiveTargetSettings &targetSettings = firmware3Settings.liveTargets[target];
-  if (targetSettings.echoEnabled && (type == 0x90 || type == 0x80)) {
+  const bool echoChannelOk = target != 0 ||
+      mainTargetChannelMatches(firmware3Settings.mainEchoChannelMask, event.status);
+  if (targetSettings.echoEnabled && echoChannelOk && (type == 0x90 || type == 0x80)) {
     if (type == 0x90 && event.data2 > 0) {
       echoEngine.noteOn(time_us_64(), target, event.status, event.data1, event.data2,
                         echoConfigForTarget(target));
@@ -2287,7 +2345,13 @@ void processSelectdEcho(const arpnmidi3::LoopMidiEvent &event) {
 
 void emitNoteLengthEvent(void *, uint8_t target, uint8_t sourcePort,
                          const arpnmidi3::LoopMidiEvent &event) {
-  rollingHistory.push(time_us_64(), HISTORY_OUTPUT_TARGET_BASE + target, event);
+  // A channel-filtered Main target only ever captures the matching channel,
+  // so Stutter can never repeat what it was never allowed to hear.
+  const bool stutterChannelOk = target != 0 ||
+      mainTargetChannelMatches(firmware3Settings.mainStutterChannelMask, event.status);
+  if (stutterChannelOk) {
+    rollingHistory.push(time_us_64(), HISTORY_OUTPUT_TARGET_BASE + target, event);
+  }
   if (!stutterRepeaters[target].active()) {
     processPostStutterEvent(target, sourcePort, event);
   }
@@ -3081,17 +3145,27 @@ uint8_t applyDownByPercent(uint8_t base, uint8_t pct, uint8_t floorValue) {
   return constrain(map(pct, 0, 100, base, floorValue), floorValue, base);
 }
 
+uint8_t applyUpByPercent(uint8_t base, uint8_t pct, uint8_t ceilingValue) {
+  return constrain(map(pct, 0, 100, base, ceilingValue), base, ceilingValue);
+}
+
 uint8_t currentArpVelocitySetting() {
   const uint8_t base = constrain(getSettingValueRaw(SET_VELOCITY), 1, 127);
   if (firmware3Settings.mainAftertouchArpVelocity) {
     return max<uint8_t>(1, mainAftertouchPressure);
   }
   uint8_t value = base;
-  if (sensorRt.inRange && settings.sensorMode == SENSOR_VEL_DOWN) {
+  if (sensorRt.inRange && settings.sensorMode == SENSOR_ARP_VEL_DOWN) {
     value = min<uint8_t>(value, applyDownByPercent(base, sensorPercent(), 1));
   }
-  if (pushRt.inRange && settings.pushMode == SENSOR_VEL_DOWN) {
+  if (pushRt.inRange && settings.pushMode == SENSOR_ARP_VEL_DOWN) {
     value = min<uint8_t>(value, applyDownByPercent(base, pushRt.pct, 1));
+  }
+  if (sensorRt.inRange && settings.sensorMode == SENSOR_ARP_VEL_UP) {
+    value = max<uint8_t>(value, applyUpByPercent(base, sensorPercent(), 127));
+  }
+  if (pushRt.inRange && settings.pushMode == SENSOR_ARP_VEL_UP) {
+    value = max<uint8_t>(value, applyUpByPercent(base, pushRt.pct, 127));
   }
   return value;
 }
@@ -3099,11 +3173,17 @@ uint8_t currentArpVelocitySetting() {
 uint8_t currentArpLengthPctSetting() {
   const uint8_t base = constrain(getSettingValueRaw(SET_LENGTH), 1, 100);
   uint8_t value = base;
-  if (sensorRt.inRange && settings.sensorMode == SENSOR_LEN_DOWN) {
+  if (sensorRt.inRange && settings.sensorMode == SENSOR_ARP_LEN_DOWN) {
     value = min<uint8_t>(value, applyDownByPercent(base, sensorPercent(), 1));
   }
-  if (pushRt.inRange && settings.pushMode == SENSOR_LEN_DOWN) {
+  if (pushRt.inRange && settings.pushMode == SENSOR_ARP_LEN_DOWN) {
     value = min<uint8_t>(value, applyDownByPercent(base, pushRt.pct, 1));
+  }
+  if (sensorRt.inRange && settings.sensorMode == SENSOR_ARP_LEN_UP) {
+    value = max<uint8_t>(value, applyUpByPercent(base, sensorPercent(), 100));
+  }
+  if (pushRt.inRange && settings.pushMode == SENSOR_ARP_LEN_UP) {
+    value = max<uint8_t>(value, applyUpByPercent(base, pushRt.pct, 100));
   }
   return value;
 }
@@ -4252,14 +4332,23 @@ bool storageWriteEngineIdle() {
          heldDrumCount == 0 && !arpAnyPlaybackActive();
 }
 
-// "Quiet" means continuously quiet: the busy latch (refreshed every loop
-// iteration) restarts the five-second wait the instant anything musical
-// happens, so a write can never land in the short gap between audition
-// phrases just because the engine happened to be idle at that exact moment.
+// "Quiet" means continuously quiet, on two fronts. The busy latch (refreshed
+// every loop iteration) restarts the five-second wait the instant anything
+// musical happens, so a write can never land in the short gap between
+// audition phrases just because the engine happened to be idle at that exact
+// moment. But browsing a menu with nothing playing is ALSO "the engine idle"
+// by that check alone, and clicking through several fields in a row, each
+// one a deliberate action seconds apart while reading the screen, kept
+// landing a write in the gap between clicks. ui.lastActivityMs already
+// tracks every button press, encoder turn, and note in or out (it is what
+// the screen saver times out against), so it doubles as the second front:
+// no write while the performer, not just the engine, has touched anything
+// in the last five seconds either.
 bool storageWriteReady(uint32_t dirtySinceMs, uint32_t minimumPendingMs) {
   if (storageWriteAlwaysBlocked() || !storageWriteEngineIdle()) return false;
   const uint32_t now = millis();
   if (now - storageEngineBusyMs < STORAGE_QUIET_WINDOW_MS) return false;
+  if (now - ui.lastActivityMs < STORAGE_QUIET_WINDOW_MS) return false;
   return now - dirtySinceMs >= minimumPendingMs;
 }
 
@@ -4796,7 +4885,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (stutterUi.cursor == 0) return STUTTER_LENGTH_COUNT - STUTTER_LENGTH_MIN_SELECTION;
       if (stutterUi.cursor == 1) return 1;
       if (stutterUi.cursor == 2) return 17;
-      return STUTTER_ECHO_TARGET_COUNT;
+      return TARGET_SELECTOR_COUNT;
     case SET_ECHO:
       if (!echoUi.editing) return 6;
       if (echoUi.cursor == 0) return STUTTER_LENGTH_COUNT;
@@ -4804,7 +4893,7 @@ int16_t settingRangeMax(uint8_t settingId) {
       if (echoUi.cursor == 2) return 101;
       if (echoUi.cursor == 3) return STUTTER_LENGTH_COUNT;
       if (echoUi.cursor == 4) return 33;
-      return STUTTER_ECHO_TARGET_COUNT;
+      return TARGET_SELECTOR_COUNT;
     case SET_DIVISION: return ARP_DIVISION_FOLLOW_DRUM;
     case SET_VELOCITY: return 127;
     case SET_LENGTH: return 100;
@@ -4937,7 +5026,7 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       }
       if (stutterUi.cursor == 1) return firmware3Settings.liveTargets[stutterTarget].stutterEnabled;
       if (stutterUi.cursor == 2) return firmware3Settings.stutterTimeoutBars;
-      return stutterTarget;
+      return targetSelectorEncode(stutterTarget, stutterChannelCursor);
     case SET_ECHO:
       if (!echoUi.editing) return echoUi.cursor;
       if (echoUi.cursor == 0) return firmware3Settings.liveTargets[echoTarget].echoLength;
@@ -4945,7 +5034,7 @@ int16_t getSettingValueRaw(uint8_t settingId) {
       if (echoUi.cursor == 2) return firmware3Settings.liveTargets[echoTarget].echoWet;
       if (echoUi.cursor == 3) return firmware3Settings.liveTargets[echoTarget].echoDelay;
       if (echoUi.cursor == 4) return firmware3Settings.liveTargets[echoTarget].echoDrift + 16;
-      return echoTarget;
+      return targetSelectorEncode(echoTarget, echoChannelCursor);
     case SET_DIVISION: return settings.division;
     case SET_VELOCITY: return settings.arpVelocity;
     case SET_LENGTH: return settings.arpLengthPct;
@@ -5192,7 +5281,8 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
               STUTTER_LENGTH_MIN_SELECTION);
       else if (stutterUi.cursor == 1) requestStutterState(stutterTarget, value != 0);
       else if (stutterUi.cursor == 2) firmware3Settings.stutterTimeoutBars = clampU8(value, 1, 16);
-      else stutterTarget = clampU8(value, 0, STUTTER_ECHO_TARGET_COUNT - 1);
+      else targetSelectorDecode(clampU8(value, 0, TARGET_SELECTOR_COUNT - 1),
+          stutterTarget, stutterChannelCursor);
       break;
     case SET_ECHO:
       if (!echoUi.editing) echoUi.cursor = clampU8(value, 0, 6);
@@ -5202,7 +5292,8 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       else if (echoUi.cursor == 3) firmware3Settings.liveTargets[echoTarget].echoDelay = clampU8(value, 0, STUTTER_LENGTH_COUNT - 1);
       else if (echoUi.cursor == 4) firmware3Settings.liveTargets[echoTarget].echoDrift =
           constrain(static_cast<int>(value) - 16, -16, 16);
-      else echoTarget = clampU8(value, 0, STUTTER_ECHO_TARGET_COUNT - 1);
+      else targetSelectorDecode(clampU8(value, 0, TARGET_SELECTOR_COUNT - 1),
+          echoTarget, echoChannelCursor);
       break;
     case SET_DIVISION:
       settings.division = clampU8(value, 0, ARP_DIVISION_FOLLOW_DRUM);
@@ -5629,6 +5720,8 @@ Firmware3Settings defaultFirmware3Settings() {
     target.echoDelay = lengthSelectionForDivision(DIV_1_8);
     target.echoDrift = 0;
   }
+  s.mainStutterChannelMask = 0;
+  s.mainEchoChannelMask = 0;
   return s;
 }
 
@@ -5706,6 +5799,7 @@ void sanitizeFirmware3Settings(Firmware3Settings &s) {
     target.echoDelay = clampU8(target.echoDelay, 0, STUTTER_LENGTH_COUNT - 1);
     target.echoDrift = constrain(static_cast<int>(target.echoDrift), -16, 16);
   }
+  // No clamp needed: every bit of a uint16_t is a valid channel 1-16.
 }
 
 constexpr const char *DEVICE_STATE_PATH = "/state.f3";
@@ -6137,7 +6231,11 @@ void applySettingDelta(int delta, bool fastStep) {
   if (id == SET_FOUR_BUTTON && fourButtonUiStage == FOUR_BUTTON_UI_CUSTOM_NUMBER) {
     fourButtonLearnActive = false;
   }
-  const int fast = fastStep ? 10 : 1;
+  // The Features Knobs/Buttons lists scroll a screenful at a time on a held
+  // turn instead of the usual flat 10, so a fast spin never overshoots past
+  // what was last visible.
+  const bool featuresListPaging = id == SET_MAP_CC && featuresUiStage != FEATURES_UI_GROUPS;
+  const int fast = fastStep ? (featuresListPaging ? FEATURES_LIST_VISIBLE_ROWS : 10) : 1;
   const int step = delta * fast;
   const int oldValue = cancelSelectedFor(id)
       ? settingRangeMax(id)
@@ -6353,6 +6451,40 @@ bool finishSubmenuOrEdit(SubmenuUiState &state, uint8_t backCursor) {
   return true;
 }
 
+// The Target field's click means two different things depending on where
+// the turn-cursor sits: on a channel (1-16) it toggles that channel into
+// Main's mask and the field stays open, same as ticking a checkbox, so
+// several channels can be picked in one sitting; on MAIN it clears the mask;
+// on anything else (Loop 1-4, SELECTD, Cancel) it behaves exactly like every
+// other field's click, handled by the generic finishSubmenuOrEdit.
+bool handleStutterTargetClick() {
+  if (stutterUi.editing && stutterUi.cursor == 3 && !cancelSelectedFor(SET_STUTTER)) {
+    if (stutterTarget == 0 && stutterChannelCursor >= 1 && stutterChannelCursor <= 16) {
+      firmware3Settings.mainStutterChannelMask ^=
+          static_cast<uint16_t>(1U << (stutterChannelCursor - 1U));
+      markActivity(false);
+      ui.dirty = true;
+      return true;
+    }
+    if (stutterTarget == 0) firmware3Settings.mainStutterChannelMask = 0;
+  }
+  return finishSubmenuOrEdit(stutterUi, 4);
+}
+
+bool handleEchoTargetClick() {
+  if (echoUi.editing && echoUi.cursor == 5 && !cancelSelectedFor(SET_ECHO)) {
+    if (echoTarget == 0 && echoChannelCursor >= 1 && echoChannelCursor <= 16) {
+      firmware3Settings.mainEchoChannelMask ^=
+          static_cast<uint16_t>(1U << (echoChannelCursor - 1U));
+      markActivity(false);
+      ui.dirty = true;
+      return true;
+    }
+    if (echoTarget == 0) firmware3Settings.mainEchoChannelMask = 0;
+  }
+  return finishSubmenuOrEdit(echoUi, 6);
+}
+
 void cancelDirectEdit() {
   ui.hasPendingEdit = false;
   ui.menuMode = MENU_SELECT;
@@ -6414,8 +6546,8 @@ bool handleFirmware3SubmenuClick() {
       return true;
     case SET_LIVE_VELOCITY: return finishSubmenuOrEdit(liveVelocityUi, 3);
     case SET_LIVE_NOTE_LENGTH: return finishSubmenuOrEdit(liveNoteLengthUi, 3);
-    case SET_STUTTER: return finishSubmenuOrEdit(stutterUi, 4);
-    case SET_ECHO: return finishSubmenuOrEdit(echoUi, 6);
+    case SET_STUTTER: return handleStutterTargetClick();
+    case SET_ECHO: return handleEchoTargetClick();
     case SET_QUICK_JUMP: return finishSubmenuOrEdit(quickJumpUi, 4);
     case SET_DRUM_MAGIC: return finishSubmenuOrEdit(drumMagicUi, 7);
     case SET_BASS_CH: return finishSubmenuOrEdit(bassUi, 3);
@@ -7252,7 +7384,13 @@ void releaseDuplicateInputNote(uint8_t sourcePort, uint8_t note) {
 void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t velocity, bool on,
                  bool recordForLoop) {
   const bool splitDrumInput = channel1 == 0;
-  const bool channel10DrumInput = arpChannelSpecialMode() && !arpChannelSplitMode() && channel1 == 10;
+  // Any note on the drum output channel is a drum hit, live or replayed from
+  // the loop, whether Drum Magic's current input mode is native channel 10
+  // or Keysplit: a drum hit always gets stored in the loop on that channel
+  // regardless of which classified it, so a replayed loop event needs to
+  // come back in as a drum hit exactly the same way it went out as one.
+  const bool channel10DrumInput = arpChannelSpecialMode() &&
+      channel1 == firmware3Settings.drumOutputChannel;
   if (splitDrumInput || channel10DrumInput) {
     if (recordForLoop) {
       recordLoopNote(sourcePort, firmware3Settings.drumOutputChannel, note, velocity, on);
@@ -7423,6 +7561,57 @@ void requestStutterState(uint8_t target, bool enabled, int16_t lengthSelection) 
   ui.dirty = true;
 }
 
+// Shared by the Stutter/Echo Feature Knobs and their sensor-mode equivalents,
+// so a sensor drives a target exactly like turning the matching knob would.
+// A 0-127 value of 0 always means off, matching Stutter's own convention.
+void applyStutterValue(uint8_t target, uint8_t value) {
+  if (target >= LIVE_TARGET_COUNT) return;
+  if (value == 0) {
+    requestStutterState(target, false);
+  } else {
+    const uint8_t lengthSelection = static_cast<uint8_t>(
+        (static_cast<uint16_t>(value - 1U) * (STUTTER_LENGTH_COUNT - 1U) + 63U) /
+        126U);
+    requestStutterState(target, true, lengthSelection);
+  }
+}
+
+void applyEchoWetValue(uint8_t target, uint8_t value) {
+  if (target >= LIVE_TARGET_COUNT) return;
+  LiveTargetSettings &live = firmware3Settings.liveTargets[target];
+  live.echoWet = static_cast<uint8_t>((static_cast<uint16_t>(value) * 100U + 63U) / 127U);
+  live.echoEnabled = value != 0;
+  ui.dirty = true;
+}
+
+void applyEchoLengthValue(uint8_t target, uint8_t value) {
+  if (target >= LIVE_TARGET_COUNT) return;
+  LiveTargetSettings &live = firmware3Settings.liveTargets[target];
+  live.echoLength = static_cast<uint8_t>(
+      (static_cast<uint16_t>(value) * (STUTTER_LENGTH_COUNT - 1U) + 63U) / 127U);
+  live.echoEnabled = value != 0;
+  ui.dirty = true;
+}
+
+void applyEchoDelayValue(uint8_t target, uint8_t value) {
+  if (target >= LIVE_TARGET_COUNT) return;
+  LiveTargetSettings &live = firmware3Settings.liveTargets[target];
+  live.echoDelay = static_cast<uint8_t>(
+      (static_cast<uint16_t>(value) * (STUTTER_LENGTH_COUNT - 1U) + 63U) / 127U);
+  live.echoEnabled = value != 0;
+  ui.dirty = true;
+}
+
+void applyEchoDriftValue(uint8_t target, uint8_t value) {
+  if (target >= LIVE_TARGET_COUNT) return;
+  // Drift's own value 0 is maximum negative drift, not "no drift", so unlike
+  // wet/length/delay it never doubles as an off switch.
+  firmware3Settings.liveTargets[target].echoDrift = value <= 64
+      ? -static_cast<int8_t>((static_cast<uint16_t>(64U - value) * 16U + 32U) / 64U)
+      : static_cast<int8_t>((static_cast<uint16_t>(value - 64U) * 16U + 31U) / 63U);
+  ui.dirty = true;
+}
+
 void applyFeatureKnob(uint8_t id, uint8_t value) {
   uint8_t target = featureTargetFromBlock(id, FEATURE_KNOB_VELOCITY_BASE);
   if (target < LIVE_TARGET_COUNT) {
@@ -7442,44 +7631,27 @@ void applyFeatureKnob(uint8_t id, uint8_t value) {
   }
   target = featureTargetFromBlock(id, FEATURE_KNOB_STUTTER_BASE);
   if (target < LIVE_TARGET_COUNT) {
-    if (value == 0) {
-      requestStutterState(target, false);
-    } else {
-      const uint8_t lengthSelection = static_cast<uint8_t>(
-          (static_cast<uint16_t>(value - 1U) * (STUTTER_LENGTH_COUNT - 1U) + 63U) /
-          126U);
-      requestStutterState(target, true, lengthSelection);
-    }
+    applyStutterValue(target, value);
     return;
   }
   target = featureTargetFromBlock(id, FEATURE_KNOB_ECHO_WET_BASE);
   if (target < LIVE_TARGET_COUNT) {
-    firmware3Settings.liveTargets[target].echoWet =
-        static_cast<uint8_t>((static_cast<uint16_t>(value) * 100U + 63U) / 127U);
-    firmware3Settings.liveTargets[target].echoEnabled = 1;
-    ui.dirty = true;
+    applyEchoWetValue(target, value);
     return;
   }
   target = featureTargetFromBlock(id, FEATURE_KNOB_ECHO_LENGTH_BASE);
   if (target < LIVE_TARGET_COUNT) {
-    firmware3Settings.liveTargets[target].echoLength =
-        static_cast<uint8_t>((static_cast<uint16_t>(value) * (STUTTER_LENGTH_COUNT - 1U) + 63U) / 127U);
-    ui.dirty = true;
+    applyEchoLengthValue(target, value);
     return;
   }
   target = featureTargetFromBlock(id, FEATURE_KNOB_ECHO_DELAY_BASE);
   if (target < LIVE_TARGET_COUNT) {
-    firmware3Settings.liveTargets[target].echoDelay =
-        static_cast<uint8_t>((static_cast<uint16_t>(value) * (STUTTER_LENGTH_COUNT - 1U) + 63U) / 127U);
-    ui.dirty = true;
+    applyEchoDelayValue(target, value);
     return;
   }
   target = featureTargetFromBlock(id, FEATURE_KNOB_ECHO_DRIFT_BASE);
   if (target < LIVE_TARGET_COUNT) {
-    firmware3Settings.liveTargets[target].echoDrift = value <= 64
-        ? -static_cast<int8_t>((static_cast<uint16_t>(64U - value) * 16U + 32U) / 64U)
-        : static_cast<int8_t>((static_cast<uint16_t>(value - 64U) * 16U + 31U) / 63U);
-    ui.dirty = true;
+    applyEchoDriftValue(target, value);
     return;
   }
   if (id == FEATURE_KNOB_ARP_DIVISION) {
@@ -7570,14 +7742,26 @@ void triggerFeatureButton(uint8_t id, bool pressed) {
     return;
   }
   if (id >= FEATURE_BUTTON_STUTTER_DIV_BASE && id < FEATURE_BUTTON_STUTTER_DIV_END) {
-    static constexpr uint8_t divisions[STUTTER_BUTTON_DIVISION_COUNT] = {
-      DIV_1_2, DIV_1_4, DIV_1_8, DIV_1_16, DIV_1_32, DIV_1_64
-    };
+    // Straight, dotted, and triplet all included: DIV_1_2D..DIV_1_64T is one
+    // unbroken run in DivisionId, so the offset maps onto it directly.
     const uint8_t offset = id - FEATURE_BUTTON_STUTTER_DIV_BASE;
     target = offset / STUTTER_BUTTON_DIVISION_COUNT;
-    const uint8_t division = divisions[offset % STUTTER_BUTTON_DIVISION_COUNT];
+    const uint8_t division = DIV_1_2D + (offset % STUTTER_BUTTON_DIVISION_COUNT);
     requestStutterState(target, pressed,
         pressed ? lengthSelectionForDivision(division) : -1);
+    return;
+  }
+  if (id >= FEATURE_BUTTON_4B_LOOP_BASE && id < FEATURE_BUTTON_4B_LOOP_BASE + 4) {
+    // One-shot, same as the physical button's own single-press action: the
+    // two- and three-button hold gestures need more than one button down at
+    // once, which a single mapped trigger can never replicate.
+    if (pressed) handleLooperButton(id - FEATURE_BUTTON_4B_LOOP_BASE);
+    return;
+  }
+  if (id >= FEATURE_BUTTON_4B_CHORD_BASE && id < FEATURE_BUTTON_4B_CHORD_BASE + 4) {
+    // Chord Memory is momentary, so both edges matter here unlike the rest
+    // of this function's one-shot triggers below.
+    handleChordMemoryButton(id - FEATURE_BUTTON_4B_CHORD_BASE, pressed);
     return;
   }
   if (!pressed) return;
@@ -8754,6 +8938,40 @@ void updateControllerOutput(uint8_t sourcePort, uint8_t mode, bool inRange, uint
   const bool freezeMode = arpFreezeMode(mode);
   const bool loopRpMode = (mode == SENSOR_LOOP_REC_PLAY);
   const bool loopSdMode = (mode == SENSOR_LOOP_STOP_DELETE);
+
+  // Stutter, Echo, and the general Velocity/Note Length modes all drive the
+  // MAIN live target (0) continuously, exactly like turning the matching
+  // Feature Knob would: out of range reads the same as the knob sitting at
+  // 0, which is always off/neutral for every one of these.
+  if (mode == SENSOR_STUTTER || mode == SENSOR_ECHO_WET || mode == SENSOR_ECHO_TIME ||
+      mode == SENSOR_ECHO_LENGTH) {
+    const uint8_t value = inRange ? static_cast<uint8_t>(map(pct, 0, 100, 0, 127)) : 0;
+    if (mode == SENSOR_STUTTER) applyStutterValue(0, value);
+    else if (mode == SENSOR_ECHO_WET) applyEchoWetValue(0, value);
+    else if (mode == SENSOR_ECHO_TIME) applyEchoDelayValue(0, value);
+    else applyEchoLengthValue(0, value);
+    return;
+  }
+  if (mode == SENSOR_VEL_DOWN || mode == SENSOR_VEL_UP ||
+      mode == SENSOR_LEN_DOWN || mode == SENSOR_LEN_UP) {
+    LiveTargetSettings &live = firmware3Settings.liveTargets[0];
+    if (mode == SENSOR_VEL_DOWN) {
+      live.velocityEnabled = inRange;
+      live.velocityPercent = inRange ? applyDownByPercent(100, pct, 0) : 100;
+    } else if (mode == SENSOR_VEL_UP) {
+      live.velocityEnabled = inRange;
+      live.velocityPercent = inRange ? applyUpByPercent(100, pct, 200) : 100;
+    } else if (mode == SENSOR_LEN_DOWN) {
+      live.noteLengthEnabled = inRange;
+      live.noteLengthPercent = inRange ? applyDownByPercent(100, pct, 1) : 100;
+    } else {
+      live.noteLengthEnabled = inRange;
+      live.noteLengthPercent = inRange ? applyUpByPercent(100, pct, 200) : 100;
+    }
+    ui.dirty = true;
+    return;
+  }
+
   uint32_t *loopReleaseStartMs = nullptr;
   if (sourcePort == 253) loopReleaseStartMs = &sensorLoopReleaseStartMs;
   else if (sourcePort == 252) loopReleaseStartMs = &pushLoopReleaseStartMs;
@@ -9806,6 +10024,62 @@ String liveTargetName(uint8_t target) {
   return target == 0 ? String("MAIN") : String("LOOP ") + String(target);
 }
 
+// Packs (target, channel pointer) into Stutter/Echo's single Target field
+// selector space: 0 = MAIN, 1-16 = the Main/channel area's turn position,
+// 17-20 = Loop 1-4, 21 = SELECTD. Turning only ever moves this pointer; it
+// never touches the channel mask itself. Clicking while pointed at 1-16
+// toggles that channel in the mask and stays put (see
+// handleFirmware3SubmenuClick), so several channels can be picked in one
+// sitting. Clicking at 0 (MAIN) clears the mask and leaves the field, same
+// as clicking Loop 1-4 or SELECTD does for those.
+uint8_t targetSelectorEncode(uint8_t target, uint8_t channelCursor) {
+  if (target == SELECTD_LIVE_TARGET) return TARGET_SELECTOR_COUNT - 1;
+  if (target == 0) return channelCursor;
+  return 16U + target;
+}
+
+void targetSelectorDecode(uint8_t selector, uint8_t &target, uint8_t &channelCursor) {
+  if (selector >= TARGET_SELECTOR_COUNT - 1) {
+    target = SELECTD_LIVE_TARGET;
+    return;
+  }
+  if (selector <= 16) {
+    target = 0;
+    channelCursor = selector;
+    return;
+  }
+  target = selector - 16U;
+}
+
+// The aggregate summary shown whenever the field is not actively pointed at
+// a specific channel: every channel in the mask, comma-joined, or a bare
+// count once that would run too long for the screen.
+String targetSelectorName(uint8_t target, uint16_t channelMask) {
+  if (target != 0) return liveTargetName(target);
+  if (channelMask == 0) return String("MAIN");
+  uint8_t count = 0;
+  for (uint8_t ch = 1; ch <= 16; ++ch) {
+    if (channelMask & (1U << (ch - 1U))) ++count;
+  }
+  if (count > 4) return String(count) + " CH";
+  String out = "CH ";
+  bool first = true;
+  for (uint8_t ch = 1; ch <= 16; ++ch) {
+    if (!(channelMask & (1U << (ch - 1U)))) continue;
+    if (!first) out += ",";
+    out += String(ch);
+    first = false;
+  }
+  return out;
+}
+
+// The [x]/[ ] row shown while the pointer sits on one specific channel,
+// matching the Round Robin channel list's own checkbox convention.
+String targetChannelToggleLabel(uint16_t channelMask, uint8_t channel) {
+  const bool on = (channelMask & (1U << (channel - 1U))) != 0;
+  return String(on ? "[x] CH " : "[ ] CH ") + String(channel);
+}
+
 String featureKnobName(uint8_t id) {
   struct BlockName { uint8_t base; const char *name; };
   static const BlockName blocks[] = {
@@ -9864,12 +10138,10 @@ String featureButtonName(uint8_t id) {
   }
   if (id == FEATURE_BUTTON_QUICK_JUMP) return "QUICK JUMP";
   if (id >= FEATURE_BUTTON_STUTTER_DIV_BASE && id < FEATURE_BUTTON_STUTTER_DIV_END) {
-    static const char *const divisions[STUTTER_BUTTON_DIVISION_COUNT] = {
-      "1/2", "1/4", "1/8", "1/16", "1/32", "1/64"
-    };
     const uint8_t offset = id - FEATURE_BUTTON_STUTTER_DIV_BASE;
+    const uint8_t division = DIV_1_2D + (offset % STUTTER_BUTTON_DIVISION_COUNT);
     return liveTargetName(offset / STUTTER_BUTTON_DIVISION_COUNT) + " STUT " +
-        divisions[offset % STUTTER_BUTTON_DIVISION_COUNT];
+        kDivisionNames[division];
   }
   if (id == FEATURE_BUTTON_ARP_RETRIGGER) return "ARP RETRIGGER SYNC";
   if (id == FEATURE_BUTTON_ARP_NOTE_ORDER) return "ARP AS-PLAYED";
@@ -9886,6 +10158,12 @@ String featureButtonName(uint8_t id) {
   if (id >= FEATURE_BUTTON_QUICK_JUMP_CH_BASE &&
       id < FEATURE_BUTTON_QUICK_JUMP_CH_BASE + 16) {
     return String("JUMP TO CH ") + String(id - FEATURE_BUTTON_QUICK_JUMP_CH_BASE + 1U);
+  }
+  if (id >= FEATURE_BUTTON_4B_LOOP_BASE && id < FEATURE_BUTTON_4B_LOOP_BASE + 4) {
+    return String("4B Loop ") + String(id - FEATURE_BUTTON_4B_LOOP_BASE + 1U);
+  }
+  if (id >= FEATURE_BUTTON_4B_CHORD_BASE && id < FEATURE_BUTTON_4B_CHORD_BASE + 4) {
+    return String("4B Chord ") + String(id - FEATURE_BUTTON_4B_CHORD_BASE + 1U);
   }
   return "BUTTON";
 }
@@ -9988,7 +10266,7 @@ void drawFeaturesScreen() {
     // window to keep it visible; selecting a row opens the same detail view
     // this screen has always shown below, and turning again closes it back
     // to the list, scrolled to wherever that turn lands.
-    constexpr uint8_t kVisibleRows = 6;
+    constexpr uint8_t kVisibleRows = FEATURES_LIST_VISIBLE_ROWS;
     constexpr uint8_t kRowHeight = 8;
     uint8_t scrollTop = featuresItemCursor >= kVisibleRows
         ? featuresItemCursor - kVisibleRows + 1 : 0;
@@ -10371,8 +10649,10 @@ void drawLiveNoteLengthScreen() {
 void drawStutterScreen() {
   static const char *const names[] = {"DIVISION", "ON/OFF", "TIMEOUT", "TARGET", "BACK"};
   const LiveTargetSettings &target = firmware3Settings.liveTargets[stutterTarget];
+  const String stutterTargetLabel =
+      targetSelectorName(stutterTarget, firmware3Settings.mainStutterChannelMask);
   if (ui.menuMode == MENU_SELECT) {
-    drawSubmenuField("", liveTargetName(stutterTarget) + " " +
+    drawSubmenuField("", stutterTargetLabel + " " +
         (target.stutterEnabled
             ? compactLengthSelectionName(target.stutterLengthSelection) : String("OFF")), false);
     return;
@@ -10382,15 +10662,21 @@ void drawStutterScreen() {
   else if (stutterUi.cursor == 0) value = lengthSelectionName(target.stutterLengthSelection);
   else if (stutterUi.cursor == 1) value = onOff(target.stutterEnabled);
   else if (stutterUi.cursor == 2) value = String(firmware3Settings.stutterTimeoutBars) + " BARS";
-  else if (stutterUi.cursor == 3) value = liveTargetName(stutterTarget);
+  else if (stutterUi.cursor == 3) {
+    value = (stutterTarget == 0 && stutterChannelCursor >= 1 && stutterChannelCursor <= 16)
+        ? targetChannelToggleLabel(firmware3Settings.mainStutterChannelMask, stutterChannelCursor)
+        : stutterTargetLabel;
+  }
   drawSubmenuField(names[stutterUi.cursor], value, stutterUi.editing);
 }
 
 void drawEchoScreen() {
   static const char *const names[] = {"LENGTH", "ON/OFF", "WET", "DELAY", "DRIFT", "TARGET", "BACK"};
   const LiveTargetSettings &echo = firmware3Settings.liveTargets[echoTarget];
+  const String echoTargetLabel =
+      targetSelectorName(echoTarget, firmware3Settings.mainEchoChannelMask);
   if (ui.menuMode == MENU_SELECT) {
-    drawSubmenuField("", liveTargetName(echoTarget) + " " +
+    drawSubmenuField("", echoTargetLabel + " " +
         (echo.echoEnabled ? String("WET ") + String(echo.echoWet) + "%" : String("OFF")), false);
     return;
   }
@@ -10407,7 +10693,11 @@ void drawEchoScreen() {
   else if (echoUi.cursor == 1) value = onOff(echo.echoEnabled);
   else if (echoUi.cursor == 3) value = lengthSelectionName(echo.echoDelay);
   else if (echoUi.cursor == 4) value = String(echo.echoDrift);
-  else if (echoUi.cursor == 5) value = liveTargetName(echoTarget);
+  else if (echoUi.cursor == 5) {
+    value = (echoTarget == 0 && echoChannelCursor >= 1 && echoChannelCursor <= 16)
+        ? targetChannelToggleLabel(firmware3Settings.mainEchoChannelMask, echoChannelCursor)
+        : echoTargetLabel;
+  }
   drawSubmenuField(names[echoUi.cursor], value, echoUi.editing);
 }
 
